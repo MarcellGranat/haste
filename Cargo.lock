@@ -627,6 +627,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "haste-connector-beeper"
+version = "0.1.0"
+dependencies = [
+ "haste-core",
+ "haste-google-oauth",
+ "haste-proto",
+ "reqwest",
+ "rpassword",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "haste-connector-gcal"
 version = "0.1.0"
 dependencies = [

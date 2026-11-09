@@ -1,0 +1,323 @@
+//! The Beeper `Connector`: one registration per network (`whatsapp`, `messenger`, `imessage`),
+//! each with its own kill switch and cursor. Reads only selected chats of on-device accounts;
+//! sends only for the human, one request, never retried.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use haste_core::connector::{
+    Batch, BoxFuture, Capabilities, Connector, ConnectorError, Cursor, DraftToSend, SendReceipt,
+};
+use haste_core::model::{Message, Source, Thread};
+use serde::{Deserialize, Serialize};
+
+use crate::client::BeeperClient;
+use crate::config::BeeperConfig;
+use crate::consts::{
+    BEEPER_BACKFILL_PER_CHAT, BEEPER_MAX_CHATS_PER_CYCLE, BEEPER_MAX_PAGES_PER_CHAT,
+    BEEPER_MAX_SEND_BYTES, BEEPER_PAGE_SIZE, DAY_SECS,
+};
+pub use crate::mapper::BeeperSource;
+use crate::mapper::{map_message, Mapped};
+use crate::wire::{key_newer, WireAccount};
+
+/// Receives `(outcome, detail)` once per cycle. Details are counts and fixed labels only: never a
+/// chat name, message text, handle or account id.
+pub type CycleAudit = Arc<dyn Fn(&str, &str) + Send + Sync>;
+/// Unix seconds; tests substitute a fixed clock.
+pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
+
+/// Where each chat's read continues: chat id to the newest sort key stored.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeeperCursor {
+    #[serde(default)]
+    pub chats: BTreeMap<String, String>,
+}
+
+impl BeeperCursor {
+    #[must_use]
+    pub fn decode(raw: &str) -> Self {
+        serde_json::from_str(raw).unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn encode(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
+pub struct BeeperConnector {
+    which: BeeperSource,
+    client: Arc<BeeperClient>,
+    config: BeeperConfig,
+    audit: CycleAudit,
+    clock: Clock,
+}
+
+impl BeeperConnector {
+    #[must_use]
+    pub fn new(
+        which: BeeperSource,
+        client: Arc<BeeperClient>,
+        config: &BeeperConfig,
+        audit: CycleAudit,
+    ) -> Self {
+        Self {
+            which,
+            client,
+            config: config.clone(),
+            audit,
+            clock: Arc::new(haste_core::time::now_secs),
+        }
+    }
+
+    /// Replace the clock (tests).
+    #[must_use]
+    pub fn with_clock(mut self, clock: Clock) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// An account may be used only if its connection is on-device. A cloud connection is refused
+    /// whatever the settings say; when the API does not say, the human's attestation in
+    /// `beeper.json` stands in, and without it the account is refused too. Never a silent skip.
+    fn check_on_device(&self, account: &WireAccount) -> Result<&'static str, ConnectorError> {
+        match account.connection.as_deref().map(str::to_lowercase) {
+            Some(c) if c.contains("cloud") => {
+                Err(ConnectorError::Other("refused: cloud connection".into()))
+            }
+            Some(c) if c.contains("device") || c == "local" => Ok("on_device"),
+            _ if self
+                .config
+                .account(&account.id)
+                .is_some_and(|a| a.on_device_attested) =>
+            {
+                Ok("attested")
+            }
+            _ => Err(ConnectorError::Other(
+                "refused: connection type unknown; attest on-device in beeper.json".into(),
+            )),
+        }
+    }
+
+    /// The selected accounts of this source, each checked on-device, with how it was established.
+    async fn selected_accounts(&self) -> Result<Vec<(WireAccount, &'static str)>, ConnectorError> {
+        let mut out = Vec::new();
+        for account in self.client.accounts().await? {
+            if self.config.account(&account.id).is_none() {
+                continue; // not selected: never read
+            }
+            match BeeperSource::from_network(&account.network) {
+                Some(s) if s == self.which => {}
+                Some(_) => continue, // another registration handles it
+                None => {
+                    return Err(ConnectorError::Other("refused: unsupported network".into()));
+                }
+            }
+            let how = self.check_on_device(&account)?;
+            out.push((account, how));
+        }
+        Ok(out)
+    }
+
+    /// Read one chat's new messages: pages are bounded, nothing already stored is returned again,
+    /// and the first read is limited to the history window and the backfill cap.
+    async fn read_chat(
+        &self,
+        chat_id: &str,
+        after: Option<&str>,
+        now: i64,
+    ) -> Result<(Vec<Mapped>, usize), ConnectorError> {
+        let window_start = now - i64::from(self.config.history_days) * DAY_SECS;
+        let mut found: Vec<Mapped> = Vec::new();
+        let mut skipped = 0;
+        let mut cursor: Option<String> = None;
+        for _ in 0..BEEPER_MAX_PAGES_PER_CHAT {
+            let (items, more, next) = self
+                .client
+                .messages(chat_id, BEEPER_PAGE_SIZE, cursor.as_deref())
+                .await?;
+            let mut any_new = false;
+            for wire in &items {
+                let Some(mapped) = map_message(chat_id, &self.which.source(), wire) else {
+                    skipped += 1;
+                    continue;
+                };
+                let is_new = match after {
+                    Some(k) => key_newer(&mapped.sort_key, k),
+                    None => mapped.timestamp >= window_start,
+                };
+                if is_new {
+                    any_new = true;
+                    found.push(mapped);
+                }
+            }
+            match (more, next) {
+                (true, Some(n)) if any_new => cursor = Some(n),
+                _ => break,
+            }
+        }
+        if after.is_none() && found.len() > BEEPER_BACKFILL_PER_CHAT {
+            found.sort_by_key(|m| std::cmp::Reverse(m.timestamp));
+            found.truncate(BEEPER_BACKFILL_PER_CHAT);
+        }
+        Ok((found, skipped))
+    }
+
+    async fn run_cycle(&self, cursor: Option<Cursor>) -> Result<Batch, ConnectorError> {
+        let state = cursor
+            .map(|c| BeeperCursor::decode(&c.0))
+            .unwrap_or_default();
+        let now = (self.clock)();
+        let result = self.cycle(state, now).await;
+        if let Err(e) = &result {
+            (self.audit)(
+                match e {
+                    ConnectorError::Authorization(_) => "permission_needed",
+                    ConnectorError::Transient(_) => "transient",
+                    ConnectorError::Checkpoint(_) => "auth_or_setup",
+                    _ => "refused_or_error",
+                },
+                // a fixed label, never the error text (it could echo nothing private, but the
+                // rule is the same everywhere: counts and labels only)
+                match e {
+                    ConnectorError::Authorization(_) => "beeper_unavailable_or_token",
+                    ConnectorError::Other(m) if m.contains("cloud") => "cloud_connection",
+                    ConnectorError::Other(m) if m.contains("unknown") => "connection_type_unknown",
+                    ConnectorError::Other(m) if m.contains("unsupported") => "unsupported_network",
+                    _ => "error",
+                },
+            );
+        }
+        result
+    }
+
+    async fn cycle(&self, state: BeeperCursor, now: i64) -> Result<Batch, ConnectorError> {
+        let accounts = self.selected_accounts().await?;
+        let mut next = BeeperCursor::default();
+        let mut batch = Batch::default();
+        let (mut chats_read, mut skipped_chats, mut skipped_msgs) = (0_usize, 0_usize, 0_usize);
+        if !accounts.is_empty() {
+            let chats = self.client.chats().await?;
+            let selected: Vec<_> = chats
+                .into_iter()
+                .filter(|c| {
+                    accounts.iter().any(|(a, _)| a.id == c.account_id)
+                        && self.config.selects_chat(&c.id)
+                })
+                .collect();
+            skipped_chats = selected.len().saturating_sub(BEEPER_MAX_CHATS_PER_CYCLE);
+            for chat in selected.into_iter().take(BEEPER_MAX_CHATS_PER_CYCLE) {
+                let after = state.chats.get(&chat.id).cloned();
+                let (mapped, skipped) = self.read_chat(&chat.id, after.as_deref(), now).await?;
+                skipped_msgs += skipped;
+                chats_read += 1;
+                // keep the cursor where it was unless something newer arrived
+                let newest = mapped.iter().map(|m| m.sort_key.clone()).reduce(|a, b| {
+                    if key_newer(&b, &a) {
+                        b
+                    } else {
+                        a
+                    }
+                });
+                if let Some(k) = newest.clone().or(after) {
+                    next.chats.insert(chat.id.clone(), k);
+                }
+                if mapped.is_empty() {
+                    continue;
+                }
+                let mut participants: Vec<String> = Vec::new();
+                for m in &mapped {
+                    if let Some(s) = &m.message.sender_identifier {
+                        if !participants.contains(s) {
+                            participants.push(s.clone());
+                        }
+                    }
+                }
+                batch.threads.push(Thread {
+                    id: String::new(),
+                    source: self.which.source(),
+                    external_id: chat.id.clone(),
+                    subject: chat.title.clone(),
+                    participants,
+                    last_activity_at: mapped.iter().map(|m| m.timestamp).max().unwrap_or(0),
+                    version: 0,
+                });
+                batch.messages.extend(
+                    mapped
+                        .into_iter()
+                        .map(|m| m.message)
+                        .collect::<Vec<Message>>(),
+                );
+            }
+        }
+        (self.audit)(
+            "ok",
+            &format!(
+                "accounts={} chats={chats_read} messages={} skipped_chats={skipped_chats} skipped_messages={skipped_msgs}",
+                accounts.len(),
+                batch.messages.len()
+            ),
+        );
+        batch.next_cursor = Some(Cursor(next.encode()));
+        Ok(batch)
+    }
+
+    /// A human send into an existing, selected chat of an on-device account of this source. The
+    /// checks run before any message request; then exactly one `POST`, never retried.
+    async fn send_text(&self, draft: &DraftToSend) -> Result<SendReceipt, ConnectorError> {
+        let refused = |why: &str| ConnectorError::Other(format!("send refused: {why}"));
+        let chat_id = draft
+            .thread_id
+            .as_deref()
+            .ok_or_else(|| refused("no chat"))?;
+        if draft.body.trim().is_empty() || draft.body.len() > BEEPER_MAX_SEND_BYTES {
+            return Err(refused("body_length"));
+        }
+        if !self.config.selects_chat(chat_id) {
+            return Err(refused("chat not selected"));
+        }
+        let chat = self.client.chat(chat_id).await?;
+        let accounts = self.selected_accounts().await?;
+        if !accounts.iter().any(|(a, _)| a.id == chat.account_id) {
+            return Err(refused("account not selected or on another network"));
+        }
+        let id = self.client.send_message(chat_id, &draft.body).await?;
+        Ok(SendReceipt {
+            external_id: format!("beeper:{id}"),
+        })
+    }
+}
+
+impl Connector for BeeperConnector {
+    fn source(&self) -> Source {
+        self.which.source()
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            read: true,
+            // no provider drafts at Beeper; `send` is consulted only by the human path (the gate
+            // denies Action::Send to agents)
+            draft: false,
+            send: true,
+            archive: false,
+            ..Default::default()
+        }
+    }
+
+    fn default_engaged(&self) -> bool {
+        true
+    }
+
+    fn fetch(&self, cursor: Option<Cursor>) -> BoxFuture<'_, Result<Batch, ConnectorError>> {
+        Box::pin(self.run_cycle(cursor))
+    }
+
+    fn send<'a>(
+        &'a self,
+        draft: &'a DraftToSend,
+    ) -> BoxFuture<'a, Result<SendReceipt, ConnectorError>> {
+        Box::pin(self.send_text(draft))
+    }
+}

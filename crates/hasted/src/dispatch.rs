@@ -16,7 +16,7 @@ use haste_core::policy::{
 use haste_core::proposal::{NoteEntry, Payload};
 use haste_core::send::{
     classify as classify_send, recipients_digest, reply_subject, validate_recipients,
-    validate_subject, SendOutcome, MAX_SENDS_PER_HOUR, MAX_SEND_BODY_BYTES,
+    validate_subject, SendOutcome, MAX_SEND_BODY_BYTES,
 };
 use haste_core::time::now_secs;
 use haste_proto::{
@@ -1853,10 +1853,7 @@ fn send_preview(state: &State, proposal_id: &str, now: i64) -> Response {
         Ok(r) => r,
         Err(response) => return *response,
     };
-    let used = state
-        .store
-        .sends_in_window(now)
-        .unwrap_or(MAX_SENDS_PER_HOUR);
+    let remaining = state.store.sends_remaining(proposal_id, now).unwrap_or(0);
     Response::SendPreview {
         preview: SendPreviewView {
             source: resolved.source.as_name(),
@@ -1865,7 +1862,7 @@ fn send_preview(state: &State, proposal_id: &str, now: i64) -> Response {
             subject: resolved.subject,
             body_bytes: resolved.body.len(),
             stale: resolved.stale,
-            sends_remaining: MAX_SENDS_PER_HOUR.saturating_sub(used),
+            sends_remaining: remaining,
         },
     }
 }

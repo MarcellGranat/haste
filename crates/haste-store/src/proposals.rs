@@ -3,8 +3,9 @@
 
 use haste_core::auth::new_id;
 use haste_core::model::ObjectKind;
+use haste_core::model::Source;
 use haste_core::proposal::{transition, Payload, Proposal, ProposalState};
-use haste_core::send::{MAX_SENDS_PER_HOUR, SEND_WINDOW_SECS};
+use haste_core::send::{SendScope, SEND_DAY_WINDOW_SECS, SEND_WINDOW_SECS};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::inbox::{apply_triage, thread_version, TriageUpdate};
@@ -118,6 +119,48 @@ pub(crate) fn refresh_stale(conn: &Connection, p: &Proposal) -> StoreResult<bool
         )?;
     }
     Ok(stale)
+}
+
+/// The limits a proposal's send falls under, from its source thread (mail when it has none).
+fn scope_of(conn: &Connection, p: &Proposal) -> StoreResult<SendScope> {
+    let Some(thread_id) = &p.source_thread_id else {
+        return Ok(SendScope::Mail);
+    };
+    let name: Option<String> = conn
+        .query_row(
+            "SELECT source FROM threads WHERE id = ?1",
+            [thread_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let source = Source::from(name.unwrap_or_default());
+    SendScope::of(&source)
+        .ok_or_else(|| StoreError::IllegalTransition("this source cannot be sent to".into()))
+}
+
+/// `(sends in the last hour, sends in the last day)` for a scope. Sends that began (`executing`
+/// included) count, so a crash cannot reset the limit; sources of the same scope count together.
+fn counts(conn: &Connection, scope: SendScope, now: i64) -> StoreResult<(u32, u32)> {
+    let names = scope
+        .sources()
+        .iter()
+        .map(|n| format!("'{n}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let count = |window: i64| -> StoreResult<u32> {
+        let n: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM proposals p LEFT JOIN threads t ON t.id = p.source_thread_id \
+                 WHERE p.send_started_at IS NOT NULL AND p.send_started_at > ?1 \
+                 AND (t.source IN ({names}) OR (t.source IS NULL AND {}))",
+                matches!(scope, SendScope::Mail)
+            ),
+            [now - window],
+            |r| r.get(0),
+        )?;
+        Ok(u32::try_from(n).unwrap_or(u32::MAX))
+    };
+    Ok((count(SEND_WINDOW_SECS)?, count(SEND_DAY_WINDOW_SECS)?))
 }
 
 impl Store {
@@ -362,7 +405,7 @@ impl Store {
     /// Begin a human send, in one transaction: the proposal must be an approved mail draft, the
     /// stale flag must be acknowledged when set, and fewer than [`MAX_SENDS_PER_HOUR`] sends may
     /// have started in the last [`SEND_WINDOW_SECS`] (`executing` sends count, so a crash cannot
-    /// reset the limit). The resolved recipients are stored once and never rewritten, then the
+    /// reset the limit). Chat sources also have a daily cap, and count together. The resolved recipients are stored once and never rewritten, then the
     /// proposal moves to `executing`.
     ///
     /// # Errors
@@ -393,12 +436,9 @@ impl Store {
                 tx.commit()?;
                 return Err(StoreError::StaleNeedsAcknowledgement);
             }
-            let recent: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM proposals WHERE send_started_at IS NOT NULL AND send_started_at > ?1",
-                [now - SEND_WINDOW_SECS],
-                |r| r.get(0),
-            )?;
-            if recent >= i64::from(MAX_SENDS_PER_HOUR) {
+            let scope = scope_of(&tx, &p)?;
+            let (hour, day) = counts(&tx, scope, now)?;
+            if hour >= scope.max_per_hour() || scope.max_per_day().is_some_and(|max| day >= max) {
                 return Err(StoreError::Validation("rate_limited".into()));
             }
             tx.execute(
@@ -411,18 +451,21 @@ impl Store {
         })
     }
 
-    /// How many sends began in the last [`SEND_WINDOW_SECS`] (the number the hourly limit uses).
+    /// How many sends a proposal's scope may still make right now (the smaller of the hourly and
+    /// daily allowances).
     ///
     /// # Errors
-    /// Database errors.
-    pub fn sends_in_window(&self, now: i64) -> StoreResult<u32> {
+    /// Database errors, or [`StoreError::NotFound`] for an unknown proposal.
+    pub fn sends_remaining(&self, id: &str, now: i64) -> StoreResult<u32> {
+        let id = id.to_owned();
         self.read(move |conn| {
-            let n: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM proposals WHERE send_started_at IS NOT NULL AND send_started_at > ?1",
-                [now - SEND_WINDOW_SECS],
-                |r| r.get(0),
-            )?;
-            Ok(u32::try_from(n).unwrap_or(u32::MAX))
+            let p = load(conn, &id)?;
+            let scope = scope_of(conn, &p)?;
+            let (hour, day) = counts(conn, scope, now)?;
+            let left_hour = scope.max_per_hour().saturating_sub(hour);
+            Ok(scope
+                .max_per_day()
+                .map_or(left_hour, |max| left_hour.min(max.saturating_sub(day))))
         })
     }
 
@@ -634,6 +677,7 @@ mod tests {
     use crate::test_store;
     use haste_core::model::Source;
     use haste_core::proposal::DEFAULT_TTL_SECS;
+    use haste_core::send::MAX_SENDS_PER_HOUR;
 
     fn draft(store: &Store, key: &str, thread: Option<&str>) -> (Proposal, bool, Vec<Proposal>) {
         store
@@ -815,6 +859,91 @@ mod tests {
         // an hour later the window has passed
         s.begin_send(&extra.id, false, now + SEND_WINDOW_SECS + 100, &recipient())
             .unwrap();
+    }
+
+    /// An approved draft on a thread of the given source.
+    fn approved_on(s: &Store, source: &Source, key: &str, now: i64) -> String {
+        let t = s
+            .upsert_thread(source, &format!("ext-{key}"), "chat", &[], 1)
+            .unwrap()
+            .id;
+        let (p, _, _) = draft(s, key, Some(&t));
+        s.approve_proposal(&p.id, false, now).unwrap();
+        p.id
+    }
+
+    #[test]
+    fn chat_sends_have_a_stricter_hourly_cap_a_daily_cap_and_count_the_three_networks_together() {
+        use haste_core::send::{CHAT_MAX_SENDS_PER_DAY, CHAT_MAX_SENDS_PER_HOUR, SEND_WINDOW_SECS};
+        let (_d, s) = test_store();
+        let now = 1_000_000;
+        let sources = [Source::Whatsapp, Source::Messenger, Source::Imessage];
+        // fill the hourly cap, spread across the three networks
+        for i in 0..CHAT_MAX_SENDS_PER_HOUR {
+            let id = approved_on(&s, &sources[i as usize % 3], &format!("h{i}"), now);
+            s.begin_send(&id, false, now + i64::from(i), &["chat".into()])
+                .unwrap();
+        }
+        let over = approved_on(&s, &Source::Whatsapp, "over", now);
+        assert!(matches!(
+            s.begin_send(&over, false, now + 100, &["chat".into()]),
+            Err(StoreError::Validation(m)) if m == "rate_limited"
+        ));
+        assert_eq!(s.sends_remaining(&over, now + 100).unwrap(), 0);
+        // mail is a separate budget: a Gmail send is still allowed
+        let mail = approved_on(&s, &Source::Gmail, "mail", now);
+        assert_eq!(s.sends_remaining(&mail, now + 100).unwrap(), 10);
+        s.begin_send(&mail, false, now + 100, &["a@b.co".into()])
+            .unwrap();
+        // an hour later the hourly window is clear, but the day still counts what was sent
+        let mut t = now + SEND_WINDOW_SECS + 1000;
+        let mut sent_today = CHAT_MAX_SENDS_PER_HOUR;
+        while sent_today < CHAT_MAX_SENDS_PER_DAY {
+            for i in 0..CHAT_MAX_SENDS_PER_HOUR.min(CHAT_MAX_SENDS_PER_DAY - sent_today) {
+                let id = approved_on(
+                    &s,
+                    &sources[i as usize % 3],
+                    &format!("d{sent_today}-{i}"),
+                    t,
+                );
+                s.begin_send(&id, false, t, &["chat".into()]).unwrap();
+                sent_today += 1;
+            }
+            t += SEND_WINDOW_SECS + 10;
+        }
+        let capped = approved_on(&s, &Source::Messenger, "capped", t);
+        assert_eq!(
+            s.sends_remaining(&capped, t).unwrap(),
+            0,
+            "the hour is clear but the daily cap is reached"
+        );
+        assert!(matches!(
+            s.begin_send(&capped, false, t, &["chat".into()]),
+            Err(StoreError::Validation(m)) if m == "rate_limited"
+        ));
+    }
+
+    #[test]
+    fn a_chat_thread_without_a_recipient_is_stored_with_its_source_and_external_id() {
+        let (_d, s) = test_store();
+        let t = s
+            .upsert_thread(&Source::Whatsapp, "chat-id-1", "Family", &[], 5)
+            .unwrap();
+        let (found, _) = s.get_thread(&t.id).unwrap().unwrap();
+        assert_eq!(
+            (found.source, found.external_id.as_str()),
+            (Source::Whatsapp, "chat-id-1")
+        );
+        // a source that cannot be sent to refuses to begin a send
+        let r = s
+            .upsert_thread(&Source::Reminders, "x", "n", &[], 5)
+            .unwrap();
+        let (p, _, _) = draft(&s, "rk", Some(&r.id));
+        s.approve_proposal(&p.id, false, 10).unwrap();
+        assert!(matches!(
+            s.begin_send(&p.id, false, 20, &["x".into()]),
+            Err(StoreError::IllegalTransition(_))
+        ));
     }
 
     #[test]

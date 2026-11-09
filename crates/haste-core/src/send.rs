@@ -4,6 +4,7 @@
 use sha2::{Digest, Sha256};
 
 use crate::connector::{CallError, ConnectorError};
+use crate::model::Source;
 
 /// Recipients per send. One in v1: no Cc, no Bcc, no reply-all.
 pub const MAX_RECIPIENTS: usize = 1;
@@ -17,6 +18,61 @@ pub const MAX_SENDS_PER_HOUR: u32 = 10;
 pub const SEND_WINDOW_SECS: i64 = 3600;
 /// Time allowed for one network operation of a send.
 pub const SEND_TIMEOUT_SECS: u64 = 30;
+
+/// Chat sends (WhatsApp, Messenger, iMessage together) per hour: stricter than mail, because the
+/// networks can suspend an account that sends too much.
+pub const CHAT_MAX_SENDS_PER_HOUR: u32 = 5;
+/// Chat sends per day, across all chat sources together.
+pub const CHAT_MAX_SENDS_PER_DAY: u32 = 20;
+/// The day window the chat limit looks back over.
+pub const SEND_DAY_WINDOW_SECS: i64 = 86_400;
+
+/// Which family of limits a send falls under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendScope {
+    /// Gmail and iCloud.
+    Mail,
+    /// WhatsApp, Messenger and iMessage (through Beeper).
+    Chat,
+}
+
+impl SendScope {
+    /// The scope a source is sent under, or `None` when it cannot be sent to at all.
+    #[must_use]
+    pub fn of(source: &Source) -> Option<Self> {
+        match source {
+            Source::Gmail | Source::Icloud | Source::Email => Some(Self::Mail),
+            Source::Whatsapp | Source::Messenger | Source::Imessage => Some(Self::Chat),
+            _ => None,
+        }
+    }
+
+    /// The source names counted together against this scope's limits.
+    #[must_use]
+    pub fn sources(self) -> &'static [&'static str] {
+        match self {
+            Self::Mail => &["gmail", "icloud", "email"],
+            Self::Chat => &["whatsapp", "messenger", "imessage"],
+        }
+    }
+
+    #[must_use]
+    pub fn max_per_hour(self) -> u32 {
+        match self {
+            Self::Mail => MAX_SENDS_PER_HOUR,
+            Self::Chat => CHAT_MAX_SENDS_PER_HOUR,
+        }
+    }
+
+    /// Only chats have a daily cap.
+    #[must_use]
+    pub fn max_per_day(self) -> Option<u32> {
+        match self {
+            Self::Mail => None,
+            Self::Chat => Some(CHAT_MAX_SENDS_PER_DAY),
+        }
+    }
+}
 
 /// What a failed send certainly (or possibly) did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,6 +312,28 @@ mod tests {
             validate_address(&format!("{}@b.co", "x".repeat(260))),
             Err("address_length")
         );
+    }
+
+    #[test]
+    fn chat_sends_have_their_own_stricter_limits_and_mail_has_no_daily_cap() {
+        use crate::model::Source::{Gmail, Icloud, Imessage, Messenger, Reminders, Whatsapp};
+        assert_eq!(SendScope::of(&Gmail), Some(SendScope::Mail));
+        assert_eq!(SendScope::of(&Icloud), Some(SendScope::Mail));
+        for s in [Whatsapp, Messenger, Imessage] {
+            assert_eq!(SendScope::of(&s), Some(SendScope::Chat));
+        }
+        assert_eq!(
+            SendScope::of(&Reminders),
+            None,
+            "reminders are not sendable"
+        );
+        assert!(SendScope::Chat.max_per_hour() < SendScope::Mail.max_per_hour());
+        assert_eq!(SendScope::Chat.max_per_day(), Some(CHAT_MAX_SENDS_PER_DAY));
+        assert_eq!(SendScope::Mail.max_per_day(), None);
+        assert!(SendScope::Chat
+            .sources()
+            .iter()
+            .all(|n| !SendScope::Mail.sources().contains(n)));
     }
 
     #[test]

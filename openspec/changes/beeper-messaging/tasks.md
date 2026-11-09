@@ -13,43 +13,43 @@
 
 ## 2. Core constants and dependencies
 
-- [ ] 2.1 Confirm `email-send` is archived or merged; if not, stop this change at section 6 and mark it blocked
-- [ ] 2.2 Add `BEEPER_*` constants (base URL, send caps, send windows, request timeout, poll interval, page size, page and chat limits, backfill cap, body cap, history window) in `haste-connector-beeper::consts`, with a test that the caps are non-zero and `BEEPER_MAX_SEND_BYTES` is at most `MAX_SEND_BODY_BYTES` of haste-core
-- [ ] 2.3 Confirm `Source::Whatsapp`, `Source::Messenger` and `Source::Imessage` round-trip by name in `haste-core`
-- [ ] 2.4 Confirm the default-engaged flag on the connector descriptor (provided by the connector framework) is available for three registrations
+- [x] 2.1 Confirm `email-send` is archived or merged; if not, stop this change at section 6 and mark it blocked
+- [x] 2.2 Add `BEEPER_*` constants (base URL, send caps, send windows, request timeout, poll interval, page size, page and chat limits, backfill cap, body cap, history window) in `haste-connector-beeper::consts`, with a test that the caps are non-zero and `BEEPER_MAX_SEND_BYTES` is at most `MAX_SEND_BODY_BYTES` of haste-core
+- [x] 2.3 Confirm `Source::Whatsapp`, `Source::Messenger` and `Source::Imessage` round-trip by name in `haste-core`
+- [x] 2.4 Confirm the default-engaged flag on the connector descriptor (provided by the connector framework) is available for three registrations
 
 ## 3. Store (haste-store)
 
-- [ ] 3.1 Confirm the send-lifecycle columns from `email-send` (`send_started_at`, `send_outcome`) are used for Beeper sends; add a source column filter for the caps if missing
-- [ ] 3.2 Implement the per-source send window count over `executing` and `sent` rows whose `send_started_at` falls in the window
-- [ ] 3.3 Store tests: hourly and daily counts include `executing`, survive reopening the database, and count only the given source
-- [ ] 3.4 Store test: a Beeper chat thread with `to` empty is stored and retrieved with its source and external id
+- [x] 3.1 Confirm the send-lifecycle columns from `email-send` (`send_started_at`, `send_outcome`) are used for Beeper sends; add a source column filter for the caps if missing
+- [x] 3.2 Implement the per-source send window count over `executing` and `sent` rows whose `send_started_at` falls in the window
+- [x] 3.3 Store tests: hourly and daily counts include `executing`, survive reopening the database, and count only the given source
+- [x] 3.4 Store test: a Beeper chat thread with `to` empty is stored and retrieved with its source and external id
 
 ## 4. Beeper client, token and config (haste-connector-beeper)
 
-- [ ] 4.1 Create the crate `crates/haste-connector-beeper` with the `Connector` implementation per source and the `beeper` helper binary for the auth verb (human build)
-- [ ] 4.2 Implement `beeper.json` loading with unknown-key rejection, the account and chat allow-list and deny-list, `on_device_attested`, `history_days` (cap 90) and the loopback-only base URL override, with tests for each refusal
-- [ ] 4.3 Implement the Keychain token store under `com.haste.beeper` (account `api-token`) through the existing wrapper, with an in-memory fake for tests
-- [ ] 4.4 Implement the auth helper: read the token without echo, check it with the chosen authenticated call, store it only on success; a failed check stores nothing
-- [ ] 4.5 Implement the HTTP client on loopback with redirects disabled, `BEEPER_REQUEST_TIMEOUT`, no retry and one error classifier mapping connection refused to `Authorization` "Beeper Desktop not running", 401 and 403 to `Authorization` "Beeper token rejected", 429 and 5xx by the send or read rules
-- [ ] 4.6 Test: a non-loopback URL is refused before any connection; a redirect is not followed; the token is never in an error string
+- [x] 4.1 Create the crate `crates/haste-connector-beeper` with the `Connector` implementation per source and the `beeper` helper binary for the auth verb (human build)
+- [x] 4.2 Implement `beeper.json` loading with unknown-key rejection, the account and chat allow-list and deny-list, `on_device_attested`, `history_days` (cap 90) and the loopback-only base URL override, with tests for each refusal
+- [x] 4.3 Implement the Keychain token store under `com.haste.beeper` (account `api-token`) through the existing wrapper, with an in-memory fake for tests
+- [x] 4.4 Implement the auth helper: read the token without echo, check it with the chosen authenticated call, store it only on success; a failed check stores nothing
+- [x] 4.5 Implement the HTTP client on loopback with redirects disabled, `BEEPER_REQUEST_TIMEOUT`, no retry and one error classifier mapping connection refused to `Authorization` "Beeper Desktop not running", 401 and 403 to `Authorization` "Beeper token rejected", 429 and 5xx by the send or read rules
+- [x] 4.6 Test: a non-loopback URL is refused before any connection; a redirect is not followed; the token is never in an error string
 
 ## 5. Read path (haste-connector-beeper)
 
-- [ ] 5.1 Implement the on-device check per account (cloud refusal, attestation fallback, unknown refusal) and run it before every cycle
-- [ ] 5.2 Implement the network-to-source mapping with the exact spike values and the "unsupported network" refusal
-- [ ] 5.3 Implement the chat list and message list mappers to `Thread`, `Message` and `Person`, with body truncation at a UTF-8 boundary and the `[attachment]` label
-- [ ] 5.4 Implement the per-chat cursor (chat id to sort key) encoded in the connector cursor, the first-sync history window and backfill cap, the page and chat limits, and idempotent upserts
-- [ ] 5.5 Implement the counts-only cycle audit with skipped-chat reason labels
-- [ ] 5.6 Build the fake Beeper server on loopback (accounts, chats, messages, send, info, failure injection per endpoint) and record requests without bodies
-- [ ] 5.7 Read tests: unselected chat not requested, deny wins, backfill cap, truncation, attachment label, delta cycle, idempotent re-read, cloud account refused, unknown type refused, not-running is Authorization with no breaker, and audit has no text
+- [x] 5.1 Implement the on-device check per account (cloud refusal, attestation fallback, unknown refusal) and run it before every cycle
+- [x] 5.2 Implement the network-to-source mapping with the exact spike values and the "unsupported network" refusal
+- [x] 5.3 Implement the chat list and message list mappers to `Thread`, `Message` and `Person`, with body truncation at a UTF-8 boundary and the `[attachment]` label
+- [x] 5.4 Implement the per-chat cursor (chat id to sort key) encoded in the connector cursor, the first-sync history window and backfill cap, the page and chat limits, and idempotent upserts
+- [x] 5.5 Implement the counts-only cycle audit with skipped-chat reason labels
+- [x] 5.6 Build the fake Beeper server on loopback (accounts, chats, messages, send, info, failure injection per endpoint) and record requests without bodies
+- [x] 5.7 Read tests: unselected chat not requested, deny wins, backfill cap, truncation, attachment label, delta cycle, idempotent re-read, cloud account refused, unknown type refused, not-running is Authorization with no breaker, and audit has no text
 
 ## 6. Human-only send path
 
-- [ ] 6.1 Implement the send request builder: one `POST /v1/chats/{chatID}/messages` with the text only, refusing an attachment field and any chat not selected
+- [x] 6.1 Implement the send request builder: one `POST /v1/chats/{chatID}/messages` with the text only, refusing an attachment field and any chat not selected
 - [ ] 6.2 Implement the digest over chat id, displayed name and body SHA-256 (reuse the `recipients_digest` helper of `email-send`) with a test that a name change alters it
-- [ ] 6.3 Implement the outcome classification table of design D8 onto `SendOutcome` (`NoEffect`, `Ambiguous`, `Sent`) and the `Authorization` and `Checkpoint` mapping
-- [ ] 6.4 Implement the send method on each Beeper connector, performing exactly one request, with no retry, and the on-device and selection checks before any request
+- [x] 6.3 Implement the outcome classification table of design D8 onto `SendOutcome` (`NoEffect`, `Ambiguous`, `Sent`) and the `Authorization` and `Checkpoint` mapping
+- [x] 6.4 Implement the send method on each Beeper connector, performing exactly one request, with no retry, and the on-device and selection checks before any request
 - [ ] 6.5 Send tests: one request on success, no request on refusal before send (cloud, unselected, kill switch, cap, digest mismatch), 401 returns to approved with no retry, connection refused returns to approved, 429 returns to approved, timeout after write is ambiguous, 2xx without id is ambiguous, 400 returns to approved, 403 restriction opens the breaker
 
 ## 7. Daemon wiring and dispatch (hasted)

@@ -227,6 +227,75 @@ impl GmailClient {
         self.get("/gmail/v1/users/me/history", &query).await
     }
 
+    /// Send a message (`users.messages.send`): exactly one HTTP request, never retried. The
+    /// outcome is classified for the at-most-once rule: a refusal that certainly delivered
+    /// nothing is `Other("send refused: …")` or `Transient` (could not connect), a restriction
+    /// is `Checkpoint`/`Challenge`, and anything that may have reached Gmail (a 5xx, a timeout,
+    /// an unreadable answer) is `Ambiguous`.
+    ///
+    /// # Errors
+    /// Classified [`ConnectorError`].
+    pub async fn send_message(
+        &self,
+        raw: &str,
+        thread_id: Option<&str>,
+    ) -> Result<String, ConnectorError> {
+        // Before the request: a token problem means nothing was sent.
+        let token = self.tokens.access_token().await?;
+        let mut body = serde_json::json!({ "raw": raw });
+        if let Some(t) = thread_id {
+            body["threadId"] = serde_json::Value::String(t.to_owned());
+        }
+        let response = self
+            .http
+            .post(format!("{}/gmail/v1/users/me/messages/send", self.base))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_connect() {
+                    ConnectorError::Transient("gmail unreachable".into())
+                } else {
+                    ConnectorError::Ambiguous("send outcome unknown".into())
+                }
+            })?;
+        let status = response.status().as_u16();
+        let text = response.text().await.unwrap_or_default();
+        match status {
+            200..=299 => serde_json::from_str::<DraftCreated>(&text)
+                .map(|m| m.id)
+                .map_err(|_| ConnectorError::Ambiguous("send answer unreadable".into())),
+            400..=499 => Err(match classify(status, &text) {
+                e @ (ConnectorError::Checkpoint(_) | ConnectorError::Challenge(_)) => e,
+                _ => ConnectorError::Other(format!("send refused: http {status}")),
+            }),
+            _ => Err(ConnectorError::Ambiguous(format!("http {status}"))),
+        }
+    }
+
+    /// Delete a provider draft (`users.drafts.delete`). One request, errors returned to be ignored
+    /// by the caller: this is cleanup after a successful send and is never retried.
+    ///
+    /// # Errors
+    /// Classified [`ConnectorError`].
+    pub async fn delete_draft(&self, id: &str) -> Result<(), ConnectorError> {
+        let token = self.tokens.access_token().await?;
+        let response = self
+            .http
+            .delete(format!("{}/gmail/v1/users/me/drafts/{id}", self.base))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| {
+                ConnectorError::Transient(format!("gmail unreachable: {}", e.without_url()))
+            })?;
+        match response.status().as_u16() {
+            200..=299 | 404 => Ok(()),
+            s => Err(ConnectorError::Other(format!("http {s}"))),
+        }
+    }
+
     /// Create a draft from a base64url MIME message, optionally inside a thread.
     ///
     /// # Errors

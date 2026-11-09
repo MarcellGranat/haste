@@ -9,6 +9,7 @@ pub mod model;
 pub mod notes;
 pub mod policy;
 pub mod proposal;
+pub mod send;
 pub mod time;
 
 pub use model::{

@@ -97,6 +97,22 @@ impl Harness {
             .id
     }
 
+    /// The digest the daemon's preview gives for a send, as the TUI would pass it back.
+    async fn preview_digest(&self, id: &str) -> String {
+        match self
+            .call(
+                &self.human,
+                RequestBody::SendPreview {
+                    proposal_id: id.into(),
+                },
+            )
+            .await
+        {
+            Response::SendPreview { preview } => preview.recipients_digest,
+            other => panic!("{other:?}"),
+        }
+    }
+
     fn audit_text(&self) -> String {
         fs::read_to_string(self.daemon.state.config.audit_path()).unwrap_or_default()
     }
@@ -132,6 +148,7 @@ fn draft(thread: &str, key: &str) -> RequestBody {
 
 struct TestConnector {
     send: bool,
+    calls: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl Connector for TestConnector {
@@ -154,6 +171,7 @@ impl Connector for TestConnector {
         &'a self,
         _d: &'a DraftToSend,
     ) -> BoxFuture<'a, Result<SendReceipt, ConnectorError>> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async {
             Ok(SendReceipt {
                 external_id: "gm-1".into(),
@@ -232,6 +250,7 @@ async fn forged_send_is_denied_and_audited() {
             RequestBody::Send {
                 proposal_id: "x".into(),
                 acknowledge_stale: true,
+                recipients_digest: "x".into(),
             },
         )
         .await;
@@ -408,25 +427,34 @@ async fn proposal_status_is_scoped_to_owner() {
 #[tokio::test]
 async fn approve_then_send_and_result_delivery() {
     let h = boot().await;
-    h.daemon
-        .state
-        .register_connector(Arc::new(TestConnector { send: true }));
+    let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    h.daemon.state.register_connector(Arc::new(TestConnector {
+        send: true,
+        calls: calls.clone(),
+    }));
     let thread = h.seed_thread();
     let agent = h.register("agent-a", &AGENT_ACTIONS).await;
     let id = match h.call(&agent, draft(&thread, "k")).await {
         Response::Proposal { proposal } => proposal.id,
         other => panic!("{other:?}"),
     };
-    // Send before approval is refused.
-    let early = h
+    let digest = haste_core::send::recipients_digest(&["ana@x.org".to_owned()]);
+    let send = |digest: String| RequestBody::Send {
+        proposal_id: id.clone(),
+        acknowledge_stale: false,
+        recipients_digest: digest,
+    };
+    // Preview and send before approval are refused, and nothing is called.
+    let early_preview = h
         .call(
             &h.human,
-            RequestBody::Send {
+            RequestBody::SendPreview {
                 proposal_id: id.clone(),
-                acknowledge_stale: false,
             },
         )
         .await;
+    assert_eq!(code(&early_preview), Some(ErrorCode::IllegalTransition));
+    let early = h.call(&h.human, send(digest.clone())).await;
     assert_eq!(code(&early), Some(ErrorCode::IllegalTransition));
     // Approval does not send.
     let approved = h
@@ -441,18 +469,31 @@ async fn approve_then_send_and_result_delivery() {
     assert!(
         matches!(&approved, Response::Proposal { proposal } if proposal.state == ProposalState::Approved)
     );
-    let sent = h
-        .call(
-            &h.human,
-            RequestBody::Send {
-                proposal_id: id.clone(),
-                acknowledge_stale: false,
-            },
-        )
-        .await;
-    assert!(
-        matches!(&sent, Response::Proposal { proposal } if proposal.state == ProposalState::Sent)
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    // A digest that does not match what the daemon resolves is refused: nothing is called.
+    let wrong = h.call(&h.human, send("not-the-digest".into())).await;
+    assert_eq!(code(&wrong), Some(ErrorCode::Validation));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        h.daemon.state.store.get_proposal(&id).unwrap().state,
+        ProposalState::Approved
     );
+    // The preview carries the digest the human then confirms.
+    let shown = h.preview_digest(&id).await;
+    assert_eq!(shown, digest);
+    let sent = h.call(&h.human, send(shown.clone())).await;
+    assert!(
+        matches!(&sent, Response::Proposal { proposal } if proposal.state == ProposalState::Sent
+            && proposal.result.as_deref() == Some("sent:gm-1")),
+        "{sent:?}"
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // Never twice.
+    let again = h.call(&h.human, send(shown)).await;
+    assert_eq!(code(&again), Some(ErrorCode::IllegalTransition));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // No address ever reaches the audit.
+    assert!(!h.audit_text().contains("ana@x.org"));
 
     let mut last = HashMap::new();
     assert_eq!(run_delivery(&h.daemon.state, &mut last).await, 1);
@@ -547,9 +588,11 @@ async fn delivery_failures_stop_after_three_attempts() {
 #[tokio::test]
 async fn kill_switch_blocks_send() {
     let h = boot().await;
-    h.daemon
-        .state
-        .register_connector(Arc::new(TestConnector { send: true }));
+    let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    h.daemon.state.register_connector(Arc::new(TestConnector {
+        send: true,
+        calls: calls.clone(),
+    }));
     h.daemon
         .state
         .store
@@ -575,14 +618,18 @@ async fn kill_switch_blocks_send() {
             RequestBody::Send {
                 proposal_id: id.clone(),
                 acknowledge_stale: false,
+                recipients_digest: haste_core::send::recipients_digest(&["ana@x.org".to_owned()]),
             },
         )
         .await;
     assert_eq!(code(&r), Some(ErrorCode::Denied));
+    // nothing was sent, and the proposal went back to approved so it can be sent later
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert_eq!(
         h.daemon.state.store.get_proposal(&id).unwrap().state,
         ProposalState::Approved
     );
+    assert!(h.audit_text().contains("kill_switch_engaged"));
     h.daemon.shutdown().await;
 }
 
@@ -724,4 +771,184 @@ async fn startup_refuses_loose_socket_directory_and_binds_no_network() {
     let started = Instant::now();
     daemon.shutdown().await;
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+// ------------------------------------------------------------------ send failure paths
+
+/// A Gmail-shaped connector whose send always fails the same way, counting its calls.
+struct FailingConnector {
+    error: ConnectorError,
+    calls: Arc<std::sync::atomic::AtomicU32>,
+}
+
+impl Connector for FailingConnector {
+    fn source(&self) -> Source {
+        Source::Gmail
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            read: true,
+            send: true,
+            ..Default::default()
+        }
+    }
+    fn fetch(&self, _c: Option<Cursor>) -> BoxFuture<'_, Result<Batch, ConnectorError>> {
+        Box::pin(async { Ok(Batch::default()) })
+    }
+    fn send<'a>(
+        &'a self,
+        _d: &'a DraftToSend,
+    ) -> BoxFuture<'a, Result<SendReceipt, ConnectorError>> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let error = self.error.clone();
+        Box::pin(async move { Err(error) })
+    }
+}
+
+async fn approved_draft(h: &Harness, agent: &str, thread: &str, key: &str) -> String {
+    let id = match h.call(agent, draft(thread, key)).await {
+        Response::Proposal { proposal } => proposal.id,
+        other => panic!("{other:?}"),
+    };
+    h.call(
+        &h.human,
+        RequestBody::Approve {
+            proposal_id: id.clone(),
+            acknowledge_stale: false,
+        },
+    )
+    .await;
+    id
+}
+
+fn send_body(id: &str) -> RequestBody {
+    RequestBody::Send {
+        proposal_id: id.into(),
+        acknowledge_stale: false,
+        recipients_digest: haste_core::send::recipients_digest(&["ana@x.org".to_owned()]),
+    }
+}
+
+#[tokio::test]
+async fn a_refused_send_returns_to_approved_and_may_be_tried_again() {
+    let h = boot().await;
+    let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    h.daemon
+        .state
+        .register_connector(Arc::new(FailingConnector {
+            error: ConnectorError::Other("send refused: http 429".into()),
+            calls: calls.clone(),
+        }));
+    let thread = h.seed_thread();
+    let agent = h.register("agent-a", &AGENT_ACTIONS).await;
+    let id = approved_draft(&h, &agent, &thread, "k").await;
+    let r = h.call(&h.human, send_body(&id)).await;
+    assert_eq!(code(&r), Some(ErrorCode::Internal));
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "one attempt, no retry"
+    );
+    let p = h.daemon.state.store.get_proposal(&id).unwrap();
+    assert_eq!(p.state, ProposalState::Approved);
+    assert_eq!(p.result.as_deref(), Some("send_refused"));
+    // it can be sent again by the human: a second, separate attempt
+    h.call(&h.human, send_body(&id)).await;
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(h
+        .audit_text()
+        .contains(r#""action":"proposal.send","outcome":"failed""#));
+    assert!(!h.audit_text().contains("ana@x.org"));
+    h.daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_ambiguous_send_stays_executing_is_never_repeated_and_waits_for_the_human() {
+    let h = boot().await;
+    let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    h.daemon
+        .state
+        .register_connector(Arc::new(FailingConnector {
+            error: ConnectorError::Ambiguous("dropped after data".into()),
+            calls: calls.clone(),
+        }));
+    let thread = h.seed_thread();
+    let agent = h.register("agent-a", &AGENT_ACTIONS).await;
+    let id = approved_draft(&h, &agent, &thread, "k").await;
+    let r = h.call(&h.human, send_body(&id)).await;
+    assert_eq!(code(&r), Some(ErrorCode::Internal));
+    assert_eq!(
+        h.daemon.state.store.get_proposal(&id).unwrap().state,
+        ProposalState::Executing
+    );
+    assert_eq!(
+        h.daemon.state.store.send_outcome(&id).unwrap().as_deref(),
+        Some("outcome_unknown")
+    );
+    // another send is refused outright: the connector is not called again
+    let again = h.call(&h.human, send_body(&id)).await;
+    assert_eq!(code(&again), Some(ErrorCode::IllegalTransition));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(h.audit_text().contains(r#""outcome":"needs_check""#));
+    // a restart-style report lists it as needing a check and changes nothing
+    assert_eq!(hasted::report_interrupted_executions(&h.daemon.state), 1);
+    // the human looks in the mailbox and settles it: delivered
+    let resolved = h
+        .call(
+            &h.human,
+            RequestBody::ResolveExecuting {
+                proposal_id: id.clone(),
+                done: true,
+            },
+        )
+        .await;
+    assert!(
+        matches!(&resolved, Response::Proposal { proposal } if proposal.state == ProposalState::Sent)
+    );
+    // an agent can neither settle it nor send it
+    let denied = h
+        .call(
+            &agent,
+            RequestBody::ResolveExecuting {
+                proposal_id: id.clone(),
+                done: false,
+            },
+        )
+        .await;
+    assert_eq!(code(&denied), Some(ErrorCode::Denied));
+    h.daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_eleventh_send_in_an_hour_is_refused_before_the_connector_is_called() {
+    let h = boot().await;
+    let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    h.daemon.state.register_connector(Arc::new(TestConnector {
+        send: true,
+        calls: calls.clone(),
+    }));
+    let thread = h.seed_thread();
+    let agent = h.register("agent-a", &AGENT_ACTIONS).await;
+    for i in 0..haste_core::send::MAX_SENDS_PER_HOUR {
+        let id = approved_draft(&h, &agent, &thread, &format!("k{i}")).await;
+        // each draft supersedes the older one for the same thread; send it straight away
+        let r = h.call(&h.human, send_body(&id)).await;
+        assert!(
+            matches!(&r, Response::Proposal { proposal } if proposal.state == ProposalState::Sent),
+            "{i}: {r:?}"
+        );
+    }
+    let id = approved_draft(&h, &agent, &thread, "over").await;
+    let r = h.call(&h.human, send_body(&id)).await;
+    assert_eq!(code(&r), Some(ErrorCode::Validation));
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        haste_core::send::MAX_SENDS_PER_HOUR,
+        "the over-limit send never reached the connector"
+    );
+    assert_eq!(
+        h.daemon.state.store.get_proposal(&id).unwrap().state,
+        ProposalState::Approved
+    );
+    h.daemon.shutdown().await;
 }

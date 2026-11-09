@@ -92,10 +92,11 @@ impl Hooks for TestHooks {
 }
 
 #[test]
-fn capabilities_are_read_and_draft_only() {
+fn capabilities_are_read_draft_and_the_human_only_send() {
     let c = GmailConnector::from_config(&config(), Arc::new(MemoryStore::default()));
     let caps = c.capabilities();
-    assert!(caps.read && caps.draft && !caps.send && !caps.archive);
+    // `send` is consulted only by the human path: the gate denies Action::Send to agents
+    assert!(caps.read && caps.draft && caps.send && !caps.archive);
     assert_eq!(c.source(), Source::Gmail);
 }
 
@@ -167,37 +168,6 @@ async fn expired_history_falls_back_to_one_bounded_backfill_without_looping() {
 }
 
 #[tokio::test]
-async fn send_is_unsupported_and_the_guard_refuses_it_before_the_connector() {
-    let server = spawn(routes(|| (200, "{}".into()))).await;
-    let c = connector(&server, store_with_refresh());
-    let hooks = TestHooks::default();
-    let guard = Guarded {
-        connector: &c,
-        hooks: &hooks,
-    };
-    let draft = DraftToSend {
-        thread_id: None,
-        to: Some("a@x.org".into()),
-        body: "hi".into(),
-    };
-    assert_eq!(
-        guard.send(&draft).await,
-        Err(CallError::CapabilityMissing("send"))
-    );
-    assert!(hooks
-        .audits
-        .lock()
-        .unwrap()
-        .contains(&"send:refused_capability".to_owned()));
-    assert!(server.requests().is_empty(), "nothing reached Google");
-    // Even called directly, the connector itself refuses.
-    assert!(matches!(
-        c.send(&draft).await,
-        Err(ConnectorError::Other(_))
-    ));
-}
-
-#[tokio::test]
 async fn draft_lands_in_the_thread_as_single_part_plain_text() {
     let server = spawn(routes(|| (200, "{}".into()))).await;
     let c = connector(&server, store_with_refresh());
@@ -210,6 +180,7 @@ async fn draft_lands_in_the_thread_as_single_part_plain_text() {
         thread_id: Some("t100".into()),
         to: None,
         body: "Noon is great.\nSee you!".into(),
+        ..Default::default()
     };
     let receipt = guard.create_draft(&draft).await.unwrap();
     assert_eq!(receipt.draft_id, "draft-1");
@@ -476,4 +447,299 @@ async fn consent_aborts_on_state_mismatch_and_on_timeout() {
     )
     .await;
     assert!(matches!(r, Err(AuthError::Timeout)));
+}
+
+// ------------------------------------------------------------------ human send
+
+mod send {
+    use super::*;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    use std::sync::atomic::{AtomicU16, Ordering};
+
+    fn draft_to_send(recipient: &str) -> DraftToSend {
+        DraftToSend {
+            thread_id: Some("t100".into()),
+            to: Some(recipient.into()),
+            body: "Yes!\nSee you.".into(),
+            recipients: vec![recipient.into()],
+            subject: Some("Re: Quarterly plan".into()),
+            approval_draft_id: Some("draft-1".into()),
+        }
+    }
+
+    /// Routes plus the two send endpoints; the send answers with `send_status`.
+    fn send_routes(
+        send_status: Arc<AtomicU16>,
+        delete_status: u16,
+    ) -> impl Fn(&Recorded) -> (u16, String) + Send + Sync + 'static {
+        let base = routes(|| (200, r#"{"historyId":"901"}"#.into()));
+        move |r| match (r.method.as_str(), r.path.as_str()) {
+            ("POST", "/gmail/v1/users/me/messages/send") => {
+                let status = send_status.load(Ordering::SeqCst);
+                if status == 200 {
+                    (200, r#"{"id":"sent-1","threadId":"t100"}"#.into())
+                } else {
+                    (status, r#"{"error":{"message":"x"}}"#.into())
+                }
+            }
+            ("DELETE", "/gmail/v1/users/me/drafts/draft-1") => (delete_status, "{}".into()),
+            // a thread whose last message has the headers a reply threads against
+            ("GET", "/gmail/v1/users/me/threads/t100") => (
+                200,
+                r#"{"id":"t100","messages":[{"id":"m1","payload":{"headers":[
+                    {"name":"Message-ID","value":"<m1@x>"},
+                    {"name":"References","value":"<m0@x>"}]}}]}"#
+                    .into(),
+            ),
+            _ => base(r),
+        }
+    }
+
+    fn count(server: &FakeServer, method: &str, prefix: &str) -> usize {
+        server
+            .requests()
+            .iter()
+            .filter(|r| r.method == method && r.path.starts_with(prefix))
+            .count()
+    }
+
+    fn sent_message(server: &FakeServer) -> String {
+        let req = server
+            .requests()
+            .into_iter()
+            .find(|r| r.path == "/gmail/v1/users/me/messages/send")
+            .expect("a send request");
+        let body: serde_json::Value = serde_json::from_str(&req.body).unwrap();
+        let raw = body["raw"].as_str().unwrap();
+        String::from_utf8(URL_SAFE_NO_PAD.decode(raw).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn one_send_request_carries_exactly_what_was_confirmed_and_the_approval_draft_goes_away()
+    {
+        let status = Arc::new(AtomicU16::new(200));
+        let server = spawn(send_routes(status, 204)).await;
+        let c = connector(&server, store_with_refresh());
+        let receipt = c.send(&draft_to_send("ana@example.org")).await.unwrap();
+        assert_eq!(receipt.external_id, "sent-1");
+        assert_eq!(
+            count(&server, "POST", "/gmail/v1/users/me/messages/send"),
+            1
+        );
+        assert_eq!(
+            count(&server, "DELETE", "/gmail/v1/users/me/drafts/draft-1"),
+            1
+        );
+        let msg = sent_message(&server);
+        let headers = msg.split("\r\n\r\n").next().unwrap();
+        for h in [
+            "From: me@example.com",
+            "To: ana@example.org",
+            "Subject: Re: Quarterly plan",
+        ] {
+            assert!(headers.contains(h), "{h}\n{headers}");
+        }
+        assert!(
+            headers.contains("In-Reply-To: <m1@x>"),
+            "threaded: {headers}"
+        );
+        assert!(headers.contains("References: <m0@x> <m1@x>"), "{headers}");
+        assert!(!headers.to_lowercase().contains("bcc"));
+        assert!(msg.ends_with("Yes!\r\nSee you."));
+        let body: serde_json::Value = serde_json::from_str(
+            &server
+                .requests()
+                .iter()
+                .find(|r| r.path.ends_with("messages/send"))
+                .unwrap()
+                .body,
+        )
+        .unwrap();
+        assert_eq!(body["threadId"], "t100");
+    }
+
+    #[tokio::test]
+    async fn a_rejection_returns_no_effect_with_zero_retries_and_keeps_the_draft() {
+        for code in [400, 429] {
+            let status = Arc::new(AtomicU16::new(code));
+            let server = spawn(send_routes(status, 204)).await;
+            let c = connector(&server, store_with_refresh());
+            let err = c.send(&draft_to_send("ana@example.org")).await.unwrap_err();
+            assert_eq!(
+                err,
+                ConnectorError::Other(format!("send refused: http {code}"))
+            );
+            assert_eq!(
+                count(&server, "POST", "/gmail/v1/users/me/messages/send"),
+                1,
+                "no retry on {code}"
+            );
+            assert_eq!(count(&server, "DELETE", "/gmail/v1/users/me/drafts"), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_server_error_is_ambiguous_and_never_retried() {
+        let status = Arc::new(AtomicU16::new(503));
+        let server = spawn(send_routes(status, 204)).await;
+        let c = connector(&server, store_with_refresh());
+        let err = c.send(&draft_to_send("ana@example.org")).await.unwrap_err();
+        assert!(matches!(err, ConnectorError::Ambiguous(_)), "{err:?}");
+        assert_eq!(
+            count(&server, "POST", "/gmail/v1/users/me/messages/send"),
+            1
+        );
+        assert_eq!(
+            count(&server, "DELETE", "/gmail/v1/users/me/drafts"),
+            0,
+            "no cleanup on doubt"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_forbidden_answer_is_a_checkpoint_so_the_breaker_opens() {
+        let status = Arc::new(AtomicU16::new(403));
+        let server = spawn(send_routes(Arc::clone(&status), 204)).await;
+        let c = connector(&server, store_with_refresh());
+        let err = c.send(&draft_to_send("ana@example.org")).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConnectorError::Checkpoint(_) | ConnectorError::Other(_)
+            ),
+            "{err:?}"
+        );
+        assert_eq!(
+            count(&server, "POST", "/gmail/v1/users/me/messages/send"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn header_injection_and_missing_recipients_are_refused_before_any_send() {
+        let status = Arc::new(AtomicU16::new(200));
+        let server = spawn(send_routes(status, 204)).await;
+        let c = connector(&server, store_with_refresh());
+        for bad in ["a@x.org\r\nBcc: e@x.org", "a@x.org\nX: y", "a@x.org\0"] {
+            let err = c.send(&draft_to_send(bad)).await.unwrap_err();
+            assert_eq!(
+                err,
+                ConnectorError::Other("send refused: header characters".into()),
+                "{bad:?}"
+            );
+        }
+        let mut no_recipient = draft_to_send("a@x.org");
+        no_recipient.recipients.clear();
+        assert!(
+            matches!(c.send(&no_recipient).await, Err(ConnectorError::Other(m)) if m.starts_with("send refused"))
+        );
+        let mut subject_injection = draft_to_send("a@x.org");
+        subject_injection.subject = Some("hi\nBcc: e@x.org".into());
+        assert!(c.send(&subject_injection).await.is_err());
+        assert_eq!(
+            count(&server, "POST", "/gmail/v1/users/me/messages/send"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_draft_cleanup_does_not_undo_the_send() {
+        let status = Arc::new(AtomicU16::new(200));
+        let server = spawn(send_routes(status, 500)).await;
+        let c = connector(&server, store_with_refresh());
+        assert!(c.send(&draft_to_send("ana@example.org")).await.is_ok());
+        assert_eq!(
+            count(&server, "DELETE", "/gmail/v1/users/me/drafts/draft-1"),
+            1,
+            "tried once, not retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_refresh_token_means_nothing_was_sent() {
+        let server = spawn(|r| match r.path.as_str() {
+            "/token" => (400, r#"{"error":"invalid_grant"}"#.into()),
+            _ => (404, "{}".into()),
+        })
+        .await;
+        let c = connector(&server, store_with_refresh());
+        let err = c.send(&draft_to_send("ana@example.org")).await.unwrap_err();
+        assert!(matches!(err, ConnectorError::Checkpoint(_)), "{err:?}");
+        assert_eq!(
+            count(&server, "POST", "/gmail/v1/users/me/messages/send"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_server_is_a_connection_failure_not_an_ambiguous_send() {
+        // bind and drop a listener to get a port nothing listens on
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let dead = format!("http://127.0.0.1:{port}");
+        let c = GmailConnector::new(
+            &config(),
+            &dead,
+            &format!("{dead}/token"),
+            store_with_refresh(),
+        );
+        let err = c.send(&draft_to_send("ana@example.org")).await.unwrap_err();
+        assert!(matches!(err, ConnectorError::Transient(_)), "{err:?}");
+    }
+
+    #[test]
+    fn gmail_declares_send_and_still_asks_for_exactly_the_same_two_scopes() {
+        let server = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(spawn(|_| (404, "{}".into())));
+        let c = connector(&server, store_with_refresh());
+        assert!(c.capabilities().send && c.capabilities().draft && !c.capabilities().archive);
+        assert_eq!(c.own_address().as_deref(), Some("me@example.com"));
+        assert_eq!(
+            haste_connector_gmail::consts::SCOPES,
+            [
+                "https://www.googleapis.com/auth/gmail.readonly",
+                "https://www.googleapis.com/auth/gmail.compose"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_guard_sends_once_and_records_ambiguity_without_tripping_the_breaker() {
+        let status = Arc::new(AtomicU16::new(503));
+        let server = spawn(send_routes(status, 204)).await;
+        let c = connector(&server, store_with_refresh());
+        let hooks = TestHooks::default();
+        let guard = Guarded {
+            connector: &c,
+            hooks: &hooks,
+        };
+        let err = guard
+            .send(&draft_to_send("ana@example.org"))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CallError::Connector(ConnectorError::Ambiguous(_))
+        ));
+        assert_eq!(
+            count(&server, "POST", "/gmail/v1/users/me/messages/send"),
+            1,
+            "the guard never retries a send"
+        );
+        assert!(hooks
+            .audits
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|a| a.contains("ambiguous")));
+        assert!(
+            hooks.engaged.lock().unwrap().is_empty(),
+            "an ambiguous send does not engage the kill switch"
+        );
+    }
 }

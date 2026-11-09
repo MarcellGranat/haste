@@ -74,9 +74,9 @@ pub fn transition(
     let ok = matches!(
         (from, to),
         (Pending, Approved | Rejected | Expired | Superseded)
-            // `Approved -> Sent` stays for drafts sent straight through a connector; reminder
-            // proposals always go through `Executing` (enforced by the store).
-            | (Approved, Sent | Executing | Superseded)
+            // Nothing reaches `Sent` without passing `Executing`: reminders, calendar writes and
+            // mail sends all use it, so an ambiguous outcome can stay there for a human check.
+            | (Approved, Executing | Superseded)
             | (Executing, Sent | Approved)
     );
     if ok {
@@ -354,7 +354,6 @@ mod tests {
             (Pending, Expired),
             (Pending, Superseded),
             (Approved, Executing),
-            (Approved, Sent), // drafts sent straight through a connector
             (Approved, Superseded),
             (Executing, Sent),
             (Executing, Approved), // an execution failed before any external effect

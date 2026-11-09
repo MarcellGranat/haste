@@ -48,6 +48,8 @@ async fn boot() -> Harness {
             ("GET", "/gmail/v1/users/me/threads/t100") => (200, THREAD_FULL.into()),
             ("GET", "/gmail/v1/users/me/history") => (200, r#"{"historyId":"900"}"#.into()),
             ("POST", "/gmail/v1/users/me/drafts") => (200, r#"{"id":"draft-1"}"#.into()),
+            ("POST", "/gmail/v1/users/me/messages/send") => (200, r#"{"id":"sent-1"}"#.into()),
+            ("DELETE", "/gmail/v1/users/me/drafts/draft-1") => (200, "{}".into()),
             _ => (404, "{}".into()),
         }
     })
@@ -309,7 +311,7 @@ async fn account_restriction_trips_the_breaker_and_release_then_trips_it_again()
 }
 
 #[tokio::test]
-async fn only_an_approved_draft_reaches_gmail_and_it_is_never_sent() {
+async fn only_an_approved_draft_reaches_gmail_and_only_the_human_can_send_it() {
     let h = boot().await;
     let thread = synced_thread(&h).await;
     let agent = register(&h, "agent-a", PrincipalKind::Agent).await;
@@ -348,25 +350,73 @@ async fn only_an_approved_draft_reaches_gmail_and_it_is_never_sent() {
     assert!(audit(&h).contains(r#""action":"draft.create","outcome":"created""#));
     assert!(audit(&h).contains("draft_id=draft-1"));
 
-    // Gmail cannot send: the human send path is refused by capability.
+    // An agent can never send, whatever it presents.
+    let forged = call_with(
+        &h,
+        &agent,
+        RequestBody::Send {
+            proposal_id: id.clone(),
+            acknowledge_stale: true,
+            recipients_digest: "x".into(),
+        },
+    )
+    .await;
+    assert_eq!(code(&forged), Some(ErrorCode::Denied));
+    assert_eq!(h.google.count("/gmail/v1/users/me/messages/send"), 0);
+
+    // The human previews (nothing is sent) and then sends what the preview showed.
+    let Response::SendPreview { preview } = human(
+        &h,
+        RequestBody::SendPreview {
+            proposal_id: id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("no preview")
+    };
+    assert_eq!(preview.source, "gmail");
+    assert_eq!(preview.recipients.len(), 1);
+    assert_ne!(
+        preview.recipients[0], "me@example.com",
+        "never a reply to oneself"
+    );
+    assert!(preview.subject.starts_with("Re: "));
+    assert_eq!(
+        h.google.count("/gmail/v1/users/me/messages/send"),
+        0,
+        "a preview sends nothing"
+    );
     let sent = human(
         &h,
         RequestBody::Send {
             proposal_id: id.clone(),
             acknowledge_stale: false,
+            recipients_digest: preview.recipients_digest.clone(),
         },
     )
     .await;
-    assert_eq!(code(&sent), Some(ErrorCode::Denied));
+    let Response::Proposal { proposal } = sent else {
+        panic!("{sent:?}")
+    };
+    assert_eq!(proposal.state, ProposalState::Sent);
+    assert_eq!(proposal.result.as_deref(), Some("sent:sent-1"));
+    assert_eq!(h.google.count("/gmail/v1/users/me/messages/send"), 1);
+    // the approval-time draft was removed, once
     assert_eq!(
-        h.daemon.state.store.get_proposal(&id).unwrap().state,
-        ProposalState::Approved
+        h.google
+            .requests()
+            .iter()
+            .filter(|r| r.method == "DELETE")
+            .count(),
+        1
     );
-    assert!(h
-        .google
-        .requests()
-        .iter()
-        .all(|r| !r.path.contains("/send")));
+    // the audit has ids and counts only: no address, subject or body
+    let log = audit(&h);
+    assert!(log.contains(r#""action":"proposal.send","outcome":"sent""#));
+    for secret in [preview.recipients[0].as_str(), "Noon is great", "Re: "] {
+        assert!(!log.contains(secret), "audit leaked {secret}");
+    }
     h.daemon.shutdown().await;
 }
 

@@ -158,13 +158,25 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 Err(e) => e,
             };
         }
+        Effect::PreviewSend { id } => {
+            match client.call(RequestBody::SendPreview {
+                proposal_id: id.clone(),
+            }) {
+                Ok(Response::SendPreview { preview }) => app.show_send_preview(&id, preview),
+                other => {
+                    app.status = describe(other).err().unwrap_or_else(|| "no preview".into());
+                }
+            }
+        }
         Effect::Send {
             id,
             acknowledge_stale,
+            recipients_digest,
         } => {
             app.status = match describe(client.call(RequestBody::Send {
                 proposal_id: id,
                 acknowledge_stale,
+                recipients_digest,
             })) {
                 Ok(()) => "sent".into(),
                 Err(e) => e,

@@ -11,33 +11,33 @@
 
 ## 2. Core types and limits (haste-core)
 
-- [ ] 2.1 Add `haste_core::send` with the named constants `MAX_RECIPIENTS`, `MAX_SEND_BODY_BYTES`, `MAX_SUBJECT_BYTES`, `MAX_SENDS_PER_HOUR`, `SEND_WINDOW_SECS` and `SEND_TIMEOUT`
-- [ ] 2.2 Add `SendOutcome` (`NoEffect`, `Ambiguous`, `Sent`) and a `SendError` type carrying a fixed label
-- [ ] 2.3 Add the address and subject validators (CR, LF, NUL, comma, semicolon, whitespace, local@domain shape, byte limits) with unit tests for each refusal
-- [ ] 2.4 Add `recipients_digest` (SHA-256 over sorted recipients, hex) with a test that order does not change the digest and any change does
-- [ ] 2.5 Remove `approved -> sent` from `transition()` and update the proposal transition tests so `approved -> sent` is refused and the permitted set is exactly the modified lifecycle
+- [x] 2.1 Add `haste_core::send` with the named constants `MAX_RECIPIENTS`, `MAX_SEND_BODY_BYTES`, `MAX_SUBJECT_BYTES`, `MAX_SENDS_PER_HOUR`, `SEND_WINDOW_SECS` and `SEND_TIMEOUT`
+- [x] 2.2 Add `SendOutcome` (`NoEffect`, `Ambiguous`, `Sent`) and a `SendError` type carrying a fixed label
+- [x] 2.3 Add the address and subject validators (CR, LF, NUL, comma, semicolon, whitespace, local@domain shape, byte limits) with unit tests for each refusal
+- [x] 2.4 Add `recipients_digest` (SHA-256 over sorted recipients, hex) with a test that order does not change the digest and any change does
+- [x] 2.5 Remove `approved -> sent` from `transition()` and update the proposal transition tests so `approved -> sent` is refused and the permitted set is exactly the modified lifecycle
 - [ ] 2.6 Add `Source` sendability checks and serde round-trip tests for the new `DraftToSend` recipient list field
 
 ## 3. Store (haste-store)
 
-- [ ] 3.1 Add a migration adding `send_recipients`, `send_started_at` and `send_outcome` columns to proposals
-- [ ] 3.2 Implement `begin_send(id, acknowledge_stale, now, recipients)` as one transaction: state check (`approved` only), stale check, rate-limit count over `SEND_WINDOW_SECS` including `executing`, store recipients, move to `executing`
-- [ ] 3.3 Implement `finish_send(id, result, now)` (`executing -> sent`) and `fail_send_no_effect(id, reason, now)` (`executing -> approved`), refusing any other state
-- [ ] 3.4 Implement `mark_send_needs_check(id, label, now)` that leaves the state `executing` and records the fixed outcome label
-- [ ] 3.5 Implement the human override methods `human_mark_sent` and `human_return_to_approved` for executing sends, each refusing non-send and non-executing proposals
-- [ ] 3.6 Store tests: each transition permitted and refused, the rate limit counts `executing` rows and survives reopening the database, the recipient list is stored once and never rewritten
-- [ ] 3.7 Store test: a restart with an `executing` send lists it as needing a check and changes nothing
+- [x] 3.1 Add a migration adding `send_recipients`, `send_started_at` and `send_outcome` columns to proposals
+- [x] 3.2 Implement `begin_send(id, acknowledge_stale, now, recipients)` as one transaction: state check (`approved` only), stale check, rate-limit count over `SEND_WINDOW_SECS` including `executing`, store recipients, move to `executing`
+- [x] 3.3 Implement `finish_send(id, result, now)` (`executing -> sent`) and `fail_send_no_effect(id, reason, now)` (`executing -> approved`), refusing any other state
+- [x] 3.4 Implement `mark_send_needs_check(id, label, now)` that leaves the state `executing` and records the fixed outcome label
+- [x] 3.5 Implement the human override methods `human_mark_sent` and `human_return_to_approved` for executing sends, each refusing non-send and non-executing proposals
+- [x] 3.6 Store tests: each transition permitted and refused, the rate limit counts `executing` rows and survives reopening the database, the recipient list is stored once and never rewritten
+- [x] 3.7 Store test: a restart with an `executing` send lists it as needing a check and changes nothing
 
 ## 4. Gmail send (haste-connector-gmail)
 
-- [ ] 4.1 Add the send MIME builder for plain text with `To`, `Subject`, `In-Reply-To`, `References`, `Date`, `Message-ID`, refusing CR/LF instead of stripping (separate from the draft builder)
-- [ ] 4.2 Add the Gmail client send call (`users.messages.send` with `raw` and `threadId`, or `users.drafts.send` per D6) that performs exactly one HTTP request with no retry
-- [ ] 4.3 Map Gmail responses to `SendOutcome`: 4xx and 429 to `NoEffect`, 5xx and timeout after write to `Ambiguous`, `invalid_grant` before the request to `Checkpoint`
-- [ ] 4.4 Set `capabilities().send = true`; keep the scope constants unchanged and add a test that the requested scopes are still exactly `gmail.readonly` and `gmail.compose`
-- [ ] 4.5 Implement the Gmail `send` trait method for the human path only and remove the stub error
-- [ ] 4.6 Implement best-effort approval-draft cleanup after a successful send if Q1 says delete; never retried, audited with a count only
-- [ ] 4.7 Extend the local fake Gmail server with `users.messages.send` and `users.drafts.delete`, recording requests with bodies excluded from the log
-- [ ] 4.8 Gmail tests: one request on success, no request on refusal before send, 429 returns to approved with zero retries, 500 after request stays ambiguous with zero retries, timeout after write is ambiguous, the sent MIME has one text/plain part and no injected header
+- [x] 4.1 Add the send MIME builder for plain text with `To`, `Subject`, `In-Reply-To`, `References`, `Date`, `Message-ID`, refusing CR/LF instead of stripping (separate from the draft builder)
+- [x] 4.2 Add the Gmail client send call (`users.messages.send` with `raw` and `threadId`, or `users.drafts.send` per D6) that performs exactly one HTTP request with no retry
+- [x] 4.3 Map Gmail responses to `SendOutcome`: 4xx and 429 to `NoEffect`, 5xx and timeout after write to `Ambiguous`, `invalid_grant` before the request to `Checkpoint`
+- [x] 4.4 Set `capabilities().send = true`; keep the scope constants unchanged and add a test that the requested scopes are still exactly `gmail.readonly` and `gmail.compose`
+- [x] 4.5 Implement the Gmail `send` trait method for the human path only and remove the stub error
+- [x] 4.6 Implement best-effort approval-draft cleanup after a successful send if Q1 says delete; never retried, audited with a count only
+- [x] 4.7 Extend the local fake Gmail server with `users.messages.send` and `users.drafts.delete`, recording requests with bodies excluded from the log
+- [x] 4.8 Gmail tests: one request on success, no request on refusal before send, 429 returns to approved with zero retries, 500 after request stays ambiguous with zero retries, timeout after write is ambiguous, the sent MIME has one text/plain part and no injected header
 
 ## 5. iCloud SMTP client (haste-connector-icloud)
 
@@ -60,14 +60,14 @@
 
 ## 7. Daemon dispatch (hasted)
 
-- [ ] 7.1 Add the human-only protocol requests `SendPreview` and `Send { acknowledge_stale, recipients_digest }` to haste-proto and deny them for agent and machine principals in the gate and in `is_human_only`
-- [ ] 7.2 Implement `SendPreview`: resolve recipients (explicit `to`, else thread reply target), validate, return source, recipients, subject, body length, stale flag and sends remaining, changing no state
-- [ ] 7.3 Rewrite `send` in dispatch.rs to follow the `execute_reminder` pattern: `begin_send`, recompute recipients and compare digest, call the guarded connector once, classify with `SendOutcome`, then `finish_send`, `fail_send_no_effect` or `mark_send_needs_check`
-- [ ] 7.4 Map refusals (`kill switch engaged`, `connector stopped by circuit breaker`, `send refused`, `recipients_changed`, rate limit) to distinct error codes with no addresses in the message
-- [ ] 7.5 Add audit entries `proposal.send` (sent, refused, needs_check, failed) and `send.copy_failed` with ids and counts only
-- [ ] 7.6 Publish `ProposalChanged` on each transition and a notice on needs-check
-- [ ] 7.7 Ensure startup leaves `executing` proposals untouched (send included) and reports them as needing a check
-- [ ] 7.8 Dispatch tests with fake connectors: one connector call per send, no call on any refusal before begin, ambiguous leaves executing, agent denied for preview and send, digest mismatch refused
+- [x] 7.1 Add the human-only protocol requests `SendPreview` and `Send { acknowledge_stale, recipients_digest }` to haste-proto and deny them for agent and machine principals in the gate and in `is_human_only`
+- [x] 7.2 Implement `SendPreview`: resolve recipients (explicit `to`, else thread reply target), validate, return source, recipients, subject, body length, stale flag and sends remaining, changing no state
+- [x] 7.3 Rewrite `send` in dispatch.rs to follow the `execute_reminder` pattern: `begin_send`, recompute recipients and compare digest, call the guarded connector once, classify with `SendOutcome`, then `finish_send`, `fail_send_no_effect` or `mark_send_needs_check`
+- [x] 7.4 Map refusals (`kill switch engaged`, `connector stopped by circuit breaker`, `send refused`, `recipients_changed`, rate limit) to distinct error codes with no addresses in the message
+- [x] 7.5 Add audit entries `proposal.send` (sent, refused, needs_check, failed) and `send.copy_failed` with ids and counts only
+- [x] 7.6 Publish `ProposalChanged` on each transition and a notice on needs-check
+- [x] 7.7 Ensure startup leaves `executing` proposals untouched (send included) and reports them as needing a check
+- [x] 7.8 Dispatch tests with fake connectors: one connector call per send, no call on any refusal before begin, ambiguous leaves executing, agent denied for preview and send, digest mismatch refused
 
 ## 8. Approvals TUI (haste-tui)
 

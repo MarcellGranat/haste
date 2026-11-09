@@ -126,10 +126,17 @@ pub enum RequestBody {
         proposal_id: String,
         reason: Option<String>,
     },
-    /// Human-only; never exposed by the agent CLI.
+    /// Human-only; never exposed by the agent CLI. `recipients_digest` is the digest of the
+    /// recipients the human saw in the preview; the daemon refuses with `recipients_changed` if
+    /// its own resolution differs.
     Send {
         proposal_id: String,
         acknowledge_stale: bool,
+        recipients_digest: String,
+    },
+    /// Human-only, read-only: who a send would go to, before anything is sent.
+    SendPreview {
+        proposal_id: String,
     },
     RegisterPrincipal {
         principal_id: String,
@@ -284,6 +291,21 @@ pub struct ReminderView {
     pub tags: Vec<String>,
 }
 
+/// What a send would do. Shown for confirmation; nothing has happened yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendPreviewView {
+    pub source: String,
+    /// Every resolved recipient (one in v1).
+    pub recipients: Vec<String>,
+    pub subject: String,
+    pub body_bytes: usize,
+    pub stale: bool,
+    /// Sends left this hour.
+    pub sends_remaining: u32,
+    /// Send this back with the confirmation.
+    pub recipients_digest: String,
+}
+
 /// One `note.append` audit row. There is no text: the audit never holds any.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoteLogRow {
@@ -391,6 +413,9 @@ pub enum Response {
     Note {
         path: String,
         text: String,
+    },
+    SendPreview {
+        preview: SendPreviewView,
     },
     NoteLog {
         rows: Vec<NoteLogRow>,

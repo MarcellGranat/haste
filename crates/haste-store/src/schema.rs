@@ -155,6 +155,14 @@ const MIGRATIONS: &[&str] = &[
     ",
     // 5: how a principal's note appends are decided (`auto` by default, or `approval`).
     "ALTER TABLE principals ADD COLUMN note_mode TEXT NOT NULL DEFAULT 'auto';",
+    // 6: mail sends. The recipients are frozen when a send begins; `send_started_at` feeds the
+    // per-hour limit (it counts `executing` sends, so a crash cannot reset it); `send_outcome`
+    // holds the fixed label of an ambiguous outcome.
+    "
+    ALTER TABLE proposals ADD COLUMN send_recipients TEXT;
+    ALTER TABLE proposals ADD COLUMN send_started_at INTEGER;
+    ALTER TABLE proposals ADD COLUMN send_outcome TEXT;
+    ",
 ];
 
 /// Highest schema version this binary understands.

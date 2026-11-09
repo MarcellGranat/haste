@@ -898,6 +898,7 @@ fn kind(body: &RequestBody) -> Kind {
         | RequestBody::NotePerson { .. }
         | RequestBody::NoteReference(_)
         | RequestBody::NoteMode { .. }
+        | RequestBody::SendPreview { .. }
         | RequestBody::NoteShow { .. }
         | RequestBody::NoteLog { .. }
         | RequestBody::Approve { .. }
@@ -1120,6 +1121,7 @@ async fn a_matching_tag_does_not_let_a_machine_do_anything_it_could_not_before()
         RequestBody::Send {
             proposal_id: "x".into(),
             acknowledge_stale: true,
+            recipients_digest: "x".into(),
         },
     ] {
         assert_eq!(

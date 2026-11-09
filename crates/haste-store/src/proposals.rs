@@ -4,6 +4,7 @@
 use haste_core::auth::new_id;
 use haste_core::model::ObjectKind;
 use haste_core::proposal::{transition, Payload, Proposal, ProposalState};
+use haste_core::send::{MAX_SENDS_PER_HOUR, SEND_WINDOW_SECS};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::inbox::{apply_triage, thread_version, TriageUpdate};
@@ -358,33 +359,101 @@ impl Store {
         })
     }
 
-    /// Check that a proposal may be sent (state `approved`, stale acknowledged) before the
-    /// connector is called.
+    /// Begin a human send, in one transaction: the proposal must be an approved mail draft, the
+    /// stale flag must be acknowledged when set, and fewer than [`MAX_SENDS_PER_HOUR`] sends may
+    /// have started in the last [`SEND_WINDOW_SECS`] (`executing` sends count, so a crash cannot
+    /// reset the limit). The resolved recipients are stored once and never rewritten, then the
+    /// proposal moves to `executing`.
     ///
     /// # Errors
-    /// [`StoreError::IllegalTransition`] unless `approved`; stale errors as for approval.
-    pub fn prepare_send(&self, id: &str, acknowledge_stale: bool) -> StoreResult<Proposal> {
+    /// [`StoreError::IllegalTransition`] unless an approved draft; stale errors as for approval;
+    /// [`StoreError::Validation`] with `rate_limited` over the limit.
+    pub fn begin_send(
+        &self,
+        id: &str,
+        acknowledge_stale: bool,
+        now: i64,
+        recipients: &[String],
+    ) -> StoreResult<Proposal> {
         let id = id.to_owned();
+        let recipients_json = serde_json::to_string(recipients)?;
         self.write(move |conn| {
             let tx = conn.transaction()?;
             let p = load(&tx, &id)?;
-            transition(p.state, ProposalState::Sent).map_err(|e| {
+            if !matches!(p.payload, Payload::Draft { .. }) {
+                return Err(StoreError::IllegalTransition(
+                    "only mail drafts can be sent".into(),
+                ));
+            }
+            transition(p.state, ProposalState::Executing).map_err(|e| {
                 StoreError::IllegalTransition(format!("{} -> {}", e.from.as_str(), e.to.as_str()))
             })?;
             let stale = refresh_stale(&tx, &p)?;
-            tx.commit()?;
             if stale && !acknowledge_stale {
+                tx.commit()?;
                 return Err(StoreError::StaleNeedsAcknowledgement);
             }
-            load(conn, &id)
+            let recent: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM proposals WHERE send_started_at IS NOT NULL AND send_started_at > ?1",
+                [now - SEND_WINDOW_SECS],
+                |r| r.get(0),
+            )?;
+            if recent >= i64::from(MAX_SENDS_PER_HOUR) {
+                return Err(StoreError::Validation("rate_limited".into()));
+            }
+            tx.execute(
+                "UPDATE proposals SET send_recipients = ?2, send_started_at = ?3, send_outcome = NULL WHERE id = ?1",
+                params![id, recipients_json, now],
+            )?;
+            let started = set_state(&tx, &p, ProposalState::Executing, None, now)?;
+            tx.commit()?;
+            Ok(started)
         })
     }
 
-    /// Record a successful send.
+    /// How many sends began in the last [`SEND_WINDOW_SECS`] (the number the hourly limit uses).
     ///
     /// # Errors
-    /// [`StoreError::IllegalTransition`] unless `approved`.
-    pub fn complete_send(&self, id: &str, result: &str, now: i64) -> StoreResult<Proposal> {
+    /// Database errors.
+    pub fn sends_in_window(&self, now: i64) -> StoreResult<u32> {
+        self.read(move |conn| {
+            let n: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM proposals WHERE send_started_at IS NOT NULL AND send_started_at > ?1",
+                [now - SEND_WINDOW_SECS],
+                |r| r.get(0),
+            )?;
+            Ok(u32::try_from(n).unwrap_or(u32::MAX))
+        })
+    }
+
+    /// The recipients frozen by [`Store::begin_send`] (empty before a send begins).
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] for an unknown proposal.
+    pub fn send_recipients(&self, id: &str) -> StoreResult<Vec<String>> {
+        let id = id.to_owned();
+        self.read(move |conn| {
+            let json: Option<Option<String>> = conn
+                .query_row(
+                    "SELECT send_recipients FROM proposals WHERE id = ?1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(json) = json else {
+                return Err(StoreError::NotFound(format!("proposal {id}")));
+            };
+            Ok(json
+                .and_then(|j| serde_json::from_str(&j).ok())
+                .unwrap_or_default())
+        })
+    }
+
+    /// The send succeeded: `executing -> sent`.
+    ///
+    /// # Errors
+    /// [`StoreError::IllegalTransition`] unless `executing`.
+    pub fn finish_send(&self, id: &str, result: &str, now: i64) -> StoreResult<Proposal> {
         let id = id.to_owned();
         let result = result.to_owned();
         self.write(move |conn| {
@@ -393,6 +462,71 @@ impl Store {
             let updated = set_state(&tx, &p, ProposalState::Sent, Some(&result), now)?;
             tx.commit()?;
             Ok(updated)
+        })
+    }
+
+    /// Nothing was delivered and nothing can have been: `executing -> approved`, the reason
+    /// recorded, and the attempt no longer counts toward the hourly limit.
+    ///
+    /// # Errors
+    /// [`StoreError::IllegalTransition`] unless `executing`.
+    pub fn fail_send_no_effect(&self, id: &str, reason: &str, now: i64) -> StoreResult<Proposal> {
+        let id = id.to_owned();
+        let reason = reason.to_owned();
+        self.write(move |conn| {
+            let tx = conn.transaction()?;
+            let p = load(&tx, &id)?;
+            let updated = set_state(&tx, &p, ProposalState::Approved, Some(&reason), now)?;
+            tx.execute(
+                "UPDATE proposals SET send_started_at = NULL, send_outcome = NULL WHERE id = ?1",
+                [&id],
+            )?;
+            tx.commit()?;
+            Ok(updated)
+        })
+    }
+
+    /// The outcome is unknown: the state stays `executing` and a fixed label is recorded.
+    ///
+    /// # Errors
+    /// [`StoreError::IllegalTransition`] unless `executing`.
+    pub fn mark_send_needs_check(&self, id: &str, label: &str, now: i64) -> StoreResult<Proposal> {
+        let id = id.to_owned();
+        let label = label.to_owned();
+        self.write(move |conn| {
+            let tx = conn.transaction()?;
+            let p = load(&tx, &id)?;
+            if p.state != ProposalState::Executing {
+                return Err(StoreError::IllegalTransition(format!(
+                    "{} is not executing",
+                    p.state.as_str()
+                )));
+            }
+            tx.execute(
+                "UPDATE proposals SET send_outcome = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, label, now],
+            )?;
+            let updated = load(&tx, &id)?;
+            tx.commit()?;
+            Ok(updated)
+        })
+    }
+
+    /// The fixed label of an ambiguous send, if one was recorded.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] for an unknown proposal.
+    pub fn send_outcome(&self, id: &str) -> StoreResult<Option<String>> {
+        let id = id.to_owned();
+        self.read(move |conn| {
+            let label: Option<Option<String>> = conn
+                .query_row(
+                    "SELECT send_outcome FROM proposals WHERE id = ?1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            label.ok_or_else(|| StoreError::NotFound(format!("proposal {id}")))
         })
     }
 
@@ -572,7 +706,7 @@ mod tests {
         let (p, _, _) = draft(&s, "k1", None);
         s.reject_proposal(&p.id, Some("no"), 200).unwrap();
         assert!(matches!(
-            s.prepare_send(&p.id, false),
+            s.begin_send(&p.id, false, 250, &recipient()),
             Err(StoreError::IllegalTransition(_))
         ));
         assert!(matches!(
@@ -585,22 +719,135 @@ mod tests {
         );
     }
 
+    fn recipient() -> Vec<String> {
+        vec!["ana@example.org".to_owned()]
+    }
+
     #[test]
-    fn send_requires_approval_first() {
+    fn send_requires_approval_and_always_passes_through_executing() {
         let (_d, s) = test_store();
         let (p, _, _) = draft(&s, "k1", None);
         assert!(matches!(
-            s.prepare_send(&p.id, false),
+            s.begin_send(&p.id, false, 150, &recipient()),
             Err(StoreError::IllegalTransition(_))
         ));
         s.approve_proposal(&p.id, false, 200).unwrap();
-        assert_eq!(
-            s.get_proposal(&p.id).unwrap().state,
-            ProposalState::Approved
-        );
-        s.prepare_send(&p.id, false).unwrap();
-        let sent = s.complete_send(&p.id, "ok", 300).unwrap();
+        // approved -> sent is not a transition any more
+        assert!(matches!(
+            s.finish_send(&p.id, "x", 250),
+            Err(StoreError::IllegalTransition(_))
+        ));
+        let started = s.begin_send(&p.id, false, 300, &recipient()).unwrap();
+        assert_eq!(started.state, ProposalState::Executing);
+        assert_eq!(s.send_recipients(&p.id).unwrap(), recipient());
+        let sent = s.finish_send(&p.id, "sent:smtp", 400).unwrap();
         assert_eq!(sent.state, ProposalState::Sent);
+        assert!(matches!(
+            s.finish_send(&p.id, "again", 500),
+            Err(StoreError::IllegalTransition(_))
+        ));
+    }
+
+    #[test]
+    fn a_refused_send_returns_to_approved_and_stops_counting_toward_the_limit() {
+        let (_d, s) = test_store();
+        let (p, _, _) = draft(&s, "k1", None);
+        s.approve_proposal(&p.id, false, 200).unwrap();
+        s.begin_send(&p.id, false, 300, &recipient()).unwrap();
+        let back = s.fail_send_no_effect(&p.id, "send refused", 310).unwrap();
+        assert_eq!(back.state, ProposalState::Approved);
+        assert_eq!(back.result.as_deref(), Some("send refused"));
+        // it can be tried again later
+        s.begin_send(&p.id, false, 320, &recipient()).unwrap();
+    }
+
+    #[test]
+    fn an_ambiguous_send_stays_executing_and_the_human_decides() {
+        let (_d, s) = test_store();
+        let (p, _, _) = draft(&s, "k1", None);
+        s.approve_proposal(&p.id, false, 200).unwrap();
+        s.begin_send(&p.id, false, 300, &recipient()).unwrap();
+        let marked = s
+            .mark_send_needs_check(&p.id, "outcome_unknown", 310)
+            .unwrap();
+        assert_eq!(marked.state, ProposalState::Executing);
+        assert_eq!(
+            s.send_outcome(&p.id).unwrap().as_deref(),
+            Some("outcome_unknown")
+        );
+        assert_eq!(s.executing_proposals().unwrap().len(), 1);
+        // it can never be re-begun, whatever the caller wants
+        assert!(matches!(
+            s.begin_send(&p.id, true, 320, &recipient()),
+            Err(StoreError::IllegalTransition(_))
+        ));
+        let resolved = s.resolve_executing(&p.id, true, 330).unwrap();
+        assert_eq!(resolved.state, ProposalState::Sent);
+        assert!(matches!(
+            s.mark_send_needs_check(&p.id, "x", 340),
+            Err(StoreError::IllegalTransition(_))
+        ));
+    }
+
+    #[test]
+    fn the_hourly_limit_counts_executing_sends_and_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("h.db");
+        let s = Store::open(&path).unwrap();
+        let now = 10_000;
+        for i in 0..MAX_SENDS_PER_HOUR {
+            let (p, _, _) = draft(&s, &format!("k{i}"), None);
+            s.approve_proposal(&p.id, false, now).unwrap();
+            s.begin_send(&p.id, false, now + i64::from(i), &recipient())
+                .unwrap();
+            if i % 2 == 0 {
+                s.finish_send(&p.id, "ok", now).unwrap();
+            } // the others stay executing: they still count
+        }
+        let (extra, _, _) = draft(&s, "extra", None);
+        s.approve_proposal(&extra.id, false, now).unwrap();
+        for store in [&s, &Store::open(&path).unwrap()] {
+            assert!(matches!(
+                store.begin_send(&extra.id, false, now + 100, &recipient()),
+                Err(StoreError::Validation(m)) if m == "rate_limited"
+            ));
+        }
+        // an hour later the window has passed
+        s.begin_send(&extra.id, false, now + SEND_WINDOW_SECS + 100, &recipient())
+            .unwrap();
+    }
+
+    #[test]
+    fn only_mail_drafts_can_be_sent_and_the_recipients_are_stored_once() {
+        let (_d, s) = test_store();
+        let (archive, _, _) = s
+            .create_proposal(&NewProposal {
+                principal_id: "agent".into(),
+                idempotency_key: "arch".into(),
+                payload: Payload::Archive,
+                thread_id: None,
+                now: 100,
+                ttl_secs: 1000,
+                project: None,
+                origin_machine: None,
+            })
+            .unwrap();
+        s.approve_proposal(&archive.id, false, 150).unwrap();
+        assert!(matches!(
+            s.begin_send(&archive.id, false, 200, &recipient()),
+            Err(StoreError::IllegalTransition(_))
+        ));
+        let (p, _, _) = draft(&s, "k1", None);
+        s.approve_proposal(&p.id, false, 200).unwrap();
+        s.begin_send(&p.id, false, 300, &recipient()).unwrap();
+        s.fail_send_no_effect(&p.id, "x", 310).unwrap();
+        let other = vec!["other@example.org".to_owned()];
+        s.begin_send(&p.id, false, 320, &other).unwrap();
+        assert_eq!(
+            s.send_recipients(&p.id).unwrap(),
+            other,
+            "frozen at each begin, not rewritten during one"
+        );
     }
 
     #[test]

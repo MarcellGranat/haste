@@ -14,10 +14,15 @@ use haste_core::policy::{
     Target,
 };
 use haste_core::proposal::{NoteEntry, Payload};
+use haste_core::send::{
+    classify as classify_send, recipients_digest, reply_subject, validate_recipients,
+    validate_subject, SendOutcome, MAX_SENDS_PER_HOUR, MAX_SEND_BODY_BYTES,
+};
 use haste_core::time::now_secs;
 use haste_proto::{
     AuditLine, ConnectorView, ErrorCode, Event, EventView, Hints, NoteLogRow, ReminderView,
-    RemindersStatusView, Request, RequestBody, Response, ThreadView, PROTOCOL_VERSION,
+    RemindersStatusView, Request, RequestBody, Response, SendPreviewView, ThreadView,
+    PROTOCOL_VERSION,
 };
 use haste_store::{AuthError, NewProposal, StoreError, ThreadFilter};
 
@@ -61,7 +66,9 @@ fn action_for(body: &RequestBody) -> Action {
         RequestBody::Approve { .. } => Action::Approve,
         RequestBody::Reject { .. } => Action::Reject,
         // Running an approved reminder proposal is as human-only as sending a draft.
-        RequestBody::Send { .. } | RequestBody::Execute { .. } => Action::Send,
+        RequestBody::Send { .. }
+        | RequestBody::SendPreview { .. }
+        | RequestBody::Execute { .. } => Action::Send,
         RequestBody::RegisterPrincipal { .. }
         | RequestBody::RevokeToken { .. }
         | RequestBody::AuditRecent { .. }
@@ -102,6 +109,7 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::Approve { .. } => "approve",
         RequestBody::Reject { .. } => "reject",
         RequestBody::Send { .. } => "send",
+        RequestBody::SendPreview { .. } => "send_preview",
         RequestBody::Execute { .. } => "execute",
         RequestBody::ReminderTagAdd { .. } => "reminder_tag_add",
         RequestBody::EventTagAdd { .. } => "event_tag_add",
@@ -441,7 +449,16 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
         RequestBody::Send {
             proposal_id,
             acknowledge_stale,
-        } => send(state, principal, &proposal_id, acknowledge_stale, now),
+            recipients_digest,
+        } => send(
+            state,
+            principal,
+            &proposal_id,
+            acknowledge_stale,
+            &recipients_digest,
+            now,
+        ),
+        RequestBody::SendPreview { proposal_id } => send_preview(state, &proposal_id, now),
         RequestBody::RegisterPrincipal {
             principal_id,
             kind,
@@ -1123,6 +1140,7 @@ fn create_provider_draft(
         thread_id: Some(thread.external_id.clone()),
         to: to.clone(),
         body: body.clone(),
+        ..Default::default()
     };
     let guard = Guarded {
         connector: connector.as_ref(),
@@ -1735,44 +1753,192 @@ fn register(
     }
 }
 
-fn send(state: &State, actor: &Principal, proposal_id: &str, ack: bool, now: i64) -> Response {
-    let proposal = match state.store.prepare_send(proposal_id, ack) {
-        Ok(p) => p,
-        Err(e) => {
-            state.audit(
-                &actor.id,
-                "proposal.send",
-                "refused",
-                Some(proposal_id),
-                None,
-            );
-            return map_store(&e);
-        }
-    };
+/// Everything a send needs, resolved once from the proposal and the store.
+struct ResolvedSend {
+    source: Source,
+    thread_external_id: String,
+    recipients: Vec<String>,
+    subject: String,
+    body: String,
+    approval_draft_id: Option<String>,
+    stale: bool,
+}
+
+/// Resolve who a send goes to and what it says. Refusals carry a fixed reason label, never an
+/// address: the recipient is `to` if the draft names one, otherwise the last message in the
+/// thread that is not from the connector's own address.
+fn resolve_send(
+    state: &State,
+    proposal: &haste_core::Proposal,
+) -> Result<ResolvedSend, Box<Response>> {
+    let fail = |code: ErrorCode, msg: &str| Box::new(err(code, msg));
     let Payload::Draft { to, body } = &proposal.payload else {
-        return err(ErrorCode::IllegalTransition, "only drafts can be sent");
+        return Err(fail(
+            ErrorCode::IllegalTransition,
+            "only drafts can be sent",
+        ));
     };
     let Some(thread_id) = proposal.source_thread_id.clone() else {
-        return err(
-            ErrorCode::Validation,
-            "proposal has no source thread to send through",
-        );
+        return Err(fail(ErrorCode::Validation, "no_source_thread"));
     };
-    let source = match state.store.get_thread(&thread_id) {
-        Ok(Some((t, _))) => t.source,
-        Ok(None) => return err(ErrorCode::NotFound, "source thread not found"),
-        Err(e) => return map_store(&e),
+    let thread = match state.store.get_thread(&thread_id) {
+        Ok(Some((t, _))) => t,
+        Ok(None) => return Err(fail(ErrorCode::NotFound, "source thread not found")),
+        Err(e) => return Err(Box::new(map_store(&e))),
     };
-    let Some(connector) = state.connector_for(&source) else {
-        return err(
+    let Some(connector) = state.connector_for(&thread.source) else {
+        return Err(fail(
             ErrorCode::Validation,
             "no connector registered for this source",
+        ));
+    };
+    if body.trim().is_empty() || body.len() > MAX_SEND_BODY_BYTES {
+        return Err(fail(ErrorCode::Validation, "body_length"));
+    }
+    let recipients = match to {
+        Some(t) => vec![t.trim().to_owned()],
+        None => {
+            let own = connector.own_address().map(|a| a.to_lowercase());
+            let messages = state
+                .store
+                .messages_for_thread(&thread.id)
+                .map_err(|e| Box::new(map_store(&e)))?;
+            let target = messages
+                .iter()
+                .rev()
+                .filter_map(|m| m.sender_identifier.clone())
+                .find(|s| Some(s.to_lowercase()) != own);
+            match target {
+                Some(t) => vec![t],
+                None => return Err(fail(ErrorCode::Validation, "no_recipient")),
+            }
+        }
+    };
+    validate_recipients(&recipients).map_err(|why| fail(ErrorCode::Validation, why))?;
+    let subject = reply_subject(&thread.subject);
+    validate_subject(&subject).map_err(|why| fail(ErrorCode::Validation, why))?;
+    let stale = state
+        .store
+        .get_proposal(&proposal.id)
+        .map(|p| p.stale)
+        .unwrap_or(false);
+    Ok(ResolvedSend {
+        source: thread.source,
+        thread_external_id: thread.external_id,
+        recipients,
+        subject,
+        body: body.clone(),
+        approval_draft_id: proposal
+            .result
+            .as_deref()
+            .and_then(|r| r.strip_prefix("draft:"))
+            .map(str::to_owned),
+        stale,
+    })
+}
+
+/// Read-only: who a send would go to. Changes nothing and audits no content.
+fn send_preview(state: &State, proposal_id: &str, now: i64) -> Response {
+    let proposal = match state.store.get_proposal(proposal_id) {
+        Ok(p) => p,
+        Err(e) => return map_store(&e),
+    };
+    if proposal.state != haste_core::proposal::ProposalState::Approved {
+        return err(
+            ErrorCode::IllegalTransition,
+            "only approved proposals can be sent",
+        );
+    }
+    let resolved = match resolve_send(state, &proposal) {
+        Ok(r) => r,
+        Err(response) => return *response,
+    };
+    let used = state
+        .store
+        .sends_in_window(now)
+        .unwrap_or(MAX_SENDS_PER_HOUR);
+    Response::SendPreview {
+        preview: SendPreviewView {
+            source: resolved.source.as_name(),
+            recipients_digest: recipients_digest(&resolved.recipients),
+            recipients: resolved.recipients,
+            subject: resolved.subject,
+            body_bytes: resolved.body.len(),
+            stale: resolved.stale,
+            sends_remaining: MAX_SENDS_PER_HOUR.saturating_sub(used),
+        },
+    }
+}
+
+/// The human sends an approved draft. One attempt, ever: `approved -> executing`, one guarded
+/// connector call, then `sent`; back to `approved` only when nothing can have been delivered;
+/// otherwise it stays `executing` for a human check. No address reaches the audit or a reply.
+fn send(
+    state: &State,
+    actor: &Principal,
+    proposal_id: &str,
+    ack: bool,
+    digest: &str,
+    now: i64,
+) -> Response {
+    let refuse = |reason: &str, response: Response| {
+        state.audit(
+            &actor.id,
+            "proposal.send",
+            "refused",
+            Some(proposal_id),
+            Some(reason),
+        );
+        response
+    };
+    let proposal = match state.store.get_proposal(proposal_id) {
+        Ok(p) => p,
+        Err(e) => return map_store(&e),
+    };
+    let resolved = match resolve_send(state, &proposal) {
+        Ok(r) => r,
+        Err(response) => {
+            let reason = reason_of(&response);
+            return refuse(&reason, *response);
+        }
+    };
+    if recipients_digest(&resolved.recipients) != digest {
+        return refuse(
+            "recipients_changed",
+            err(ErrorCode::Validation, "recipients_changed"),
+        );
+    }
+    let Some(connector) = state.connector_for(&resolved.source) else {
+        return refuse(
+            "no_connector",
+            err(
+                ErrorCode::Validation,
+                "no connector registered for this source",
+            ),
         );
     };
+    if let Err(e) = state
+        .store
+        .begin_send(proposal_id, ack, now, &resolved.recipients)
+    {
+        let reason = match &e {
+            StoreError::Validation(m) => m.clone(),
+            StoreError::StaleNeedsAcknowledgement => "stale".to_owned(),
+            _ => "not_sendable".to_owned(),
+        };
+        return refuse(&reason, map_store(&e));
+    }
+    state.publish(Event::ProposalChanged {
+        proposal_id: proposal_id.to_owned(),
+        state: haste_core::proposal::ProposalState::Executing,
+    });
     let draft = DraftToSend {
-        thread_id: Some(thread_id),
-        to: to.clone(),
-        body: body.clone(),
+        thread_id: Some(resolved.thread_external_id.clone()),
+        to: resolved.recipients.first().cloned(),
+        body: resolved.body.clone(),
+        recipients: resolved.recipients.clone(),
+        subject: Some(resolved.subject.clone()),
+        approval_draft_id: resolved.approval_draft_id.clone(),
     };
     let guard = Guarded {
         connector: connector.as_ref(),
@@ -1780,28 +1946,83 @@ fn send(state: &State, actor: &Principal, proposal_id: &str, ack: bool, now: i64
     };
     let outcome = tokio::runtime::Handle::current().block_on(guard.send(&draft));
     match outcome {
-        Ok(receipt) => match state.store.complete_send(
-            proposal_id,
-            &format!("sent:{}", receipt.external_id),
-            now,
-        ) {
-            Ok(p) => {
-                state.audit(&actor.id, "proposal.send", "sent", Some(proposal_id), None);
+        Ok(receipt) => {
+            let result = format!("sent:{}", receipt.external_id);
+            match state.store.finish_send(proposal_id, &result, now) {
+                Ok(p) => {
+                    state.audit(&actor.id, "proposal.send", "sent", Some(proposal_id), None);
+                    if receipt.external_id.contains("copy_failed") {
+                        state.audit(
+                            &actor.id,
+                            "send.copy_failed",
+                            "failed",
+                            Some(proposal_id),
+                            None,
+                        );
+                    }
+                    state.publish(Event::ProposalChanged {
+                        proposal_id: proposal_id.to_owned(),
+                        state: p.state,
+                    });
+                    Response::Proposal { proposal: p }
+                }
+                // delivered but not recorded: keep it executing so nobody sends it twice
+                Err(e) => {
+                    state.audit(
+                        &actor.id,
+                        "proposal.send",
+                        "needs_check",
+                        Some(proposal_id),
+                        Some("recorded_failed"),
+                    );
+                    map_store(&e)
+                }
+            }
+        }
+        Err(error) => match classify_send(&error) {
+            SendOutcome::NoEffect => {
+                let (reason, code) = match &error {
+                    CallError::KillSwitchEngaged => ("kill_switch_engaged", ErrorCode::Denied),
+                    CallError::BreakerOpened(_) => ("circuit_breaker", ErrorCode::Denied),
+                    CallError::CapabilityMissing(_) => ("connector_cannot_send", ErrorCode::Denied),
+                    CallError::Connector(ConnectorError::Transient(_)) => {
+                        ("connection_failed", ErrorCode::Internal)
+                    }
+                    _ => ("send_refused", ErrorCode::Internal),
+                };
+                let _ = state.store.fail_send_no_effect(proposal_id, reason, now);
+                state.audit(
+                    &actor.id,
+                    "proposal.send",
+                    "failed",
+                    Some(proposal_id),
+                    Some(reason),
+                );
                 state.publish(Event::ProposalChanged {
                     proposal_id: proposal_id.to_owned(),
-                    state: p.state,
+                    state: haste_core::proposal::ProposalState::Approved,
                 });
-                Response::Proposal { proposal: p }
+                err(code, reason)
             }
-            Err(e) => map_store(&e),
+            SendOutcome::Ambiguous | SendOutcome::Sent => {
+                let _ = state
+                    .store
+                    .mark_send_needs_check(proposal_id, "outcome_unknown", now);
+                state.audit(
+                    &actor.id,
+                    "proposal.send",
+                    "needs_check",
+                    Some(proposal_id),
+                    Some("outcome_unknown"),
+                );
+                state.publish(Event::Notice {
+                    message: format!("a send needs a check: proposal {proposal_id} may or may not have been delivered"),
+                });
+                err(
+                    ErrorCode::Internal,
+                    "the outcome is unknown; the proposal stays 'executing' until you check the mailbox",
+                )
+            }
         },
-        Err(CallError::CapabilityMissing(_)) => err(ErrorCode::Denied, "connector cannot send"),
-        Err(CallError::KillSwitchEngaged) => {
-            err(ErrorCode::Denied, "connector kill switch engaged")
-        }
-        Err(CallError::BreakerOpened(_)) => {
-            err(ErrorCode::Denied, "connector stopped by circuit breaker")
-        }
-        Err(other) => err(ErrorCode::Internal, &format!("send failed: {other:?}")),
     }
 }

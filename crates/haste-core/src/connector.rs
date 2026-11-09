@@ -61,11 +61,17 @@ pub struct Batch {
     pub next_cursor: Option<Cursor>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DraftToSend {
     pub thread_id: Option<String>,
     pub to: Option<String>,
     pub body: String,
+    /// The resolved, validated recipients of a human send (empty for creating a draft).
+    pub recipients: Vec<String>,
+    /// The subject of a human send, already `Re: …` and validated.
+    pub subject: Option<String>,
+    /// The provider draft made at approval time, removed after a successful send (Gmail).
+    pub approval_draft_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +95,9 @@ pub enum ConnectorError {
     Other(String),
     /// The connector does not support this call (the default for optional trait methods).
     Unsupported(String),
+    /// A send that may or may not have reached the recipient (timeout or dropped connection
+    /// after the message was handed over). Never retried: a human checks.
+    Ambiguous(String),
     /// Access is not granted (for example macOS Reminders permission). Waiting on a human: it is
     /// never retried and never trips the circuit breaker.
     Authorization(String),
@@ -166,6 +175,11 @@ pub trait Connector: Send + Sync {
                 "reminders cannot be created".into(),
             ))
         })
+    }
+
+    /// The connector's own mail address, so a reply is never addressed to oneself.
+    fn own_address(&self) -> Option<String> {
+        None
     }
 
     /// Whether the kill switch starts engaged when no state is persisted yet (fresh install).
@@ -443,6 +457,11 @@ impl Guarded<'_> {
             Err(e @ (ConnectorError::Challenge(_) | ConnectorError::Checkpoint(_))) => {
                 Err(self.trip("send", e))
             }
+            // The message may have left: record it distinctly, make no further call, no breaker.
+            Err(e @ ConnectorError::Ambiguous(_)) => {
+                self.hooks.audit("send", &source, "ambiguous");
+                Err(CallError::Connector(e))
+            }
             Err(e) => {
                 self.hooks.audit("send", &source, "error");
                 Err(CallError::Connector(e))
@@ -557,6 +576,7 @@ mod tests {
             thread_id: None,
             to: None,
             body: "x".into(),
+            ..Default::default()
         };
         assert_eq!(
             block_on(g.create_draft(&d)),
@@ -697,6 +717,7 @@ mod tests {
             thread_id: None,
             to: None,
             body: "x".into(),
+            ..Default::default()
         }));
         assert_eq!(r, Err(CallError::CapabilityMissing("send")));
         assert_eq!(c.calls.load(Ordering::SeqCst), 0);

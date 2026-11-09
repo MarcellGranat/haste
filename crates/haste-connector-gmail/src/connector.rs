@@ -19,7 +19,7 @@ use crate::client::{ApiPart, GmailClient};
 use crate::consts::{API_BASE, BACKFILL_DAYS, BACKFILL_MAX_THREADS, HTTP_TIMEOUT, TOKEN_URL};
 use crate::keychain::TokenStore;
 use crate::mapper::{addresses, map_thread};
-use crate::mime::{build_plain_text, encode_raw, reply_subject};
+use crate::mime::{build_plain_text, build_send_message, encode_raw, reply_subject};
 
 /// Everything needed to run the connector except the refresh token (which is in the Keychain).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -63,6 +63,8 @@ impl GmailConfig {
 
 pub struct GmailConnector {
     client: GmailClient,
+    /// The connector's own address: the From of a send, and never a reply target.
+    account: String,
 }
 
 impl GmailConnector {
@@ -96,6 +98,7 @@ impl GmailConnector {
         );
         Self {
             client: GmailClient::new(http, api_base, Arc::new(tokens)),
+            account: config.account.clone(),
         }
     }
 
@@ -180,6 +183,66 @@ impl GmailConnector {
         Ok(batch)
     }
 
+    /// A human send: the recipient, subject and body the human confirmed, exactly. One
+    /// `messages.send` request, never retried; the approval-time draft is removed afterwards
+    /// (best effort, once).
+    async fn send_message(&self, draft: &DraftToSend) -> Result<SendReceipt, ConnectorError> {
+        let refused = |why: &str| ConnectorError::Other(format!("send refused: {why}"));
+        let to = draft
+            .recipients
+            .first()
+            .ok_or_else(|| refused("no recipient"))?;
+        let subject = draft
+            .subject
+            .as_deref()
+            .ok_or_else(|| refused("no subject"))?;
+        // Threading headers come from the thread; this lookup happens before anything is sent.
+        let (mut in_reply_to, mut references) = (None, None);
+        if let Some(id) = &draft.thread_id {
+            if let Some(thread) = self.client.get_thread_headers(id).await? {
+                let header = |part: &ApiPart, name: &str| {
+                    part.headers
+                        .iter()
+                        .find(|h| h.name.eq_ignore_ascii_case(name))
+                        .map(|h| h.value.clone())
+                };
+                if let Some(last) = thread
+                    .messages
+                    .iter()
+                    .filter_map(|m| m.payload.as_ref())
+                    .next_back()
+                {
+                    in_reply_to = header(last, "Message-ID");
+                    references = match (header(last, "References"), &in_reply_to) {
+                        (Some(r), Some(id)) => Some(format!("{r} {id}")),
+                        (None, Some(id)) => Some(id.clone()),
+                        (r, None) => r,
+                    };
+                }
+            }
+        }
+        let domain = self.account.rsplit('@').next().unwrap_or("localhost");
+        let mime = build_send_message(
+            &self.account,
+            to,
+            subject,
+            &draft.body,
+            &haste_core::send::format_rfc2822(haste_core::time::now_secs()),
+            &haste_core::send::new_message_id(domain),
+            in_reply_to.as_deref(),
+            references.as_deref(),
+        )
+        .map_err(refused)?;
+        let id = self
+            .client
+            .send_message(&encode_raw(&mime), draft.thread_id.as_deref())
+            .await?;
+        if let Some(draft_id) = &draft.approval_draft_id {
+            let _ = self.client.delete_draft(draft_id).await;
+        }
+        Ok(SendReceipt { external_id: id })
+    }
+
     async fn draft(&self, draft: &DraftToSend) -> Result<DraftReceipt, ConnectorError> {
         let thread = match &draft.thread_id {
             Some(id) => self.client.get_thread_headers(id).await?,
@@ -245,10 +308,15 @@ impl Connector for GmailConnector {
         Capabilities {
             read: true,
             draft: true,
-            send: false,
+            // Consulted only by the human send path: agents are denied `Action::Send` by the gate.
+            send: true,
             archive: false,
             ..Default::default()
         }
+    }
+
+    fn own_address(&self) -> Option<String> {
+        Some(self.account.clone())
     }
 
     fn fetch(&self, cursor: Option<Cursor>) -> BoxFuture<'_, Result<Batch, ConnectorError>> {
@@ -262,13 +330,9 @@ impl Connector for GmailConnector {
 
     fn send<'a>(
         &'a self,
-        _draft: &'a DraftToSend,
+        draft: &'a DraftToSend,
     ) -> BoxFuture<'a, Result<SendReceipt, ConnectorError>> {
-        Box::pin(async {
-            Err(ConnectorError::Other(
-                "sending is not supported by the gmail connector".into(),
-            ))
-        })
+        Box::pin(self.send_message(draft))
     }
 
     fn create_draft<'a>(

@@ -43,6 +43,50 @@ pub fn build_plain_text(
     out
 }
 
+/// A plain-text message for a human send. Unlike the draft builder this one *refuses* any line
+/// break or NUL in a header value instead of replacing it, so what the human confirmed is
+/// exactly what is sent. There is no Cc or Bcc header, by construction.
+///
+/// # Errors
+/// A fixed reason label when a header value contains CR, LF or NUL.
+#[allow(clippy::too_many_arguments)]
+pub fn build_send_message(
+    from: &str,
+    to: &str,
+    subject: &str,
+    body: &str,
+    date: &str,
+    message_id: &str,
+    in_reply_to: Option<&str>,
+    references: Option<&str>,
+) -> Result<String, &'static str> {
+    let values = [from, to, subject, date, message_id]
+        .into_iter()
+        .chain(in_reply_to)
+        .chain(references);
+    for v in values {
+        if v.contains(['\r', '\n', '\0']) {
+            return Err("header characters");
+        }
+    }
+    let mut out = String::new();
+    out.push_str("MIME-Version: 1.0\r\n");
+    out.push_str(&format!(
+        "From: {from}\r\nTo: {to}\r\nSubject: {subject}\r\n"
+    ));
+    out.push_str(&format!("Date: {date}\r\nMessage-ID: {message_id}\r\n"));
+    if let Some(id) = in_reply_to {
+        out.push_str(&format!("In-Reply-To: {id}\r\n"));
+    }
+    if let Some(refs) = references {
+        out.push_str(&format!("References: {refs}\r\n"));
+    }
+    out.push_str("Content-Type: text/plain; charset=UTF-8\r\n");
+    out.push_str("Content-Transfer-Encoding: 8bit\r\n\r\n");
+    out.push_str(&body.replace("\r\n", "\n").replace('\n', "\r\n"));
+    Ok(out)
+}
+
 /// Gmail's `raw` field: base64url without padding.
 #[must_use]
 pub fn encode_raw(mime: &str) -> String {
@@ -82,6 +126,45 @@ mod tests {
         );
         let headers = mime.split("\r\n\r\n").next().unwrap();
         assert!(!headers.lines().any(|l| l.starts_with("Bcc:")), "{headers}");
+    }
+
+    #[test]
+    fn a_send_message_refuses_injection_and_has_no_cc_or_bcc() {
+        let ok = build_send_message(
+            "me@x.org",
+            "ana@x.org",
+            "Re: Lunch",
+            "Yes!\nSee you.",
+            "Mon, 09 Nov 2026 10:00:00 +0000",
+            "<id@x.org>",
+            Some("<m3@x>"),
+            Some("<m1@x> <m3@x>"),
+        )
+        .unwrap();
+        let headers = ok.split("\r\n\r\n").next().unwrap();
+        for h in [
+            "From: me@x.org",
+            "To: ana@x.org",
+            "Subject: Re: Lunch",
+            "Message-ID: <id@x.org>",
+            "In-Reply-To: <m3@x>",
+        ] {
+            assert!(headers.contains(h), "{h}");
+        }
+        assert!(!headers.to_lowercase().contains("bcc") && !headers.to_lowercase().contains("cc:"));
+        assert!(ok.ends_with("Yes!\r\nSee you."));
+        let d = "Mon, 09 Nov 2026 10:00:00 +0000";
+        for (to, subject) in [
+            ("a@x.org\r\nBcc: e@x.org", "s"),
+            ("a@x.org", "s\nBcc: e@x.org"),
+            ("a@x.org\0", "s"),
+        ] {
+            assert_eq!(
+                build_send_message("me@x.org", to, subject, "b", d, "<i@x>", None, None),
+                Err("header characters"),
+                "{to:?} {subject:?}"
+            );
+        }
     }
 
     #[test]

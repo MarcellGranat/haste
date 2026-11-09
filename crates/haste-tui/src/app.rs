@@ -5,7 +5,9 @@ use std::collections::BTreeSet;
 use haste_core::herdr::{AgentStatus, AgentStatusRecord, MachineState};
 use haste_core::model::Source;
 use haste_core::proposal::{Payload, Proposal, ProposalState};
-use haste_proto::{ConnectorView, Event, MachineView, RemindersStatusView, ThreadView};
+use haste_proto::{
+    ConnectorView, Event, MachineView, RemindersStatusView, SendPreviewView, ThreadView,
+};
 
 /// Terminal-independent key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,9 +50,15 @@ pub enum Effect {
     Reject {
         id: String,
     },
+    /// Ask the daemon who a send would go to (read-only); the answer opens the confirmation.
+    PreviewSend {
+        id: String,
+    },
+    /// Send, carrying the digest of the recipients the human was shown.
     Send {
         id: String,
         acknowledge_stale: bool,
+        recipients_digest: String,
     },
     /// Run an approved reminder proposal in Reminders.
     Execute {
@@ -82,9 +90,13 @@ pub enum Mode {
     ConfirmRelease(String),
     ConfirmSend {
         id: String,
-        recipient: String,
+        /// Every recipient, as the daemon resolved them.
+        recipients: Vec<String>,
+        subject: String,
         source: String,
         stale: bool,
+        remaining: u32,
+        recipients_digest: String,
     },
     ConfirmExecute {
         id: String,
@@ -414,16 +426,6 @@ impl App {
         }
     }
 
-    fn source_of(&self, p: &Proposal) -> String {
-        p.source_thread_id
-            .as_ref()
-            .and_then(|id| self.threads.iter().find(|t| &t.thread.id == id))
-            .map_or_else(
-                || "unknown source".to_owned(),
-                |t| t.thread.source.as_name(),
-            )
-    }
-
     fn move_selection(&mut self, delta: isize) {
         let len = match self.view {
             View::Approvals => self.rows().len(),
@@ -534,11 +536,17 @@ impl App {
                     acknowledge_stale: true,
                 },
             ),
-            Mode::ConfirmSend { id, stale, .. } => self.confirm(
+            Mode::ConfirmSend {
+                id,
+                stale,
+                recipients_digest,
+                ..
+            } => self.confirm(
                 key,
                 Effect::Send {
                     id,
                     acknowledge_stale: stale,
+                    recipients_digest,
                 },
             ),
             Mode::ConfirmExecute { id, stale, .. } => self.confirm(
@@ -610,7 +618,7 @@ impl App {
             Key::Enter if self.view == View::Approvals => self.enter(),
             Key::Char('a') if self.view == View::Approvals => return self.approve_selected(),
             Key::Char('A') if self.view == View::Approvals => self.start_batch(),
-            Key::Char('s') if self.view == View::Approvals => self.start_send(),
+            Key::Char('s') if self.view == View::Approvals => return self.start_send(),
             Key::Char('T') if self.view == View::Inbox => return self.thread_to_reminder(),
             _ => {}
         }
@@ -737,33 +745,35 @@ impl App {
         })
     }
 
-    fn start_send(&mut self) {
-        let Some(p) = self.selected_proposal().cloned() else {
-            return;
-        };
+    /// `s` on an approved draft asks the daemon for a preview; the confirmation opens when the
+    /// answer arrives and names every recipient the daemon resolved.
+    fn start_send(&mut self) -> Option<Effect> {
+        let p = self.selected_proposal().cloned()?;
         if p.payload.is_reminder() || p.payload.is_calendar() {
             self.start_execute(&p);
-            return;
+            return None;
         }
         if p.state != ProposalState::Approved {
             self.status = "send is only available for approved proposals".into();
-            return;
+            return None;
         }
-        let recipient = match &p.payload {
-            Payload::Draft { to, .. } => {
-                to.clone().unwrap_or_else(|| "(thread participants)".into())
-            }
-            _ => {
-                self.status = "only drafts can be sent".into();
-                return;
-            }
-        };
-        let source = self.source_of(&p);
+        if !matches!(p.payload, Payload::Draft { .. }) {
+            self.status = "only drafts can be sent".into();
+            return None;
+        }
+        Some(Effect::PreviewSend { id: p.id })
+    }
+
+    /// The daemon's answer to [`Effect::PreviewSend`]: show the confirmation.
+    pub fn show_send_preview(&mut self, id: &str, preview: SendPreviewView) {
         self.mode = Mode::ConfirmSend {
-            id: p.id,
-            recipient,
-            source,
-            stale: p.stale,
+            id: id.to_owned(),
+            recipients: preview.recipients,
+            subject: preview.subject,
+            source: preview.source,
+            stale: preview.stale,
+            remaining: preview.sends_remaining,
+            recipients_digest: preview.recipients_digest,
         };
     }
 
@@ -812,8 +822,15 @@ impl App {
                 Some(format!("Thread changed. Approve {id} anyway? [y/N]"))
             }
             Mode::ConfirmSend {
-                recipient, source, ..
-            } => Some(format!("SEND to {recipient} via {source}? [y/N]")),
+                recipients,
+                subject,
+                source,
+                remaining,
+                ..
+            } => Some(format!(
+                "SEND to {} via {source}, subject '{subject}' ({remaining} left this hour)? [y/N]",
+                recipients.join(", ")
+            )),
             Mode::ConfirmExecute { what, .. } => Some(format!("Run: {what}? [y/N]")),
             _ => None,
         }
@@ -1057,26 +1074,61 @@ mod tests {
     }
 
     #[test]
-    fn send_is_only_offered_for_approved_proposals_and_names_recipient_and_source() {
+    fn send_is_only_offered_for_approved_drafts_and_confirms_the_daemons_recipients() {
         let mut app = app_with(vec![
             proposal("p1", "agent-a", ProposalState::Pending, false),
             proposal("p2", "agent-a", ProposalState::Approved, false),
         ]);
         press(&mut app, "j"); // p1 pending
-        press(&mut app, "s");
+        assert!(press(&mut app, "s").is_empty());
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.status.contains("approved"));
-        press(&mut app, "js");
-        let prompt = app.confirm_prompt().unwrap();
-        assert!(prompt.contains("ana@x.org"), "{prompt}");
-        assert!(prompt.contains("unknown source"), "{prompt}");
-        let effect = app.handle_key(Key::Char('y')).unwrap();
+        // on the approved draft `s` asks for a preview and changes nothing yet
+        press(&mut app, "j");
         assert_eq!(
-            effect,
-            Effect::Send {
+            app.handle_key(Key::Char('s')),
+            Some(Effect::PreviewSend { id: "p2".into() })
+        );
+        assert_eq!(app.mode, Mode::Normal);
+        // the preview names the resolved recipient, the subject, the source and the budget
+        app.show_send_preview(
+            "p2",
+            SendPreviewView {
+                source: "gmail".into(),
+                recipients: vec!["ana@x.org".into()],
+                subject: "Re: plan".into(),
+                body_bytes: 10,
+                stale: false,
+                sends_remaining: 7,
+                recipients_digest: "digest-1".into(),
+            },
+        );
+        let prompt = app.confirm_prompt().unwrap();
+        for part in ["SEND to ana@x.org", "gmail", "Re: plan", "7 left"] {
+            assert!(prompt.contains(part), "{prompt}");
+        }
+        // anything but y cancels; y sends with the digest that was displayed
+        assert!(press(&mut app, "n").is_empty());
+        assert_eq!(app.mode, Mode::Normal);
+        app.show_send_preview(
+            "p2",
+            SendPreviewView {
+                source: "gmail".into(),
+                recipients: vec!["ana@x.org".into()],
+                subject: "Re: plan".into(),
+                body_bytes: 10,
+                stale: true,
+                sends_remaining: 7,
+                recipients_digest: "digest-1".into(),
+            },
+        );
+        assert_eq!(
+            app.handle_key(Key::Char('y')),
+            Some(Effect::Send {
                 id: "p2".into(),
-                acknowledge_stale: false
-            }
+                acknowledge_stale: true,
+                recipients_digest: "digest-1".into()
+            })
         );
     }
 

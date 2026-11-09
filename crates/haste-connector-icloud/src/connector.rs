@@ -60,6 +60,7 @@ fn failure_class(error: &ConnectorError) -> (&'static str, String) {
         ConnectorError::Transient(m) => ("transient", m.clone()),
         ConnectorError::Other(m) => ("error", m.clone()),
         ConnectorError::Unsupported(m) => ("unsupported", m.clone()),
+        ConnectorError::Ambiguous(m) => ("ambiguous", m.clone()),
         ConnectorError::Authorization(m) => ("authorization", m.clone()),
     }
 }

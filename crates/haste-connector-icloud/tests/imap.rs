@@ -474,6 +474,7 @@ async fn send_is_unsupported_and_the_guard_refuses_it() {
         thread_id: None,
         to: Some("a@x.org".into()),
         body: "hi".into(),
+        ..Default::default()
     };
     assert_eq!(
         guard.send(&draft).await,

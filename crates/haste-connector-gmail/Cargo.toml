@@ -12,6 +12,7 @@ path = "src/bin/haste-gmail-auth.rs"
 
 [dependencies]
 haste-core.workspace = true
+haste-google-oauth.workspace = true
 haste-proto.workspace = true
 reqwest.workspace = true
 security-framework.workspace = true

@@ -633,6 +633,7 @@ dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
  "haste-core",
+ "haste-google-oauth",
  "haste-proto",
  "hex",
  "reqwest",
@@ -684,6 +685,21 @@ dependencies = [
  "sha2",
  "tempfile",
  "ulid",
+]
+
+[[package]]
+name = "haste-google-oauth"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.2.17",
+ "haste-core",
+ "reqwest",
+ "security-framework",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
 ]
 
 [[package]]

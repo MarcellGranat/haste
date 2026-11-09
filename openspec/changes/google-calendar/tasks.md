@@ -5,9 +5,9 @@
 
 ## 2. Shared Google OAuth refactor
 
-- [ ] 2.1 Extract the Gmail OAuth consent, PKCE, loopback listener and token-refresh code into a shared module parameterised by scope set and Keychain service
-- [ ] 2.2 Switch the Gmail connector to the shared module with its existing parameters (`gmail.readonly`, `gmail.compose`, `com.haste.gmail`)
-- [ ] 2.3 Run the existing Gmail connector test suite unchanged and confirm it passes (connector-gmail ADDED requirement)
+- [x] 2.1 Extract the Gmail OAuth consent, PKCE, loopback listener and token-refresh code into a shared module parameterised by scope set and Keychain service
+- [x] 2.2 Switch the Gmail connector to the shared module with its existing parameters (`gmail.readonly`, `gmail.compose`, `com.haste.gmail`)
+- [x] 2.3 Run the existing Gmail connector test suite unchanged and confirm it passes (connector-gmail ADDED requirement)
 
 ## 3. Core model and policy
 
@@ -16,7 +16,7 @@
 - [ ] 3.3 Add `CalendarCreate` and `CalendarUpdate` proposal payloads, with the `CalendarUpdate` field allow-list enforced at creation
 - [ ] 3.4 Add `calendar.create` and `calendar.update` to the policy gate as `pending` for agents; confirm `calendar.delete` resolves to `denied` as an undefined action
 - [ ] 3.5 Add the default-engaged flag to the connector descriptor and a test that a fresh store starts the flagged connector engaged
-- [ ] 3.6 Coordinate with the `reminders-and-links` capability-flag and proposal-kind set before adding flags, and rebase if that change has landed
+- [x] 3.6 Coordinate with the `reminders-and-links` capability-flag and proposal-kind set before adding flags, and rebase if that change has landed
 
 ## 4. Google Calendar connector
 

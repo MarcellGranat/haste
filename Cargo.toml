@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = ["crates/haste-herdr", "crates/haste-connector-icloud", "crates/haste-proto", "crates/haste-core", "crates/haste-store", "crates/hasted", "crates/haste", "crates/haste-tui", "crates/haste-connector-gmail", "crates/haste-connector-reminders"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal", "fs"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ratatui = "0.29"
+crossterm = "0.28"
+sha2 = "0.10"
+getrandom = "0.2"
+ulid = "1"
+hex = "0.4"
+libc = "0.2"
+tempfile = "3"
+haste-proto = { path = "crates/haste-proto" }
+haste-core = { path = "crates/haste-core" }
+haste-store = { path = "crates/haste-store" }
+haste-connector-gmail = { path = "crates/haste-connector-gmail" }
+haste-connector-icloud = { path = "crates/haste-connector-icloud" }
+haste-connector-reminders = { path = "crates/haste-connector-reminders" }
+haste-herdr = { path = "crates/haste-herdr" }
+imap = { version = "2.4", default-features = false }
+imap-proto = "0.10"
+native-tls = "0.2"
+mail-parser = "0.9"
+rpassword = "7"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+security-framework = "3"
+base64 = "0.22"
+
+# Local fix for iCloud's NIL transfer-encoding; see vendor/imap-proto/HASTE-PATCH.md.
+[patch.crates-io]
+imap-proto = { path = "vendor/imap-proto" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

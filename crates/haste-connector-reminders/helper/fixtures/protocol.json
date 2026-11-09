@@ -1,0 +1,17 @@
+{
+  "requests": [
+    {"op": "authorization", "prompt": true},
+    {"op": "list_lists"},
+    {"op": "fetch_changed", "since": 0, "offset": 200, "limit": 200},
+    {"op": "create_reminder", "title": "Call", "due": 1700000000, "list": null, "notes": "haste:thread/abc"},
+    {"op": "complete_reminder", "external_id": "x-apple-reminder://1"}
+  ],
+  "responses": [
+    {"op": "authorization", "status": "not_determined"},
+    {"op": "list_lists", "count": 3},
+    {"op": "fetch_changed", "reminders": [{"external_id": "x-apple-reminder://1", "title": "Call", "notes": "", "due": null, "completed": false, "list": "Inbox", "modified": 1700000000}], "has_more": false},
+    {"op": "create_reminder", "reminder": {"external_id": "x-apple-reminder://2", "title": "Call", "notes": "haste:thread/abc", "due": 1700000000, "completed": false, "list": "Inbox", "modified": 1700000001}},
+    {"op": "complete_reminder"},
+    {"op": "error", "kind": "not_authorized", "message": "Reminders access is not granted"}
+  ]
+}

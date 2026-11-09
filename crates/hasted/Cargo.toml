@@ -1,0 +1,38 @@
+[package]
+name = "hasted"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "hasted"
+path = "src/main.rs"
+
+[features]
+# Real Gmail connector (reqwest + Keychain). Off by default so the daemon builds without it.
+gmail = ["dep:haste-connector-gmail"]
+# Real iCloud Mail connector (IMAP over TLS + Keychain). Off by default.
+icloud = ["dep:haste-connector-icloud"]
+
+[dependencies]
+haste-connector-gmail = { workspace = true, optional = true }
+haste-connector-icloud = { workspace = true, optional = true }
+haste-connector-reminders.workspace = true
+haste-core.workspace = true
+haste-herdr.workspace = true
+haste-proto.workspace = true
+haste-store.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+haste-connector-gmail.workspace = true
+haste-connector-icloud.workspace = true
+base64.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

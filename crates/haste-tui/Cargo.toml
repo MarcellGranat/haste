@@ -1,0 +1,21 @@
+[package]
+name = "haste-tui"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "haste-tui"
+path = "src/main.rs"
+
+[dependencies]
+haste-core.workspace = true
+haste-proto.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "haste-connector-reminders"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+haste-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,130 @@
+{
+ "id": "t100",
+ "messages": [
+  {
+   "id": "m1",
+   "threadId": "t100",
+   "labelIds": [
+    "INBOX",
+    "UNREAD"
+   ],
+   "snippet": "Shall we have lunch on Friday?",
+   "internalDate": "1700000000000",
+   "payload": {
+    "mimeType": "multipart/alternative",
+    "headers": [
+     {
+      "name": "From",
+      "value": "Ana <Ana@Example.org>"
+     },
+     {
+      "name": "To",
+      "value": "me@example.com"
+     },
+     {
+      "name": "Subject",
+      "value": "Lunch on Friday?"
+     }
+    ],
+    "parts": [
+     {
+      "mimeType": "text/plain",
+      "body": {
+       "data": "U2hhbGwgd2UgaGF2ZSBsdW5jaCBvbiBGcmlkYXk_"
+      }
+     },
+     {
+      "mimeType": "text/html",
+      "body": {
+       "data": "PHA-U2hhbGwgd2UgaGF2ZSBsdW5jaCBvbiBGcmlkYXk_PC9wPg"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "m2",
+   "threadId": "t100",
+   "labelIds": [
+    "SENT"
+   ],
+   "snippet": "Sounds good.",
+   "internalDate": "1700000100000",
+   "payload": {
+    "mimeType": "multipart/alternative",
+    "headers": [
+     {
+      "name": "From",
+      "value": "me@example.com"
+     },
+     {
+      "name": "To",
+      "value": "ana@example.org, Bela <bela@example.org>"
+     },
+     {
+      "name": "Subject",
+      "value": "Re: Lunch on Friday?"
+     }
+    ],
+    "parts": [
+     {
+      "mimeType": "text/plain",
+      "body": {
+       "data": "U291bmRzIGdvb2Qu"
+      }
+     },
+     {
+      "mimeType": "text/html",
+      "body": {
+       "data": "PHA-U291bmRzIGdvb2QuPC9wPg"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "m3",
+   "threadId": "t100",
+   "labelIds": [
+    "INBOX"
+   ],
+   "snippet": "Noon works.",
+   "internalDate": "1700000200000",
+   "payload": {
+    "mimeType": "multipart/alternative",
+    "headers": [
+     {
+      "name": "From",
+      "value": "Bela <bela@example.org>"
+     },
+     {
+      "name": "To",
+      "value": "me@example.com, ana@example.org"
+     },
+     {
+      "name": "Subject",
+      "value": "Re: Lunch on Friday?"
+     },
+     {
+      "name": "Cc",
+      "value": "CC <cc@example.org>"
+     }
+    ],
+    "parts": [
+     {
+      "mimeType": "text/plain",
+      "body": {
+       "data": "Tm9vbiB3b3Jrcy4"
+      }
+     },
+     {
+      "mimeType": "text/html",
+      "body": {
+       "data": "PHA-Tm9vbiB3b3Jrcy48L3A-"
+      }
+     }
+    ]
+   }
+  }
+ ]
+}

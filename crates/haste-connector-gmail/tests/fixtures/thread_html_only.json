@@ -1,0 +1,39 @@
+{
+ "id": "t200",
+ "messages": [
+  {
+   "id": "m9",
+   "threadId": "t200",
+   "labelIds": [
+    "INBOX"
+   ],
+   "snippet": "Your invoice is ready",
+   "internalDate": "1700000300000",
+   "payload": {
+    "mimeType": "multipart/alternative",
+    "headers": [
+     {
+      "name": "From",
+      "value": "Billing <billing@shop.example>"
+     },
+     {
+      "name": "To",
+      "value": "me@example.com"
+     },
+     {
+      "name": "Subject",
+      "value": "Invoice"
+     }
+    ],
+    "parts": [
+     {
+      "mimeType": "text/html",
+      "body": {
+       "data": "WW91ciBpbnZvaWNlIGlzIHJlYWR5"
+      }
+     }
+    ]
+   }
+  }
+ ]
+}

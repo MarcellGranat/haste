@@ -1,0 +1,12 @@
+[package]
+name = "haste-proto"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+haste-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

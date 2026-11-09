@@ -1,0 +1,28 @@
+[package]
+name = "haste"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Human-shell subcommands (agent register, token revoke, proposal approve/reject).
+# Off in the agent-facing build, so those verbs do not exist there.
+human = []
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "haste"
+path = "src/main.rs"
+
+[dependencies]
+haste-core.workspace = true
+haste-proto.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

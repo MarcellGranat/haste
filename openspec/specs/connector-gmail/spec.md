@@ -1,7 +1,7 @@
 # connector-gmail Specification
 
 ## Purpose
-TBD - created by syncing change gmail-connector. Update Purpose after archive.
+Gmail connector: read mail and create plain-text drafts, never send.
 
 ## Requirements
 
@@ -186,3 +186,14 @@ The system SHALL let the human list, release and engage the kill switch of any c
 #### Scenario: Breaker trips again after release
 - **WHEN** a released connector immediately returns a checkpoint error
 - **THEN** the kill switch is engaged again with no retry
+
+### Requirement: Shared OAuth code is parameterised without changing Gmail behavior
+The OAuth consent, PKCE, loopback listener and token-refresh code SHALL be usable by more than one Google connector through a parameter set of scopes and Keychain service. The Gmail connector SHALL continue to use exactly the scopes `gmail.readonly` and `gmail.compose` and the Keychain service `com.haste.gmail`, and its existing requirements and tests SHALL pass unchanged.
+
+#### Scenario: Gmail parameters unchanged
+- **WHEN** the Gmail connector authorizes after the refactor
+- **THEN** it requests exactly `gmail.readonly` and `gmail.compose` and stores its refresh token under `com.haste.gmail`
+
+#### Scenario: Existing Gmail tests pass
+- **WHEN** the Gmail connector test suite runs after the refactor
+- **THEN** every existing test passes without modification

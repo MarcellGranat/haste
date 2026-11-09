@@ -627,6 +627,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "haste-connector-gcal"
+version = "0.1.0"
+dependencies = [
+ "haste-core",
+ "haste-google-oauth",
+ "haste-proto",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "haste-connector-gmail"
 version = "0.1.0"
 dependencies = [

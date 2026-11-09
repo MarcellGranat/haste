@@ -20,17 +20,17 @@
 
 ## 4. Google Calendar connector
 
-- [ ] 4.1 Create `crates/haste-connector-gcal` with the `Connector` implementation, read capability and the calendar write flag, and no delete or cancel method
+- [x] 4.1 Create `crates/haste-connector-gcal` with the `Connector` implementation, read capability and the calendar write flag, and no delete or cancel method
 - [ ] 4.2 Implement the `gcal` consent verb in the human build, storing the token under `com.haste.gcal` and leaving the Gmail item untouched
-- [ ] 4.3 Read the non-secret `gcal.json` calendar list (mode `0600`) and refuse unlisted calendars; a missing or empty list reads nothing
-- [ ] 4.4 Implement the unwindowed first listing storing only in-window events, and `syncToken` delta sync, with a single bounded reset on `410 Gone` and no loop
-- [ ] 4.5 Implement the event to `Event` mapping, attendee to person mapping, and the local-field preservation on re-sync
+- [x] 4.3 Read the non-secret `gcal.json` calendar list (mode `0600`) and refuse unlisted calendars; a missing or empty list reads nothing
+- [x] 4.4 Implement the unwindowed first listing storing only in-window events, and `syncToken` delta sync, with a single bounded reset on `410 Gone` and no loop
+- [x] 4.5 Implement the event to `Event` mapping, attendee to person mapping, and the local-field preservation on re-sync
 - [ ] 4.6 Implement `CalendarCreate` execution with `events.insert` and `sendUpdates=none`, and `CalendarUpdate` execution with `events.patch` limited to the allow-list and refusing attendee or cancel changes
 - [ ] 4.7 Implement the stale-event check on update approval, reusing the existing stale confirmation
-- [ ] 4.8 Map invalid-grant and restriction responses to `Checkpoint` with the breaker and re-authorization notice
+- [x] 4.8 Map invalid-grant and restriction responses to `Checkpoint` with the breaker and re-authorization notice
 - [ ] 4.9 Implement the per-cycle counts-only audit entry and `calendar.create` / `calendar.update` audit entries with the event ID as detail
 - [ ] 4.10 Register the connector with default-engaged kill switch and the `haste connector release|engage|status gcal` verbs
-- [ ] 4.11 Build the local fake Google Calendar server in the style of the Gmail test server, serving calendarList, events.list with syncToken (and a windowed listing without one), a 410 response, events.insert and events.patch
+- [x] 4.11 Build the local fake Google Calendar server in the style of the Gmail test server, serving calendarList, events.list with syncToken (and a windowed listing without one), a 410 response, events.insert and events.patch
 - [ ] 4.12 Add tests for: sendUpdates=none on every write, no delete route, token isolation from the Gmail item, syncToken delta, unwindowed first listing with in-window storage, 410 single reset, allow-list refusal, attendee and cancel refusal, stale confirmation, invalid-grant breaker, and audit content
 
 ## 5. Daemon, scope and TUI

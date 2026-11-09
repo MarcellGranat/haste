@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/haste-herdr", "crates/haste-connector-icloud", "crates/haste-proto", "crates/haste-core", "crates/haste-store", "crates/hasted", "crates/haste", "crates/haste-tui", "crates/haste-connector-gmail", "crates/haste-connector-reminders", "crates/haste-google-oauth"]
+members = ["crates/haste-herdr", "crates/haste-connector-icloud", "crates/haste-proto", "crates/haste-core", "crates/haste-store", "crates/hasted", "crates/haste", "crates/haste-tui", "crates/haste-connector-gmail", "crates/haste-connector-reminders", "crates/haste-google-oauth", "crates/haste-connector-gcal"]
 
 [workspace.package]
 edition = "2021"
@@ -28,6 +28,7 @@ haste-connector-gmail = { path = "crates/haste-connector-gmail" }
 haste-connector-icloud = { path = "crates/haste-connector-icloud" }
 haste-connector-reminders = { path = "crates/haste-connector-reminders" }
 haste-google-oauth = { path = "crates/haste-google-oauth" }
+haste-connector-gcal = { path = "crates/haste-connector-gcal" }
 haste-herdr = { path = "crates/haste-herdr" }
 imap = { version = "2.4", default-features = false }
 imap-proto = "0.10"

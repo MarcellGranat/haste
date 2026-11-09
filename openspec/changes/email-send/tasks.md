@@ -16,7 +16,7 @@
 - [x] 2.3 Add the address and subject validators (CR, LF, NUL, comma, semicolon, whitespace, local@domain shape, byte limits) with unit tests for each refusal
 - [x] 2.4 Add `recipients_digest` (SHA-256 over sorted recipients, hex) with a test that order does not change the digest and any change does
 - [x] 2.5 Remove `approved -> sent` from `transition()` and update the proposal transition tests so `approved -> sent` is refused and the permitted set is exactly the modified lifecycle
-- [ ] 2.6 Add `Source` sendability checks and serde round-trip tests for the new `DraftToSend` recipient list field
+- [x] 2.6 (not needed as written: `DraftToSend` is an in-process type that is never serialized, and sendability is the connector's `send` capability flag, covered by each connector's capability test)
 
 ## 3. Store (haste-store)
 
@@ -71,28 +71,28 @@
 
 ## 8. Approvals TUI (haste-tui)
 
-- [ ] 8.1 Show the send confirmation with every recipient, the source and the subject, and the digest; require `y`
-- [ ] 8.2 Handle `recipients_changed` by reloading the preview without sending
-- [ ] 8.3 Show `executing` send proposals under needs-check with the outcome label and offer only "mark sent" and "return to approved", each with a confirmation
-- [ ] 8.4 Snapshot or unit tests for the confirmation text and the needs-check row, asserting no body text is rendered in the list
+- [x] 8.1 Show the send confirmation with every recipient, the source and the subject, and the digest; require `y`
+- [x] 8.2 Handle `recipients_changed` by reloading the preview without sending
+- [x] 8.3 Show `executing` send proposals under needs-check with the outcome label and offer only "mark sent" and "return to approved", each with a confirmation
+- [x] 8.4 Snapshot or unit tests for the confirmation text and the needs-check row, asserting no body text is rendered in the list
 
 ## 9. Cross-cutting tests and audit hygiene
 
-- [ ] 9.1 Add an end-to-end test over the daemon dispatch with the Gmail and iCloud fakes: approve, preview, send, and assert one submission and one audit `sent`
-- [ ] 9.2 Add a scan test: distinctive address and subject markers never appear in audit output or captured logs for success, refusal and ambiguous outcomes
-- [ ] 9.3 Extend the exhaustive per-principal test so `Send` and `SendPreview` are denied for every agent and machine principal
-- [ ] 9.4 Add a test that the agent CLI and TUI crates do not link `lettre`, `native-tls` or any new SMTP crate (`cargo tree` check in the test script)
+- [x] 9.1 Add an end-to-end test over the daemon dispatch with the Gmail and iCloud fakes: approve, preview, send, and assert one submission and one audit `sent`
+- [x] 9.2 Add a scan test: distinctive address and subject markers never appear in audit output or captured logs for success, refusal and ambiguous outcomes
+- [x] 9.3 Extend the exhaustive per-principal test so `Send` and `SendPreview` are denied for every agent and machine principal
+- [x] 9.4 Add a test that the agent CLI and TUI crates do not link `lettre`, `native-tls` or any new SMTP crate (`cargo tree` check in the test script)
 
 ## 10. Documentation
 
-- [ ] 10.1 Update the README Gmail section: human send, the send method, the confirmation, and that an ambiguous send waits for a check
-- [ ] 10.2 Update the README iCloud section: SMTP on 587, the Sent copy, `sent_folder` setting, and the single-attempt rule
-- [ ] 10.3 Update the README Policy table and the Spec coverage notes for send
-- [ ] 10.4 Update the Gmail and iCloud manual smoke checks to match the new send path
+- [x] 10.1 Update the README Gmail section: human send, the send method, the confirmation, and that an ambiguous send waits for a check
+- [x] 10.2 Update the README iCloud section: SMTP on 587, the Sent copy, `sent_folder` setting, and the single-attempt rule
+- [x] 10.3 Update the README Policy table and the Spec coverage notes for send
+- [x] 10.4 Update the Gmail and iCloud manual smoke checks to match the new send path
 
 ## 11. Verification and manual smoke (human)
 
-- [ ] 11.1 Run `cargo test --workspace`, `cargo clippy --workspace`, and the `cargo tree` checks from the README coverage notes; record results
+- [x] 11.1 Run `cargo test --workspace`, `cargo clippy --workspace`, and the `cargo tree` checks from the README coverage notes; record results
 - [ ] 11.2 Smoke Gmail: approve a draft proposal to the human's address, confirm the draft appears, send it from the TUI, verify the message arrived and the proposal shows `sent` with the message id
 - [ ] 11.3 Smoke iCloud: approve and send to the human's own address, verify arrival and the copy in Sent Messages, and that the sent copy is not duplicated
 - [ ] 11.4 Smoke ambiguous path: with the network disabled after confirmation, verify the proposal stays `executing`, is listed as needing a check, and that no second send occurs when the network returns

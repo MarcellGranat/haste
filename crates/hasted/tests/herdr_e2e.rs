@@ -1123,6 +1123,9 @@ async fn a_matching_tag_does_not_let_a_machine_do_anything_it_could_not_before()
             acknowledge_stale: true,
             recipients_digest: "x".into(),
         },
+        RequestBody::SendPreview {
+            proposal_id: "x".into(),
+        },
     ] {
         assert_eq!(
             code(&call(&rig, &machine, body).await),

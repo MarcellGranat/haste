@@ -44,7 +44,10 @@ pub async fn run_expiry(state: &Arc<State>) -> usize {
 
 /// Deliver proposal results to agents, at most three attempts each, with backoff.
 pub async fn delivery_loop(state: Arc<State>) {
-    let mut ticker = interval(state.config.delivery_tick);
+    // The first pass comes one period after start, not immediately: delivery is retried on a
+    // timer anyway, and an immediate pass at startup races anything driving delivery by hand.
+    let period = state.config.delivery_tick;
+    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
     let mut last_attempt: HashMap<String, Instant> = HashMap::new();
     loop {
         ticker.tick().await;

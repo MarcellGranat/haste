@@ -161,7 +161,7 @@ fn draw_approvals(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect)
         .collect();
     let mut state = ListState::default().with_selected(Some(app.approvals_selected));
     let help =
-        "a approve · A batch · x mark · s send/run · r reject · c collapse · P group by agent/project · / filter";
+        "a approve · A batch · x mark · s send/run · m/b settle NEEDS CHECK · r reject · c collapse · P group by agent/project · / filter";
     frame.render_stateful_widget(
         List::new(items)
             .block(Block::new().borders(Borders::ALL).title(help))

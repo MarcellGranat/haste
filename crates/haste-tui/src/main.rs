@@ -158,6 +158,16 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 Err(e) => e,
             };
         }
+        Effect::Resolve { id, done } => {
+            app.status = match describe(client.call(RequestBody::ResolveExecuting {
+                proposal_id: id,
+                done,
+            })) {
+                Ok(()) if done => "marked done".into(),
+                Ok(()) => "returned to approved".into(),
+                Err(e) => e,
+            };
+        }
         Effect::PreviewSend { id } => {
             match client.call(RequestBody::SendPreview {
                 proposal_id: id.clone(),
@@ -173,12 +183,26 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
             acknowledge_stale,
             recipients_digest,
         } => {
-            app.status = match describe(client.call(RequestBody::Send {
-                proposal_id: id,
+            let reply = client.call(RequestBody::Send {
+                proposal_id: id.clone(),
                 acknowledge_stale,
                 recipients_digest,
-            })) {
+            });
+            let changed = matches!(&reply, Ok(Response::Error { error }) if error.message == "recipients_changed");
+            app.status = match describe(reply) {
                 Ok(()) => "sent".into(),
+                Err(_) if changed => {
+                    // The recipients differ from what was confirmed: nothing was sent. Reload the
+                    // preview so the human sees the new list and decides again.
+                    if let Ok(Response::SendPreview { preview }) =
+                        client.call(RequestBody::SendPreview {
+                            proposal_id: id.clone(),
+                        })
+                    {
+                        app.show_send_preview(&id, preview);
+                    }
+                    "the recipients changed; nothing was sent, check the new list".into()
+                }
                 Err(e) => e,
             };
         }

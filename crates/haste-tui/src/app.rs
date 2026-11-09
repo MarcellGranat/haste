@@ -54,6 +54,12 @@ pub enum Effect {
     PreviewSend {
         id: String,
     },
+    /// Settle a proposal left `executing` (outcome unknown): `done` when the effect is visible in
+    /// the mailbox or app, otherwise it returns to approved.
+    Resolve {
+        id: String,
+        done: bool,
+    },
     /// Send, carrying the digest of the recipients the human was shown.
     Send {
         id: String,
@@ -102,6 +108,10 @@ pub enum Mode {
         id: String,
         what: String,
         stale: bool,
+    },
+    ConfirmResolve {
+        id: String,
+        done: bool,
     },
 }
 
@@ -556,6 +566,7 @@ impl App {
                     acknowledge_stale: stale,
                 },
             ),
+            Mode::ConfirmResolve { id, done } => self.confirm(key, Effect::Resolve { id, done }),
             Mode::Normal => self.key_normal(key),
         }
     }
@@ -619,6 +630,8 @@ impl App {
             Key::Char('a') if self.view == View::Approvals => return self.approve_selected(),
             Key::Char('A') if self.view == View::Approvals => self.start_batch(),
             Key::Char('s') if self.view == View::Approvals => return self.start_send(),
+            Key::Char('m') if self.view == View::Approvals => self.start_resolve(true),
+            Key::Char('b') if self.view == View::Approvals => self.start_resolve(false),
             Key::Char('T') if self.view == View::Inbox => return self.thread_to_reminder(),
             _ => {}
         }
@@ -764,6 +777,19 @@ impl App {
         Some(Effect::PreviewSend { id: p.id })
     }
 
+    /// `m` / `b` on a proposal that needs a check: mark it done (it is in the mailbox or app) or
+    /// return it to approved (nothing was delivered), after one confirmation.
+    fn start_resolve(&mut self, done: bool) {
+        let Some(p) = self.selected_proposal().cloned() else {
+            return;
+        };
+        if p.state != ProposalState::Executing {
+            self.status = "only a proposal marked NEEDS CHECK can be settled".into();
+            return;
+        }
+        self.mode = Mode::ConfirmResolve { id: p.id, done };
+    }
+
     /// The daemon's answer to [`Effect::PreviewSend`]: show the confirmation.
     pub fn show_send_preview(&mut self, id: &str, preview: SendPreviewView) {
         self.mode = Mode::ConfirmSend {
@@ -788,10 +814,9 @@ impl App {
                 };
             }
             ProposalState::Executing => {
-                self.status = format!(
-                    "outcome unknown: check the app (Reminders or Google Calendar), then `haste proposal resolve {} [--done]`",
-                    p.id
-                );
+                self.status =
+                    "outcome unknown: check the mailbox or app, then m (it is there) or b (it is not)"
+                        .into();
             }
             _ => self.status = "approve it first (a), then run it (s)".into(),
         }
@@ -832,6 +857,12 @@ impl App {
                 recipients.join(", ")
             )),
             Mode::ConfirmExecute { what, .. } => Some(format!("Run: {what}? [y/N]")),
+            Mode::ConfirmResolve { id, done: true } => Some(format!(
+                "Mark {id} as DONE: you checked and it IS in the mailbox or app? [y/N]"
+            )),
+            Mode::ConfirmResolve { id, done: false } => Some(format!(
+                "Return {id} to approved: you checked and NOTHING was delivered? [y/N]"
+            )),
             _ => None,
         }
     }
@@ -919,7 +950,11 @@ mod tests {
         press(&mut app, "j");
         assert!(press(&mut app, "s").is_empty());
         assert_eq!(app.mode, Mode::Normal);
-        assert!(app.status.contains("haste proposal resolve r1"));
+        assert!(
+            app.status.contains("m (it is there) or b (it is not)"),
+            "{}",
+            app.status
+        );
         assert_eq!(app.rows().len(), 3, "it stays listed as open");
     }
 
@@ -1130,6 +1165,44 @@ mod tests {
                 recipients_digest: "digest-1".into()
             })
         );
+    }
+
+    #[test]
+    fn a_proposal_that_needs_a_check_is_settled_only_after_a_confirmation_each_way() {
+        let mut app = app_with(vec![
+            reminder_proposal("e1", ProposalState::Executing),
+            proposal("a1", "agent-a", ProposalState::Approved, false),
+        ]);
+        press(&mut app, "j"); // e1
+        assert!(press(&mut app, "m").is_empty());
+        assert!(app.confirm_prompt().unwrap().contains("IS in the mailbox"));
+        assert_eq!(
+            press(&mut app, "y"),
+            vec![Effect::Resolve {
+                id: "e1".into(),
+                done: true
+            }]
+        );
+        press(&mut app, "b");
+        assert!(app
+            .confirm_prompt()
+            .unwrap()
+            .contains("NOTHING was delivered"));
+        assert_eq!(
+            press(&mut app, "y"),
+            vec![Effect::Resolve {
+                id: "e1".into(),
+                done: false
+            }]
+        );
+        // anything but y cancels, and an ordinary proposal cannot be settled this way
+        press(&mut app, "m");
+        assert!(press(&mut app, "n").is_empty());
+        assert_eq!(app.mode, Mode::Normal);
+        press(&mut app, "j");
+        assert!(press(&mut app, "m").is_empty());
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.status.contains("NEEDS CHECK"));
     }
 
     #[test]

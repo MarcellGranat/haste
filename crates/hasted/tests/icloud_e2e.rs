@@ -7,7 +7,10 @@ use std::time::Duration;
 use haste_connector_icloud::config::IcloudConfig;
 use haste_connector_icloud::secrets::{MemoryStore, SecretStore};
 use haste_connector_icloud::session::PlainOpener;
-use haste_connector_icloud::testing::{spawn, FakeFolder, FakeImap, FakeState, TestMessage};
+use haste_connector_icloud::smtp::PlainSmtp;
+use haste_connector_icloud::testing::{
+    spawn, spawn_smtp, FakeFolder, FakeImap, FakeSmtp, FakeState, SmtpFault, TestMessage,
+};
 use haste_connector_icloud::{CycleAudit, IcloudConnector};
 use haste_core::connector::{CallError, Connector};
 use haste_core::model::Source;
@@ -25,6 +28,7 @@ struct Harness {
     _dir: tempfile::TempDir,
     daemon: DaemonHandle,
     imap: FakeImap,
+    smtp: FakeSmtp,
     connector: Arc<dyn Connector>,
     human: String,
 }
@@ -69,6 +73,9 @@ async fn boot(password_on_server: &str) -> Harness {
     let mut cfg = IcloudConfig::new("me@icloud.com");
     cfg.host = "127.0.0.1".into();
     cfg.port = imap.port;
+    let smtp = spawn_smtp("me@icloud.com", PASSWORD, SmtpFault::None);
+    cfg.smtp_host = "127.0.0.1".into();
+    cfg.smtp_port = smtp.port;
     let secrets = Arc::new(MemoryStore::default());
     secrets.set("me@icloud.com", PASSWORD).unwrap();
     let state = Arc::clone(&daemon.state);
@@ -81,17 +88,16 @@ async fn boot(password_on_server: &str) -> Harness {
             Some(detail),
         );
     });
-    let connector: Arc<dyn Connector> = Arc::new(IcloudConnector::new(
-        cfg,
-        secrets,
-        Arc::new(PlainOpener),
-        audit,
-    ));
+    let connector: Arc<dyn Connector> = Arc::new(
+        IcloudConnector::new(cfg, secrets, Arc::new(PlainOpener), audit)
+            .with_smtp(Arc::new(PlainSmtp::default())),
+    );
     daemon.state.register_connector(Arc::clone(&connector));
     Harness {
         _dir: dir,
         daemon,
         imap,
+        smtp,
         connector,
         human,
     }
@@ -335,5 +341,144 @@ async fn audit_log_has_counts_only_and_never_the_password_or_message_text() {
         !db.windows(PASSWORD.len()).any(|w| w == PASSWORD.as_bytes()),
         "database holds the password"
     );
+    h.daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_human_sends_an_approved_icloud_draft_once_and_an_agent_never_can() {
+    let h = boot(PASSWORD).await;
+    sync_once(&h.daemon.state, &h.connector).await.unwrap();
+    let thread = h
+        .daemon
+        .state
+        .store
+        .list_threads(&Default::default())
+        .unwrap()[0]
+        .0
+        .id
+        .clone();
+    let Response::Registered { token: agent, .. } = human(
+        &h,
+        RequestBody::RegisterPrincipal {
+            principal_id: "agent-a".into(),
+            kind: PrincipalKind::Agent,
+            allowed_actions: vec!["read".into(), "draft".into()],
+        },
+    )
+    .await
+    else {
+        panic!("register failed")
+    };
+    let Response::Proposal { proposal } = call_with(
+        &h,
+        &agent,
+        RequestBody::Propose {
+            payload: haste_core::proposal::Payload::Draft {
+                to: None,
+                body: "Noon works well.".into(),
+            },
+            thread_id: Some(thread),
+            idempotency_key: "k1".into(),
+            hints: None,
+        },
+    )
+    .await
+    else {
+        panic!("no proposal")
+    };
+    let id = proposal.id;
+    human(
+        &h,
+        RequestBody::Approve {
+            proposal_id: id.clone(),
+            acknowledge_stale: false,
+        },
+    )
+    .await;
+    // the agent cannot send, preview or settle; nothing reaches the server
+    for body in [
+        RequestBody::Send {
+            proposal_id: id.clone(),
+            acknowledge_stale: true,
+            recipients_digest: "x".into(),
+        },
+        RequestBody::SendPreview {
+            proposal_id: id.clone(),
+        },
+    ] {
+        assert_eq!(
+            code(&call_with(&h, &agent, body).await),
+            Some(ErrorCode::Denied)
+        );
+    }
+    assert_eq!(h.smtp.log.lock().unwrap().connections, 0);
+
+    // the human previews: the reply goes to the other party, not to the account itself
+    let Response::SendPreview { preview } = human(
+        &h,
+        RequestBody::SendPreview {
+            proposal_id: id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("no preview")
+    };
+    assert_eq!(preview.source, "icloud");
+    assert_eq!(preview.recipients, ["ana@example.org"]);
+    assert_eq!(preview.subject, "Re: Quarterly plan");
+    assert_eq!(
+        h.smtp.log.lock().unwrap().connections,
+        0,
+        "a preview sends nothing"
+    );
+
+    let sent = human(
+        &h,
+        RequestBody::Send {
+            proposal_id: id.clone(),
+            acknowledge_stale: false,
+            recipients_digest: preview.recipients_digest.clone(),
+        },
+    )
+    .await;
+    let Response::Proposal { proposal } = sent else {
+        panic!("{sent:?}")
+    };
+    assert_eq!(proposal.state, haste_core::proposal::ProposalState::Sent);
+    assert_eq!(proposal.result.as_deref(), Some("sent:smtp"));
+    assert_eq!(
+        h.smtp.log.lock().unwrap().messages.len(),
+        1,
+        "one submission"
+    );
+    assert_eq!(
+        h.imap.state.lock().unwrap().appended.len(),
+        1,
+        "one Sent copy"
+    );
+    // never twice
+    let again = human(
+        &h,
+        RequestBody::Send {
+            proposal_id: id,
+            acknowledge_stale: false,
+            recipients_digest: preview.recipients_digest,
+        },
+    )
+    .await;
+    assert_eq!(code(&again), Some(ErrorCode::IllegalTransition));
+    assert_eq!(h.smtp.log.lock().unwrap().messages.len(), 1);
+    // the audit holds ids and counts only
+    let log = fs::read_to_string(h.daemon.state.config.audit_path()).unwrap();
+    assert!(log.contains(r#""action":"proposal.send","outcome":"sent""#));
+    for secret in [
+        "ana@example.org",
+        "Noon works well",
+        "Quarterly plan",
+        PASSWORD,
+    ] {
+        assert!(!log.contains(secret), "audit leaked {secret}");
+    }
     h.daemon.shutdown().await;
 }

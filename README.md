@@ -2,7 +2,7 @@
 
 A personal inbox hub (mail, chats, reminders, notes) driven from a vi-style TUI and
 operated by agents through a CLI. **Agents can read, propose and append to a few notes.
-They can never send.** Everything an agent asks for passes a policy gate in a local daemon.
+They can never send; only you can, from the TUI, after a confirmation.** Everything an agent asks for passes a policy gate in a local daemon.
 
 This repository contains the core (`core-policy-gate`: daemon, store, policy gate, proposals,
 approvals TUI, audit log, connector framework) and the first real connector (`gmail-connector`).
@@ -67,8 +67,28 @@ with `HASTE_NOTES_ROOT`). Bootstrap and rollback leave the store and audit files
 ## Gmail
 
 The connector can **read** mail and, after you approve a draft proposal, **create a plain-text
-Gmail draft**. It cannot send, archive, label or delete, and it only asks Google for the
-`gmail.readonly` and `gmail.compose` scopes. You send drafts yourself from Gmail.
+Gmail draft**. After that, **you** can send it from haste (below). Agents cannot send, and the
+connector cannot archive, label or delete. It only asks Google for the `gmail.readonly` and
+`gmail.compose` scopes.
+
+### Sending (human only)
+
+Select an approved draft in Approvals and press `s`. haste first shows a **preview**: who it
+goes to, the subject, how many sends you have left this hour, and whether the thread changed.
+Only after `y` does it send, and it refuses (`recipients_changed`) if the recipient it now
+resolves differs from the one you were shown. The recipient is the draft's `to`, otherwise the last
+person in the thread who is not you; there is exactly one recipient (no Cc, no Bcc, no reply-all).
+
+- Gmail sends the exact text you confirmed through `users.messages.send` (the same
+  `gmail.compose` scope; no new scope), threaded into the conversation, then removes the draft
+  it made at approval time (best effort).
+- **At most once.** One request, never retried. If Gmail answers with a clear refusal the
+  proposal returns to *approved*. If the outcome is unknown (a timeout, a 5xx) it stays
+  *executing* and shows **NEEDS CHECK**: look in Gmail, then press `m` (it is there) or `b`
+  (it is not). A restart never re-sends anything.
+- Limits: 32 KiB body, 10 sends per hour (counted in the database, so a restart cannot reset
+  it), plain text only, no attachments. An address or subject containing a line break is refused,
+  never cleaned up. The audit holds ids and counts, never an address, subject or body.
 
 ### One-time Google Cloud setup
 
@@ -120,9 +140,10 @@ helper: choose *Always Allow*.
 
 ## iCloud Mail
 
-Read-only: the connector reads iCloud Mail over IMAP (`imap.mail.me.com:993`, implicit TLS,
-certificate verification on) and never writes to the mailbox. It sends only LOGIN, EXAMINE,
-UID SEARCH, UID FETCH (always `BODY.PEEK`, so mail is never marked read) and LOGOUT. Attachment
+The connector reads iCloud Mail over IMAP (`imap.mail.me.com:993`, implicit TLS, certificate
+verification on). Reading sends only LOGIN, EXAMINE, UID SEARCH, UID FETCH (always `BODY.PEEK`,
+so mail is never marked read) and LOGOUT. The only things it ever writes are a **human-approved
+send** over SMTP and the one copy of that message it files in your Sent folder (below). Attachment
 bodies are never downloaded; attachments appear as a metadata line (name, type, size). One text
 part per message is fetched: `text/plain` if there is one, otherwise `text/html`, which is
 reduced to text on your machine (tags, `<style>`, `<script>` and comments removed). HTML is never
@@ -177,6 +198,20 @@ one cycle, then waits for the next one, and never trips the breaker.
 2. After a restart and up to five minutes, `haste thread list --source icloud` shows recent threads, and they are still unread in the Mail app.
 3. Send yourself a mail: it appears after the next cycle and only that one is fetched (the audit log line shows `INBOX:new=1`).
 4. `haste connector engage icloud`, wait a cycle: no IMAP traffic; `release` resumes.
+
+### Sending from iCloud (human only)
+
+The same flow as Gmail (preview, confirmation, one recipient, at most once, NEEDS CHECK when the
+outcome is unknown), over SMTP: `smtp.mail.me.com:587` with STARTTLS and certificate verification,
+logging in with the same app-specific password from the Keychain. The message is plain text with
+`From` set to your iCloud address. After the server accepts it, haste files one copy in your Sent
+folder over IMAP. If that copy fails the mail is still sent (it is never submitted twice) and the
+proposal's result says `smtp;copy_failed`.
+
+Two optional settings in `icloud.json`: `"sent_folder"` (default `"Sent Messages"`) and
+`"append_sent"` (default `true`; set it to `false` if iCloud already files your sent mail itself, or
+you would get duplicates; the first real send shows which). iCloud replies carry no
+`In-Reply-To`/`References` yet (the store keeps no raw headers), so a reply is matched by subject.
 
 ## Herdr: agents, projects and machines
 
@@ -430,7 +465,7 @@ the folder is not synced; if you move it into a synced location, test it first.
 | read | auto |
 | draft, archive, snooze, reminder.create | pending: a proposal is created, nothing happens until a human approves |
 | note.append | auto inside `people/**` and `tasks/**` only; daemon-performed, append-only, attributed |
-| send, approve, reject, manage | denied: human only; `send` has no CLI verb at all |
+| send, send preview, approve, reject, manage | denied: human only; sending exists only in the TUI (the CLI has no `send` verb) |
 
 Proposals return a pending id immediately. They expire after **7 days**, are superseded by a
 newer proposal for the same thread and action, and carry a stale flag when the thread changed.
@@ -461,11 +496,12 @@ construction and have a manual check:
 |---|---|---|
 | No network listener | `hasted` only creates a `UnixListener` | `lsof -a -p $(pgrep hasted) -i` prints nothing |
 | Client cannot bypass daemon | `haste` and `haste-tui` do not depend on `rusqlite` or `haste-store` | `cargo tree -p haste -p haste-tui \| grep -E 'rusqlite\|haste-store'` prints nothing |
-| Agent requests note edit or delete | no such action exists in the protocol or CLI | `haste note --help` lists only `append` |
+| Agent requests note edit or delete | no such action exists in the protocol or CLI | `haste note --help` has no edit or delete verb |
 | Token not retrievable | only a salted hash is stored | `sqlite3 haste.db 'select * from tokens'` shows hashes only |
-| iCloud never writes to the mailbox | the session wrapper has no method for STORE/APPEND/COPY/MOVE/EXPUNGE | the integration test records every command the fake server receives |
+| iCloud's only mailbox write is the Sent copy of a human send | the session wrapper has no method for STORE/COPY/MOVE/EXPUNGE, and APPEND is reachable only from the send path | the integration tests record every command the fake servers receive, and the sync test double panics on APPEND |
 | Clients link no HTTP or Keychain code | the OAuth flow is a separate helper binary | `cargo tree -p haste -p haste-tui \| grep -E 'reqwest\|security-framework'` prints nothing |
-| Gmail cannot send or change labels | no such client method or scope exists | the consent URL lists only `gmail.readonly` and `gmail.compose` |
+| Agents cannot send; Gmail cannot change labels | `Action::Send` is denied to every non-human principal and the send requests have no agent path; no label method or extra scope exists | the consent URL lists only `gmail.readonly` and `gmail.compose`; the exhaustive per-principal test |
+| A send happens at most once | `approved -> executing -> sent`, one request, no retry at any layer; an unknown outcome stays `executing` | the daemon and connector tests count requests per failure phase |
 
 ## Develop
 

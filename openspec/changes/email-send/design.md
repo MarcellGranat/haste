@@ -111,16 +111,20 @@ At daemon start, proposals in `executing` (sends included) are left untouched an
 
 ## Open Questions
 
-- **Q1. Gmail draft cleanup**: after a successful `messages.send`, delete the approval-time draft (best-effort), or leave it for the human? Recommendation: delete.
-- **Q2. iCloud Sent copy**: does `smtp.mail.me.com` already file haste's submissions into "Sent Messages"? If yes, skip the APPEND. Decided by spike S3; the default in D9 assumes no.
-- **Q3. iCloud drafts folder**: does iCloud need a Drafts-folder copy as the approval-time record (analogous to Gmail drafts)? Recommendation: no; the proposal row is the record. Confirm the human agrees.
-- **Q4. iCloud reply target**: the store keeps participants but no raw `Reply-To`. Options: store `Reply-To` in the message row (a data-model change), or use `From` only in v1. Decide before task 6.
-- **Q5. Bcc and reply-all**: v1 is single To, no Cc, no Bcc, no reply-all. Confirm, or specify Cc editing later.
-- **Q6. Send capability flag**: confirm that `send = true` on the connectors is acceptable given the brief said the flag stays false for agent paths (D11 proposes "consulted only by the human path").
-- **Q7. Gmail method**: confirm `messages.send` is allowed under `gmail.compose` (spike S2); if not, fall back to option A.
-- **Q8. Proposal result on send**: whether the stored result should carry the SMTP queue id (the server's `250` text may contain one, which is provider-dependent) or only `sent:smtp`.
-- **Q9. Human override**: whether `executing -> approved` for a send (human says nothing was delivered) requires a typed confirmation, not just `y`.
+Answered by the human on 2026-11-09 (accepted all recommendations); the live spike is deferred until the code is built against fakes:
+
+- **Q1 (Gmail draft cleanup):** delete the approval-time draft after a successful send, best-effort, never retried.
+- **Q2 (iCloud Sent copy):** decided by the live spike. The code supports both: `icloud.json` gets `append_sent` (default `true`, the D9 assumption); the spike sets it to `false` if iCloud already files the mail itself.
+- **Q3 (iCloud Drafts copy):** none; the proposal row is the record.
+- **Q4 (iCloud reply target):** `From` only in v1; no stored `Reply-To`.
+- **Q5 (Bcc / reply-all):** single To, no Cc, no Bcc, no reply-all in v1.
+- **Q6 (send flag):** accepted: `send = true` on both connectors, consulted only by the human path; agents stay denied by the gate.
+- **Q7 (Gmail method):** `users.messages.send` (option B). If the live spike shows it is refused under `gmail.compose`, fall back to option A (`users.drafts.send`).
+- **Q8 (stored result):** `sent:smtp` (and the Gmail message id for Gmail); the SMTP reply text is not stored.
+- **Q9 (override confirmation):** a plain `y`, like the reminders resolve action; revisit only if the spike shows a reason.
 
 ## Spike outcomes
 
 To be recorded by the human during spikes S1 to S4 (tasks group 1). Until then the decisions above are provisional where marked by Q.
+
+Order of work (human decision, 2026-11-09): build and test everything against fakes first; run the live spikes (tasks 1.1 to 1.6) and the manual smoke group afterwards, on the human's real accounts. Spike results that change a default (Q2, Q7, the SMTP `AUTH` mechanism) are then small follow-up edits.

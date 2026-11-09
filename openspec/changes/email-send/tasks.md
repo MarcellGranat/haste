@@ -1,4 +1,4 @@
-## 1. Human spikes (blocking, before any code)
+## 1. Human spikes (deferred: run after the code is built against fakes; the human chose to build first)
 
 - [ ] 1.1 Human authorizes Gmail OAuth on this Mac with `haste connector gmail auth` and confirms `haste connector status` lists `gmail`; record the result in design "Spike outcomes"
 - [ ] 1.2 Human creates an iCloud app-specific password and runs `haste connector icloud auth`; confirm the Keychain item exists and `icloud.json` has no secret field
@@ -6,8 +6,8 @@
 - [ ] 1.4 Spike S3b: human sends one self-addressed plain-text mail through the spike script and records whether iCloud files it into Sent by itself (answers design Q2); record whether the sent copy is visible in the Sent Messages folder
 - [ ] 1.5 Spike S2: confirm with one manual call (Gmail API Explorer or a curl with the OAuth token from Keychain, outside the repo) that `users.messages.send` with a raw message to the human's own address is allowed under `gmail.compose`; if refused, record fallback to `users.drafts.send` (answers Q7 and design D6)
 - [ ] 1.6 Human confirms a send to their own address works end to end through the spike and records the Gmail message id and the arrival time
-- [ ] 1.7 Human decides design Q1 (delete approval-time Gmail draft after send), Q3 (no iCloud Drafts copy), Q4 (reply target from From or stored Reply-To), Q5 (single To, no Cc/Bcc), Q6 (send flag true), Q8 (result id content), Q9 (typed confirmation for human override); record the decisions in design.md
-- [ ] 1.8 Record the SMTP client decision (hand-written, D7) or switch to lettre if the spike shows the hand-written path cannot be done with native-tls STARTTLS
+- [x] 1.7 Human decides design Q1 (delete approval-time Gmail draft after send), Q3 (no iCloud Drafts copy), Q4 (reply target from From or stored Reply-To), Q5 (single To, no Cc/Bcc), Q6 (send flag true), Q8 (result id content), Q9 (typed confirmation for human override); record the decisions in design.md
+- [x] 1.8 Record the SMTP client decision (hand-written, D7) or switch to lettre if the spike shows the hand-written path cannot be done with native-tls STARTTLS
 
 ## 2. Core types and limits (haste-core)
 

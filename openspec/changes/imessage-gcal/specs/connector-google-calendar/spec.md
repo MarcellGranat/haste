@@ -41,11 +41,11 @@ The connector SHALL read only the calendars listed in the non-secret `gcal.json`
 - **THEN** no request is made for that calendar's events
 
 ### Requirement: Incremental read with sync tokens
-The first cycle for each selected calendar SHALL list events within a bounded window of past and future days, both compile-time constants, and SHALL store the returned sync token. Later cycles SHALL request changes using the stored sync token. When Google reports the token as gone, the connector SHALL reset that calendar to a bounded window once and SHALL NOT loop.
+The first cycle for each selected calendar SHALL list its events without a time window (a windowed listing returns no sync token), page to the end, store only events inside a bounded window of past and future days (both compile-time constants), and SHALL store the returned sync token. Later cycles SHALL request changes using the stored sync token. When Google reports the token as gone, the connector SHALL reset that calendar to a fresh full listing once and SHALL NOT loop.
 
 #### Scenario: First cycle bounded
 - **WHEN** a selected calendar is synced for the first time
-- **THEN** only events within the configured window are requested and the sync token is stored
+- **THEN** the calendar is listed to the end without a time window, only events within the configured window are stored, and the sync token is stored
 
 #### Scenario: Delta cycle
 - **WHEN** a stored sync token exists
@@ -53,7 +53,7 @@ The first cycle for each selected calendar SHALL list events within a bounded wi
 
 #### Scenario: Expired sync token
 - **WHEN** Google reports the sync token as gone
-- **THEN** that calendar is reset to a bounded window once, the other calendars keep their tokens, and no retry loop occurs
+- **THEN** that calendar is relisted once, the other calendars keep their tokens, and no retry loop occurs
 
 ### Requirement: Mapping events into the Event record
 Each event SHALL map to one `Event` with `source = gcal` and `external_id` equal to `<calendarId>/<eventId>`. Attendees SHALL map to `Person` records. Description and location text SHALL be stored only in the local store. Event sync SHALL NOT overwrite local scope tags or triage state.

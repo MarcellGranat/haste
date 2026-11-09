@@ -2,7 +2,7 @@
 
 - [ ] 1.1 Grant Full Disk Access to the exact binary the daemon runs from on this Mac, and confirm a read-only open of `~/Library/Messages/chat.db` succeeds and fails without it; record the binary path and the observed error text
 - [ ] 1.2 Record the `chat.db` schema on this macOS version (`message`, `chat`, `handle`, `chat_message_join` columns), the `message.date` unit, the share of rows with NULL `text`, and whether recent rows are visible without the `-wal`/`-shm` sidecars under read-only open; update design.md Open Questions with the answers
-- [ ] 1.3 Run the Google Calendar consent once against the existing OAuth client with the candidate scopes `calendar.events` and `calendar.calendarlist.readonly`; confirm the consent screen, that `calendarList.list` works with the scopes, and whether `calendar.calendarlist.readonly` can be dropped; update the connector-google-calendar scope list accordingly
+- [x] 1.3 Run the Google Calendar consent once against the existing OAuth client with the candidate scopes `calendar.events` and `calendar.calendarlist.readonly`; confirm the consent screen, that `calendarList.list` works with the scopes, and whether `calendar.calendarlist.readonly` can be dropped; update the connector-google-calendar scope list accordingly
 - [ ] 1.4 Confirm the human's calendar IDs and the herdr workspace labels that will serve as project tags, and record them in design.md (no secrets recorded)
 - [ ] 1.5 Human sign-off on the spike findings before section 2 starts
 

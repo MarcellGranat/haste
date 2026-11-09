@@ -40,7 +40,7 @@ The consent and token code in `haste-connector-gmail` is moved behind a small sh
 - The consent screen shows the unverified-app warning for the existing production client; the human acknowledges it once, as in Gmail.
 
 ### D5. Calendar read is incremental with `syncToken`
-First cycle lists events in a bounded window (now minus `CAL_BACKFILL_DAYS`, now plus `CAL_LOOKAHEAD_DAYS`, both compile-time constants) per selected calendar, storing each `nextSyncToken`. Later cycles pass the token and receive changed and cancelled events. A `410 Gone` on the token resets that calendar to a bounded window and does not loop. Only calendars the human lists in `gcal.json` (non-secret, mode `0600`) are read.
+Google only returns a `nextSyncToken` for a listing made without `timeMin`/`timeMax` (documented restriction on incremental sync; the spike saw no token on a windowed first page). So the first cycle lists each selected calendar **without a time window**, pages to the end to get the `nextSyncToken`, and **stores only events inside the window** (now minus `CAL_BACKFILL_DAYS`, now plus `CAL_LOOKAHEAD_DAYS`, both compile-time constants; recurring series are kept as one master event, not expanded). Events outside the window are discarded locally. Later cycles pass the token and receive changed and cancelled events. A `410 Gone` on the token resets that calendar to a fresh full listing once and does not loop. Only calendars the human lists in `gcal.json` (non-secret, mode `0600`) are read.
 
 ### D6. Calendar events map to a new `Event` record
 `Event { source: gcal, external_id: "<calendarId>/<eventId>", calendar, title, start, end, all_day, location_present, status, attendees, updated_at }`. Attendees map to `Person` via the existing identifiers. Description and location text are stored only in the local store, never in audit or logs. Event sync never overwrites local fields (scope tags, triage state), matching the reminders rule.
@@ -83,7 +83,14 @@ Each iMessage cycle and each calendar cycle writes one entry: source, counts of 
 
 ## Open Questions
 
-- Exact Calendar scope set (spike): does `calendar.events` alone allow `calendarList.list`, or is `calendar.calendarlist.readonly` required?
+- ~~Exact Calendar scope set~~ Answered by the spike: `calendar.events` alone cannot call `calendarList.list` (403 insufficient scopes); with `calendar.calendarlist.readonly` added it works. Decision: request both; calendars are discovered through the list and only those the human selects are synced.
 - `chat.db` on this macOS: the `message.date` divisor, the share of NULL-text rows, and whether WAL sidecars are needed for a current read.
 - Whether Full Disk Access applies to the built `hasted` binary or to the launching terminal in this setup; the answer sets the status text and the manual smoke steps.
 - Whether calendar event attendees' email addresses should be stored as `Person` identifiers or only as display names in v1.
+
+## Spike results (2026-11-09, real accounts)
+
+- Google Calendar consent works with the Desktop client in "Testing" status (the personal project has no homepage or privacy policy URL, so it cannot be published; refresh tokens therefore expire after 7 days and the existing revoked-token path covers re-authorization).
+- `calendar.events` alone: events of the primary calendar are readable, `calendarList.list` is denied (403). With `calendar.calendarlist.readonly` added: 4 calendars, all owned by the human.
+- A windowed listing returns no `nextSyncToken` (see D5); 50 events per page, more pages follow.
+- Not yet answered: `chat.db` is empty on this Mac (Messages is not signed in or Messages in iCloud is off), so the iMessage schema, date unit and NULL-text share are still open. Full Disk Access for the terminal works.

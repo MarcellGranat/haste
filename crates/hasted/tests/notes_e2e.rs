@@ -779,3 +779,112 @@ async fn note_mode_is_human_only_and_the_default_is_auto() {
     assert_eq!(code(&unknown), Some(ErrorCode::NotFound));
     rig.daemon.shutdown().await;
 }
+
+// ------------------------------------------------------------------ human read surfaces
+
+#[tokio::test]
+async fn only_the_human_can_show_or_log_notes_and_the_log_never_holds_text() {
+    let rig = boot().await;
+    let agent = register(&rig, "agent-a", PrincipalKind::Agent).await;
+    let machine = register(&rig, "m1", PrincipalKind::Machine).await;
+    append(&rig, &agent, "people/ana.md", SENTINEL, "k1").await;
+    append(&rig, &agent, ".obsidian/x.md", SENTINEL, "k2").await;
+
+    for token in [&agent, &machine] {
+        for body in [
+            RequestBody::NoteShow {
+                path: "people/ana.md".into(),
+            },
+            RequestBody::NoteLog { since: None },
+        ] {
+            assert_eq!(
+                code(&call(&rig, token, body).await),
+                Some(ErrorCode::Denied)
+            );
+        }
+    }
+
+    let shown = call(
+        &rig,
+        &rig.human,
+        RequestBody::NoteShow {
+            path: "people/ana.md".into(),
+        },
+    )
+    .await;
+    match shown {
+        Response::Note { path, text } => {
+            assert_eq!(path, "people/ana.md");
+            assert!(text.contains(SENTINEL));
+        }
+        other => panic!("{other:?}"),
+    }
+    let Response::NoteLog { rows } =
+        call(&rig, &rig.human, RequestBody::NoteLog { since: None }).await
+    else {
+        panic!()
+    };
+    assert!(rows
+        .iter()
+        .any(|r| r.outcome == "written" && r.path.as_deref() == Some("people/ana.md")));
+    assert!(rows
+        .iter()
+        .any(|r| r.outcome == "denied" && r.detail.as_deref() == Some("hidden_path")));
+    let serialized = serde_json::to_string(&rows).unwrap();
+    assert!(!serialized.contains(SENTINEL), "the log has no note text");
+    // `since` in the future shows nothing
+    let Response::NoteLog { rows: none } = call(
+        &rig,
+        &rig.human,
+        RequestBody::NoteLog {
+            since: Some(i64::MAX),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(none.is_empty());
+    rig.daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn note_show_cannot_be_aimed_outside_the_notes_folder_or_at_hidden_files() {
+    let rig = boot().await;
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("secret.md"), "SECRET").unwrap();
+    fs::create_dir_all(rig.notes.path().join("people")).unwrap();
+    fs::create_dir_all(rig.notes.path().join(".obsidian")).unwrap();
+    fs::write(rig.notes.path().join(".obsidian/app.json"), "{}").unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.md"),
+        rig.notes.path().join("people/link.md"),
+    )
+    .unwrap();
+    for (path, reason) in [
+        ("../other.md", "outside_root"),
+        ("/etc/hosts", "outside_root"),
+        (".obsidian/app.json", "hidden_path"),
+        ("people/link.md", "symlink"),
+        ("elsewhere/x.md", "path_not_allowed"),
+    ] {
+        let r = call(
+            &rig,
+            &rig.human,
+            RequestBody::NoteShow { path: path.into() },
+        )
+        .await;
+        assert_eq!(code(&r), Some(ErrorCode::Denied), "{path}");
+        assert_eq!(message(&r), reason, "{path}");
+    }
+    let missing = call(
+        &rig,
+        &rig.human,
+        RequestBody::NoteShow {
+            path: "people/none.md".into(),
+        },
+    )
+    .await;
+    assert_eq!(code(&missing), Some(ErrorCode::NotFound));
+    rig.daemon.shutdown().await;
+}

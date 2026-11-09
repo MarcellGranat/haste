@@ -286,6 +286,45 @@ pub enum RemindersCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum NoteCmd {
+    /// Append a dated entry to a Person's note (the daemon writes the front matter and heading).
+    Person {
+        /// Haste person id.
+        person: String,
+        #[arg(long, conflicts_with = "stdin")]
+        text: Option<String>,
+        #[arg(long)]
+        stdin: bool,
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Record an identifier-only back-reference (`- haste:<kind>/<id>`); no free text.
+    Ref {
+        /// `thread`, `reminder` or `event`.
+        kind: String,
+        id: String,
+        /// Topic label naming the note (never an email subject or reminder title).
+        #[arg(long)]
+        topic: String,
+        /// Workspace label: put the note under `projects/<project>/tasks/`.
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Read a note under the notes folder (human shell only).
+    #[cfg(feature = "human")]
+    Show { path: String },
+    /// List note writes from the audit: path, outcome, bytes or reason; never text (human shell only).
+    #[cfg(feature = "human")]
+    Log {
+        /// Only rows at or after this Unix time.
+        #[arg(long)]
+        since: Option<i64>,
+    },
+    /// Set how an agent's notes are decided: `auto` writes directly, `approval` queues them
+    /// for you (human shell only).
+    #[cfg(feature = "human")]
+    Mode { principal: String, mode: String },
     Append {
         /// Path relative to the notes root, e.g. people/ana.md
         path: String,
@@ -507,6 +546,10 @@ pub fn is_human_command(command: &Command) -> bool {
         | Command::Email { .. }
         | Command::Machine { .. } => true,
         #[cfg(feature = "human")]
+        Command::Note {
+            cmd: NoteCmd::Show { .. } | NoteCmd::Log { .. } | NoteCmd::Mode { .. },
+        } => true,
+        #[cfg(feature = "human")]
         Command::Proposal {
             cmd:
                 ProposalCmd::Approve { .. }
@@ -716,6 +759,60 @@ pub fn build_body(command: &Command) -> Result<RequestBody, CliError> {
         },
         Command::Note {
             cmd:
+                NoteCmd::Person {
+                    person,
+                    text,
+                    stdin,
+                    key,
+                },
+        } => RequestBody::NotePerson {
+            person_id: person.clone(),
+            text: note_text(text.as_deref(), *stdin)?,
+            idempotency_key: key_or_new(key),
+        },
+        Command::Note {
+            cmd:
+                NoteCmd::Ref {
+                    kind,
+                    id,
+                    topic,
+                    project,
+                    key,
+                },
+        } => RequestBody::NoteReference(haste_proto::NoteReferenceArgs {
+            kind: match kind.as_str() {
+                "thread" => haste_proto::RefKind::Thread,
+                "reminder" => haste_proto::RefKind::Reminder,
+                "event" => haste_proto::RefKind::Event,
+                other => {
+                    return Err(CliError::Usage(format!(
+                        "unknown kind '{other}' (thread, reminder or event)"
+                    )))
+                }
+            },
+            id: id.clone(),
+            topic: topic.clone(),
+            project: project.clone(),
+            idempotency_key: key_or_new(key),
+        }),
+        #[cfg(feature = "human")]
+        Command::Note {
+            cmd: NoteCmd::Show { path },
+        } => RequestBody::NoteShow { path: path.clone() },
+        #[cfg(feature = "human")]
+        Command::Note {
+            cmd: NoteCmd::Log { since },
+        } => RequestBody::NoteLog { since: *since },
+        #[cfg(feature = "human")]
+        Command::Note {
+            cmd: NoteCmd::Mode { principal, mode },
+        } => RequestBody::NoteMode {
+            principal_id: principal.clone(),
+            mode: haste_core::policy::NoteMode::parse(mode)
+                .ok_or_else(|| CliError::Usage("mode must be 'auto' or 'approval'".into()))?,
+        },
+        Command::Note {
+            cmd:
                 NoteCmd::Append {
                     path,
                     text,
@@ -894,6 +991,20 @@ pub fn build_body(command: &Command) -> Result<RequestBody, CliError> {
             ));
         }
     })
+}
+
+/// The text of a note: `--text`, or all of stdin.
+fn note_text(text: Option<&str>, stdin: bool) -> Result<String, CliError> {
+    if stdin {
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| CliError::Usage(e.to_string()))?;
+        Ok(buf)
+    } else {
+        text.map(str::to_owned)
+            .ok_or_else(|| CliError::Usage("give --text or --stdin".into()))
+    }
 }
 
 #[must_use]
@@ -1397,6 +1508,70 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(argv).is_err());
         }
+    }
+
+    #[test]
+    fn agents_can_write_person_and_reference_notes_but_not_read_log_or_set_modes() {
+        let cli = Cli::try_parse_from([
+            "haste", "note", "person", "p1", "--text", "hi", "--key", "k",
+        ])
+        .unwrap();
+        assert!(!is_human_command(&cli.command));
+        assert!(matches!(
+            build_body(&cli.command).unwrap(),
+            RequestBody::NotePerson { person_id, idempotency_key, .. } if person_id == "p1" && idempotency_key == "k"
+        ));
+        let cli = Cli::try_parse_from([
+            "haste",
+            "note",
+            "ref",
+            "thread",
+            "t1",
+            "--topic",
+            "Billing",
+            "--project",
+            "My Project",
+        ])
+        .unwrap();
+        match build_body(&cli.command).unwrap() {
+            RequestBody::NoteReference(a) => {
+                assert_eq!((a.id.as_str(), a.topic.as_str()), ("t1", "Billing"));
+                assert_eq!(a.project.as_deref(), Some("My Project"));
+            }
+            other => panic!("{other:?}"),
+        }
+        // a reference has no text option, and unknown kinds are refused before any request
+        assert!(Cli::try_parse_from([
+            "haste", "note", "ref", "thread", "t1", "--topic", "x", "--text", "y"
+        ])
+        .is_err());
+        let bad_kind =
+            Cli::try_parse_from(["haste", "note", "ref", "message", "m1", "--topic", "x"]).unwrap();
+        assert!(build_body(&bad_kind.command).is_err());
+        #[cfg(not(feature = "human"))]
+        for argv in [
+            vec!["haste", "note", "show", "people/ana.md"],
+            vec!["haste", "note", "log"],
+            vec!["haste", "note", "mode", "agent-a", "approval"],
+        ] {
+            assert!(Cli::try_parse_from(argv).is_err());
+        }
+    }
+
+    #[cfg(feature = "human")]
+    #[test]
+    fn human_note_verbs_map_to_human_requests() {
+        for argv in [
+            vec!["haste", "note", "show", "people/ana.md"],
+            vec!["haste", "note", "log", "--since", "5"],
+            vec!["haste", "note", "mode", "agent-a", "approval"],
+        ] {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            assert!(is_human_command(&cli.command));
+            assert!(build_body(&cli.command).is_ok());
+        }
+        let bad = Cli::try_parse_from(["haste", "note", "mode", "agent-a", "sometimes"]).unwrap();
+        assert!(build_body(&bad.command).is_err());
     }
 
     #[test]

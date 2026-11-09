@@ -186,6 +186,15 @@ pub enum RequestBody {
     },
     /// Human-only: counts and permission state of the Reminders connector (no titles).
     RemindersStatus,
+    /// Human-only: read a note under the notes folder (same containment and hidden-path rules).
+    NoteShow {
+        path: String,
+    },
+    /// Human-only: the `note.append` audit rows (path, outcome, bytes or reason; never text).
+    NoteLog {
+        #[serde(default)]
+        since: Option<i64>,
+    },
     /// Human-only: set how a principal's note appends are decided (`auto` or `approval`).
     NoteMode {
         principal_id: String,
@@ -273,6 +282,18 @@ pub struct ReminderView {
     pub reminder: Reminder,
     #[serde(default)]
     pub tags: Vec<String>,
+}
+
+/// One `note.append` audit row. There is no text: the audit never holds any.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoteLogRow {
+    pub ts: i64,
+    pub principal: String,
+    /// `written`, `denied` or `io_error`.
+    pub outcome: String,
+    pub path: Option<String>,
+    /// `bytes=<n>` for a write, a reason code for a refusal.
+    pub detail: Option<String>,
 }
 
 /// A calendar event with its project tags.
@@ -366,6 +387,13 @@ pub enum Response {
     },
     Reminders {
         reminders: Vec<ReminderView>,
+    },
+    Note {
+        path: String,
+        text: String,
+    },
+    NoteLog {
+        rows: Vec<NoteLogRow>,
     },
     Events {
         events: Vec<EventView>,

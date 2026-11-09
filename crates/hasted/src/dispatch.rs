@@ -9,11 +9,14 @@ use haste_core::connector::{
 use haste_core::herdr::visible_to;
 use haste_core::model::{notes_snippet, Reminder, Source};
 use haste_core::notes::{note_project, slugify, NoteDenial};
-use haste_core::policy::{evaluate, Action, Matrix, Outcome, Principal, PrincipalKind, Target};
+use haste_core::policy::{
+    evaluate, resolve_note_path, Action, Matrix, NotePathError, Outcome, Principal, PrincipalKind,
+    Target,
+};
 use haste_core::proposal::{NoteEntry, Payload};
 use haste_core::time::now_secs;
 use haste_proto::{
-    AuditLine, ConnectorView, ErrorCode, Event, EventView, Hints, ReminderView,
+    AuditLine, ConnectorView, ErrorCode, Event, EventView, Hints, NoteLogRow, ReminderView,
     RemindersStatusView, Request, RequestBody, Response, ThreadView, PROTOCOL_VERSION,
 };
 use haste_store::{AuthError, NewProposal, StoreError, ThreadFilter};
@@ -72,6 +75,8 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::ReminderTagAdd { .. }
         | RequestBody::ReminderTagRemove { .. }
         | RequestBody::NoteMode { .. }
+        | RequestBody::NoteShow { .. }
+        | RequestBody::NoteLog { .. }
         | RequestBody::EventTagAdd { .. }
         | RequestBody::EventTagRemove { .. }
         | RequestBody::RemindersStatus
@@ -101,6 +106,8 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::ReminderTagAdd { .. } => "reminder_tag_add",
         RequestBody::EventTagAdd { .. } => "event_tag_add",
         RequestBody::NoteMode { .. } => "note_mode",
+        RequestBody::NoteShow { .. } => "note_show",
+        RequestBody::NoteLog { .. } => "note_log",
         RequestBody::EventTagRemove { .. } => "event_tag_remove",
         RequestBody::ReminderTagRemove { .. } => "reminder_tag_remove",
         RequestBody::RemindersStatus => "reminders_status",
@@ -326,6 +333,8 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
                 note_reference(state, principal, &args, now)
             }
         }
+        RequestBody::NoteShow { path } => note_show(state, principal, &path),
+        RequestBody::NoteLog { since } => note_log(state, since),
         RequestBody::NoteMode { principal_id, mode } => {
             match state.store.set_note_mode(&principal_id, mode) {
                 Ok(()) => {
@@ -1465,6 +1474,61 @@ fn note_reference(
         Err(response) => *response,
     }
 }
+
+/// Human-only: read a note. The same lexical, hidden-path, symlink and containment rules apply as
+/// for writes, so `note show` cannot be aimed at anything outside the notes folder.
+fn note_show(state: &State, actor: &Principal, path: &str) -> Response {
+    let target = match resolve_note_path(&state.config.notes_root, path) {
+        Ok(t) => t,
+        Err(NotePathError::Denied(d)) => {
+            state.audit(
+                &actor.id,
+                "note.show",
+                "denied",
+                Some(path),
+                Some(d.as_str()),
+            );
+            return err(ErrorCode::Denied, d.as_str());
+        }
+        Err(NotePathError::Io(m)) => return err(ErrorCode::Internal, &m),
+    };
+    match std::fs::read_to_string(&target) {
+        Ok(text) => {
+            state.audit(&actor.id, "note.show", "read", Some(path), None);
+            Response::Note {
+                path: path.to_owned(),
+                text,
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            err(ErrorCode::NotFound, "note not found")
+        }
+        Err(e) => err(ErrorCode::Internal, &e.kind().to_string()),
+    }
+}
+
+/// Human-only: the `note.append` audit rows. The audit has no text, so neither does this.
+fn note_log(state: &State, since: Option<i64>) -> Response {
+    match read_recent(&state.config.audit_path(), NOTE_LOG_SCAN) {
+        Ok(records) => Response::NoteLog {
+            rows: records
+                .into_iter()
+                .filter(|r| r.action == "note.append" && since.is_none_or(|t| r.ts >= t))
+                .map(|r| NoteLogRow {
+                    ts: r.ts,
+                    principal: r.principal,
+                    outcome: r.outcome,
+                    path: r.object,
+                    detail: r.detail,
+                })
+                .collect(),
+        },
+        Err(e) => err(ErrorCode::Internal, &e.to_string()),
+    }
+}
+
+/// Audit rows scanned (newest) when building the note log.
+const NOTE_LOG_SCAN: usize = 5000;
 
 /// Approval mode: hold the append as a proposal; nothing is written until the human approves.
 fn queue_note(

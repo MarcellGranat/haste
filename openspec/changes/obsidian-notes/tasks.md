@@ -56,10 +56,10 @@
 
 ## 7. Human read surfaces
 
-- [ ] 7.1 Add the human-only `note show <path>` request and CLI verb (feature `human`), refusing hidden paths and any principal other than `human`
-- [ ] 7.2 Add the human-only `note log [--since]` request and verb that prints audit rows without text
+- [x] 7.1 Add the human-only `note show <path>` request and CLI verb (feature `human`), refusing hidden paths and any principal other than `human`
+- [x] 7.2 Add the human-only `note log [--since]` request and verb that prints audit rows without text
 - [x] 7.3 Add the `NoteAppend` rendering to the approvals TUI showing path and first line of text, if Q8 keeps this in scope
-- [ ] 7.4 Add tests: agent token denied for `note show`; `note log` output contains no text from the appended body
+- [x] 7.4 Add tests: agent token denied for `note show`; `note log` output contains no text from the appended body
 
 ## 8. Audit and configuration
 
@@ -69,13 +69,13 @@
 
 ## 9. Documentation
 
-- [ ] 9.1 Add a README section "Notes folder" covering the single notes folder setting (may be inside an Obsidian vault; haste never touches the rest), notes-root-relative paths, the containment rule, hidden-path rule, person notes, back-reference notes, approval mode, and the `note show` and `note log` verbs
-- [ ] 9.2 Document the sync findings from group 0 and the chosen mitigation for Q9 (notes folder only) in the README
+- [x] 9.1 Add a README section "Notes folder" covering the single notes folder setting (may be inside an Obsidian vault; haste never touches the rest), notes-root-relative paths, the containment rule, hidden-path rule, person notes, back-reference notes, approval mode, and the `note show` and `note log` verbs
+- [x] 9.2 Document the sync findings from group 0 and the chosen mitigation for Q9 (notes folder only) in the README
 
 ## 10. Quality checks
 
-- [ ] 10.1 Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` and fix all failures
-- [ ] 10.2 Confirm every test uses a tempdir or a fake; no test touches the real notes folder or the real data directory
+- [x] 10.1 Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` and fix all failures
+- [x] 10.2 Confirm every test uses a tempdir or a fake; no test touches the real notes folder or the real data directory
 
 ## 11. Manual smoke (human, live notes folder)
 

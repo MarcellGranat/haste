@@ -370,6 +370,59 @@ target/human/release/haste connector gcal auth
 4. Propose a title change; an attendee-change proposal is refused. Engage `gcal` again: reads and approved writes are refused.
    Delete the throwaway event by hand (haste never deletes).
 
+## Notes folder
+
+Agents can keep notes about people, tasks and mail, but only inside **one folder you choose**.
+haste never writes, reads or lists anything outside it, so it can sit inside an Obsidian vault
+(or anywhere) without touching the rest of the vault. Agents only ever *append*: no edit, no
+delete, no overwrite.
+
+### Setup
+
+1. Make the folder yourself (haste never creates it): `mkdir -p ~/Documents/haste-notes`.
+2. Tell the daemon, in `notes.json` in the data directory (launchd does not pass your shell's
+   environment, so this file is the normal way; `HASTE_NOTES_ROOT` only overrides it for development):
+
+```json
+{ "root": "/Users/you/Documents/haste-notes" }
+```
+
+   Optional front-matter settings (both default to off; unknown keys are an error):
+   `{"person_notes": {"aliases": false, "include_addresses": false}}`.
+3. Restart `hasted`. With the folder missing, note actions are refused with `notes_root_missing`.
+
+### What agents can write
+
+- `haste note append people/ana.md --text ".."`: plain text at a path inside the folder. Allowed
+  top folders: `people/`, `tasks/` and `projects/<workspace>/` (the workspace must be a known herdr
+  workspace). Paths are relative to the folder; `..`, absolute paths, hidden names (anything
+  starting with `.`), symlinks and non-`.md` files are refused.
+- `haste note person <person-id> --text ".."`: a dated entry in the Person's note
+  `people/<name>.md`. The daemon writes front matter once (`haste_person`, `created`) and never
+  changes it; no email address is written unless you opt in. Two people with the same name get
+  `ana.md`, `ana-2.md`, and so on; a hand-written file is never modified.
+- `haste note ref thread|reminder|event <id> --topic "Billing follow-up"`: one line
+  `- haste:thread/<id>` under a dated heading in `tasks/billing-follow-up.md`. There is no text
+  field: a subject, title or attendee can never end up in a reference note.
+
+Limits: 64 KiB per append, 256 KiB per file, 200 appends per agent per day. Bodies cannot contain
+a `---` line or a `<!-- haste:` marker. Machine principals never write notes.
+
+### Reviewing
+
+- Notes land directly by default. To review an agent's notes first, run
+  `haste note mode <agent> approval`: its notes then wait in Approvals (`a` writes it, `r` drops it)
+  and nothing is written until you approve. `haste note mode <agent> auto` switches back.
+- `haste note show <path>` reads a note; `haste note log [--since <unix>]` lists writes (path,
+  outcome, bytes or reason, never text).
+- Every write is audited with the path and byte count only.
+
+### Sync caveat
+
+Appends are safe for several agents at once on a local disk. If the folder is synced (iCloud Drive,
+Obsidian Sync) a conflict copy can appear when the sync service touches the same file. On this setup
+the folder is not synced; if you move it into a synced location, test it first.
+
 ## Policy
 
 | Action | Agent outcome |
@@ -430,5 +483,5 @@ cargo test -p haste --features human
 3. ~~`herdr-agents-panel` (status feeds, blocked agents, workspace tags)~~ done
 4. ~~`reminders-and-links` (EventKit helper, email to reminder)~~ implemented, awaiting live smoke check
 5. ~~`google-calendar`~~ implemented, awaiting live smoke check; `imessage-connector` is parked until Messages is set up on the hub Mac
-6. `obsidian-notes` (Person notes, allow-listed append)
+6. ~~`obsidian-notes` (Person notes, one notes folder)~~ implemented, awaiting live smoke check
 7. `whatsapp-messenger-spike` (go/no-go, flagged connectors)

@@ -183,3 +183,10 @@ Reminder notes on create: the created reminder's notes carry only the haste thre
 - **Helper bundle identity** for a stable TCC grant: whether an ad-hoc-signed helper keeps its grant across rebuilds needs a manual check on the real machine.
 - **Notes snippet length**: the constant is a placeholder until the human chooses it.
 - **Whether `missing_since` should be surfaced in the TUI** or only in the status output. Default: status output only.
+
+## Spike results (2026-11-09, real machine, macOS 26)
+
+- Access was granted once from a normal Terminal window; the helper then reports `granted` without prompting, from the CLI and from a daemon started in the same login session.
+- An ad-hoc-signed helper with a fixed identifier keeps the grant across rebuilds.
+- The database has 5 lists and more than 1000 reminders, almost all completed. Full sweeps therefore fetch open reminders only (12 here); deltas still include completions. A sweep of all reminders would never finish within the per-cycle cap.
+- Not yet verified: a daemon started by launchd (a different responsible process than Terminal). If it reports `not_determined` there, the daemon's helper must trigger the prompt once.

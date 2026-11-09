@@ -197,3 +197,11 @@ variant; otherwise one forward-only migration is added.
 - Q1 (`.obsidian/` required): resolved, removed by the one-folder decision (D1).
 - Q4 is resolved (default `auto`); the `NoteReference` follow-up is noted in D6. Q2 (slug collisions), Q3 (free text in task notes), Q5 (project people notes), Q6 (per-file cap), Q7 (daily count cap), Q8 (TUI note browser): still open.
 - Q9 (sync conflicts): open, narrowed to the notes folder only (D10).
+
+## Spike results (2026-11-09, this Mac)
+
+- Notes folder chosen by the human: `~/Documents/haste-notes` (a standalone folder, not inside any vault; Obsidian can open it as a vault later). The daemon runs under launchd and reads the folder from `notes.json`.
+- Not synced: Desktop & Documents in iCloud is off on this Mac (`FXICloudDriveDocuments = 0`), `~/Documents` resolves to a plain local path on the internal disk, and there are no evicted `.icloud` placeholders. Obsidian Sync is not in play because the folder is not a vault.
+- Concurrent appends: three writers each appending 300 long lines to one file produced exactly 900 intact lines, none partial or interleaved. Small `O_APPEND` writes are therefore safe for several agents at once on this filesystem.
+- Containment: a symlink inside the folder pointing outside it (`/etc`) resolves outside the root, which confirms the executor must refuse symlinked components and targets (`symlink`, `outside_root`).
+- Caveat: these results hold only while the folder stays unsynced. If it is ever moved into iCloud Drive, a vault with Obsidian Sync, or another sync service, rerun the conflict experiment (task 0.3) before relying on appends; Q9 stays open for that case.

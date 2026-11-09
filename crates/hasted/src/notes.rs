@@ -5,7 +5,8 @@ use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use haste_core::notes::{check_body, NoteDenial, MAX_NOTE_FILE_BYTES};
+use haste_core::model::{IdentifierKind, Person};
+use haste_core::notes::{check_body, slugify, NoteDenial, MAX_NOTE_FILE_BYTES};
 use haste_core::policy::{resolve_note_path, NotePathError};
 use serde::Deserialize;
 
@@ -151,6 +152,198 @@ fn verify_person(target: &Path, id: &str) -> Result<(), AppendError> {
         }
     }
     Err(AppendError::Denied(NoteDenial::FrontMatterMismatch))
+}
+
+/// How many `ana`, `ana-2`, `ana-3`, … notes are tried before giving up.
+const MAX_SLUG_COLLISIONS: u32 = 99;
+
+/// `date` in the daemon's local time zone (the standard library has no zone support). `ts` is
+/// unix seconds; BSD/macOS `date -r`, with GNU `date -d @` as the fallback.
+fn local_date_format(ts: i64, format: &str) -> String {
+    let run = |args: &[String]| {
+        std::process::Command::new("date")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_owned())
+    };
+    run(&["-r".into(), ts.to_string(), format!("+{format}")])
+        .or_else(|| run(&["-d".into(), format!("@{ts}"), format!("+{format}")]))
+        .unwrap_or_else(|| format!("@{ts}"))
+}
+
+/// `YYYY-MM-DD HH:MM` in local time, for entry headings.
+#[must_use]
+pub fn local_stamp(ts: i64) -> String {
+    local_date_format(ts, "%Y-%m-%d %H:%M")
+}
+
+/// `YYYY-MM-DD` in local time, for front matter.
+#[must_use]
+pub fn local_day(ts: i64) -> String {
+    local_date_format(ts, "%Y-%m-%d")
+}
+
+/// The front matter of a new person note: the person id and creation date; aliases only when
+/// the human enabled them, and email addresses only when the human enabled those too.
+#[must_use]
+pub fn person_front_matter(
+    person: &Person,
+    created: &str,
+    settings: &PersonNoteSettings,
+) -> String {
+    let mut out = format!("---\nhaste_person: {}\ncreated: {created}\n", person.id);
+    if settings.aliases {
+        let mut aliases = vec![person.display_name.clone()];
+        if settings.include_addresses {
+            aliases.extend(
+                person
+                    .identifiers
+                    .iter()
+                    .filter(|i| i.kind == IdentifierKind::Email)
+                    .map(|i| i.value.clone()),
+            );
+        }
+        let quoted: Vec<String> = aliases
+            .iter()
+            .map(|a| serde_json::to_string(a).unwrap_or_default())
+            .collect();
+        out.push_str(&format!("aliases: [{}]\n", quoted.join(", ")));
+    }
+    out.push_str("---\n");
+    out
+}
+
+/// The `haste_person` of an existing note's leading front matter, if any.
+fn existing_person(target: &Path) -> Option<String> {
+    let mut head = Vec::new();
+    fs::File::open(target)
+        .ok()?
+        .take(FRONT_MATTER_PEEK)
+        .read_to_end(&mut head)
+        .ok()?;
+    let text = String::from_utf8_lossy(&head);
+    let mut lines = text.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return None;
+    }
+    lines
+        .take_while(|l| l.trim() != "---")
+        .find_map(|l| l.strip_prefix("haste_person:").map(|v| v.trim().to_owned()))
+}
+
+/// The notes-folder-relative path of a person's note. The slug comes from the display name (or
+/// `person-<id>` when nothing usable remains). A note that already names this person is reused;
+/// when another person owns `ana.md` the next free `ana-2.md`, `ana-3.md`, … is chosen.
+///
+/// # Errors
+/// [`NoteDenial::FrontMatterMismatch`] when every candidate belongs to someone else.
+pub fn person_note_path(root: &Path, person: &Person) -> Result<String, AppendError> {
+    let mut slug = slugify(&person.display_name);
+    if slug.is_empty() {
+        let short: String = slugify(&person.id).chars().take(8).collect();
+        slug = format!("person-{short}");
+    }
+    for n in 1..=MAX_SLUG_COLLISIONS {
+        let name = if n == 1 {
+            slug.clone()
+        } else {
+            format!("{slug}-{n}")
+        };
+        let relative = format!("people/{name}.md");
+        let target = root.join(&relative);
+        match fs::symlink_metadata(&target) {
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(relative),
+            Err(e) => return Err(io(&e)),
+            Ok(m) if m.len() == 0 => return Ok(relative),
+            Ok(_) => match existing_person(&target) {
+                Some(owner) if owner == person.id => return Ok(relative),
+                // someone else's note (or a hand-written one): try the next name
+                _ => {}
+            },
+        }
+    }
+    Err(AppendError::Denied(NoteDenial::FrontMatterMismatch))
+}
+
+/// Append a dated entry to a person's note at `relative` (from [`person_note_path`]).
+///
+/// # Errors
+/// [`AppendError::Denied`] for a bad body, refused path, over-size file or front-matter mismatch.
+pub fn append_person_entry(
+    root: &Path,
+    relative: &str,
+    person: &Person,
+    agent: &str,
+    text: &str,
+    ts: i64,
+    settings: &PersonNoteSettings,
+) -> Result<u64, AppendError> {
+    check_body(text).map_err(AppendError::Denied)?;
+    let front_matter = person_front_matter(person, &local_day(ts), settings);
+    let block = format!(
+        "### {}\n<!-- haste: appended by {agent} at {ts} -->\n{text}\n\n",
+        local_stamp(ts)
+    );
+    write_block(
+        root,
+        relative,
+        &block,
+        Header::Person {
+            id: &person.id,
+            front_matter: &front_matter,
+        },
+    )
+}
+
+/// Append an identifier-only back-reference line under a dated heading. The line is composed
+/// here from the typed reference; no agent text goes through this path.
+///
+/// # Errors
+/// [`AppendError::Denied`] for a refused path or an over-size file.
+pub fn append_reference(
+    root: &Path,
+    relative: &str,
+    agent: &str,
+    kind: &str,
+    id: &str,
+    ts: i64,
+) -> Result<u64, AppendError> {
+    let block = format!(
+        "### {}\n<!-- haste: appended by {agent} at {ts} -->\n- haste:{kind}/{id}\n\n",
+        local_stamp(ts)
+    );
+    write_block(root, relative, &block, Header::None)
+}
+
+/// The most characters of an identifier accepted in a back-reference.
+pub const MAX_REFERENCE_ID_CHARS: usize = 64;
+
+/// Identifiers are the store's own (ULIDs and similar): ASCII letters, digits, `-` and `_`.
+#[must_use]
+pub fn valid_reference_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_REFERENCE_ID_CHARS
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// `tasks/<topic>.md`, or `projects/<project>/tasks/<topic>.md`. The topic is a human-supplied
+/// label, never a subject or title. `None` when the topic has no usable characters.
+#[must_use]
+pub fn reference_path(topic: &str, project: Option<&str>) -> Option<String> {
+    let topic = slugify(topic);
+    if topic.is_empty() {
+        return None;
+    }
+    Some(match project.map(slugify).filter(|p| !p.is_empty()) {
+        Some(p) => format!("projects/{p}/tasks/{topic}.md"),
+        None => format!("tasks/{topic}.md"),
+    })
 }
 
 /// Optional settings in `notes.json` (the data directory). Unknown keys are an error.

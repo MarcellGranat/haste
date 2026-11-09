@@ -2,7 +2,7 @@
 
 use haste_core::auth::new_id;
 use haste_core::model::{
-    Identifier, Link, LinkType, Message, ObjectKind, Person, Source, Thread, Triage,
+    Identifier, IdentifierKind, Link, LinkType, Message, ObjectKind, Person, Source, Thread, Triage,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
@@ -381,6 +381,44 @@ impl Store {
                     |r| r.get(0),
                 )
                 .optional()?)
+        })
+    }
+
+    /// A person with their identifiers, or `None`.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn get_person(&self, id: &str) -> StoreResult<Option<Person>> {
+        let id = id.to_owned();
+        self.read(move |conn| {
+            let name: Option<String> = conn
+                .query_row(
+                    "SELECT display_name FROM people WHERE id = ?1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(display_name) = name else {
+                return Ok(None);
+            };
+            let mut stmt = conn.prepare(
+                "SELECT kind, value FROM identifiers WHERE person_id = ?1 ORDER BY kind, value",
+            )?;
+            let rows = stmt.query_map([&id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            let mut identifiers = Vec::new();
+            for row in rows {
+                let (kind, value) = row?;
+                if let Some(kind) = IdentifierKind::parse(&kind) {
+                    identifiers.push(Identifier { kind, value });
+                }
+            }
+            Ok(Some(Person {
+                id,
+                display_name,
+                identifiers,
+            }))
         })
     }
 

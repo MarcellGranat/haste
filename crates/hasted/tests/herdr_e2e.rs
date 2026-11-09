@@ -895,6 +895,8 @@ fn kind(body: &RequestBody) -> Kind {
         | RequestBody::EventsList { .. } => Kind::ScopedRead,
         RequestBody::Propose { .. }
         | RequestBody::NoteAppend { .. }
+        | RequestBody::NotePerson { .. }
+        | RequestBody::NoteReference(_)
         | RequestBody::Approve { .. }
         | RequestBody::Reject { .. }
         | RequestBody::Send { .. }

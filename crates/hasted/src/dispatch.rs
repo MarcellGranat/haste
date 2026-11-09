@@ -18,7 +18,10 @@ use haste_proto::{
 };
 use haste_store::{AuthError, NewProposal, StoreError, ThreadFilter};
 
-use crate::notes::{append_note, AppendError};
+use crate::notes::{
+    append_note, append_person_entry, append_reference, person_note_path, reference_path,
+    valid_reference_id, AppendError,
+};
 use crate::state::State;
 
 fn err(code: ErrorCode, message: &str) -> Response {
@@ -49,7 +52,9 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::RemindersList { .. }
         | RequestBody::EventsList { .. } => Action::Read,
         RequestBody::Propose { payload, .. } => payload.action(),
-        RequestBody::NoteAppend { .. } => Action::NoteAppend,
+        RequestBody::NoteAppend { .. }
+        | RequestBody::NotePerson { .. }
+        | RequestBody::NoteReference(_) => Action::NoteAppend,
         RequestBody::Approve { .. } => Action::Approve,
         RequestBody::Reject { .. } => Action::Reject,
         // Running an approved reminder proposal is as human-only as sending a draft.
@@ -155,6 +160,13 @@ pub fn dispatch(state: &State, request: Request) -> Response {
 
     let target = match &request.body {
         RequestBody::NoteAppend { path, .. } => Target::NotePath(path.clone()),
+        // The person note's real path depends on the store (slug collisions); the gate only
+        // needs its class, so it sees a representative `people/` path.
+        RequestBody::NotePerson { .. } => Target::NotePath("people/person.md".into()),
+        RequestBody::NoteReference(args) => Target::NotePath(
+            reference_path(&args.topic, args.project.as_deref())
+                .unwrap_or_else(|| "tasks/topic.md".into()),
+        ),
         _ => Target::None,
     };
     let mut matrix = Matrix::new();
@@ -255,6 +267,12 @@ fn execute(state: &State, principal: &Principal, body: RequestBody) -> Response 
             text,
             idempotency_key,
         } => note_append(state, principal, &path, &text, &idempotency_key, now),
+        RequestBody::NotePerson {
+            person_id,
+            text,
+            idempotency_key,
+        } => note_person(state, principal, &person_id, &text, &idempotency_key, now),
+        RequestBody::NoteReference(args) => note_reference(state, principal, &args, now),
         RequestBody::ProposalStatus { proposal_id } => {
             let found = if principal.kind == PrincipalKind::Human {
                 state.store.get_proposal(&proposal_id)
@@ -1259,6 +1277,94 @@ fn note_append(
             path: path.to_owned(),
             bytes,
         },
+        Err(response) => *response,
+    }
+}
+
+fn note_person(
+    state: &State,
+    principal: &Principal,
+    person_id: &str,
+    text: &str,
+    key: &str,
+    now: i64,
+) -> Response {
+    if key.trim().is_empty() {
+        return err(ErrorCode::Validation, "idempotency key is required");
+    }
+    let person = match state.store.get_person(person_id) {
+        Ok(Some(p)) => p,
+        Ok(None) => return err(ErrorCode::NotFound, "person not found"),
+        Err(e) => return map_store(&e),
+    };
+    if !state.remember_note_key(&principal.id, key) {
+        return Response::Appended {
+            path: String::new(),
+            bytes: 0,
+        };
+    }
+    let root = &state.config.notes_root;
+    let path = match person_note_path(root, &person) {
+        Ok(p) => p,
+        Err(AppendError::Denied(d)) => return note_denied(state, &principal.id, "people/", d),
+        Err(AppendError::Io(m)) => return err(ErrorCode::Internal, &m),
+    };
+    match guarded_note_write(state, &principal.id, &path, now, || {
+        append_person_entry(
+            root,
+            &path,
+            &person,
+            &principal.id,
+            text,
+            now,
+            &state.config.notes_settings.person_notes,
+        )
+    }) {
+        Ok(bytes) => Response::Appended { path, bytes },
+        Err(response) => *response,
+    }
+}
+
+fn note_reference(
+    state: &State,
+    principal: &Principal,
+    args: &haste_proto::NoteReferenceArgs,
+    now: i64,
+) -> Response {
+    if args.idempotency_key.trim().is_empty() {
+        return err(ErrorCode::Validation, "idempotency key is required");
+    }
+    if !valid_reference_id(&args.id) {
+        return err(ErrorCode::Validation, "the identifier is not valid");
+    }
+    let Some(path) = reference_path(&args.topic, args.project.as_deref()) else {
+        return err(ErrorCode::Validation, "a topic label is required");
+    };
+    let exists = match args.kind {
+        haste_proto::RefKind::Thread => state.store.get_thread(&args.id).map(|t| t.is_some()),
+        haste_proto::RefKind::Reminder => state.store.get_reminder(&args.id).map(|r| r.is_some()),
+        haste_proto::RefKind::Event => state.store.get_event(&args.id).map(|e| e.is_some()),
+    };
+    match exists {
+        Ok(true) => {}
+        Ok(false) => return err(ErrorCode::NotFound, "the referenced object does not exist"),
+        Err(e) => return map_store(&e),
+    }
+    if !state.remember_note_key(&principal.id, &args.idempotency_key) {
+        return Response::Appended { path, bytes: 0 };
+    }
+    let root = &state.config.notes_root;
+    match guarded_note_write(state, &principal.id, &path, now, || {
+        append_reference(
+            root,
+            &path,
+            &principal.id,
+            args.kind.as_str(),
+            &args.id,
+            now,
+        )
+    }) {
+        Ok(bytes) => Response::Appended { path, bytes },
         Err(response) => *response,
     }
 }

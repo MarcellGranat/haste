@@ -32,6 +32,41 @@ impl Request {
     }
 }
 
+/// What a back-reference points at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefKind {
+    Thread,
+    Reminder,
+    Event,
+}
+
+impl RefKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Thread => "thread",
+            Self::Reminder => "reminder",
+            Self::Event => "event",
+        }
+    }
+}
+
+/// A back-reference request. There is deliberately no text field, and unknown fields are a
+/// decode error, so a title or subject cannot ride along.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoteReferenceArgs {
+    pub kind: RefKind,
+    pub id: String,
+    /// Human-supplied topic label; its slug names the note.
+    pub topic: String,
+    /// A known workspace label: the note goes under `projects/<project>/tasks/`.
+    #[serde(default)]
+    pub project: Option<String>,
+    pub idempotency_key: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Topic {
@@ -68,6 +103,15 @@ pub enum RequestBody {
         text: String,
         idempotency_key: String,
     },
+    /// Append a dated entry to the note of a Person record (`people/<slug>.md`). The daemon
+    /// composes the file: front matter once, then the entry.
+    NotePerson {
+        person_id: String,
+        text: String,
+        idempotency_key: String,
+    },
+    /// Record an identifier-only back-reference (`- haste:<kind>/<id>`). No free text.
+    NoteReference(NoteReferenceArgs),
     ProposalStatus {
         proposal_id: String,
     },
@@ -416,6 +460,26 @@ pub fn read_frame<R: Read, T: for<'de> Deserialize<'de>>(reader: &mut R) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reference_request_has_no_text_field_and_unknown_fields_fail_to_decode() {
+        let ok = r#"{"type":"note_reference","kind":"thread","id":"T1","topic":"Billing","idempotency_key":"k"}"#;
+        let parsed: RequestBody = serde_json::from_str(ok).unwrap();
+        assert!(
+            matches!(parsed, RequestBody::NoteReference(a) if a.kind == RefKind::Thread && a.project.is_none())
+        );
+        for extra in ["text", "subject", "title", "body"] {
+            let bad = format!(
+                r#"{{"type":"note_reference","kind":"thread","id":"T1","topic":"B","idempotency_key":"k","{extra}":"smuggled"}}"#
+            );
+            assert!(
+                serde_json::from_str::<RequestBody>(&bad).is_err(),
+                "{extra}"
+            );
+        }
+        let unknown_kind = r#"{"type":"note_reference","kind":"message","id":"T1","topic":"B","idempotency_key":"k"}"#;
+        assert!(serde_json::from_str::<RequestBody>(unknown_kind).is_err());
+    }
 
     #[test]
     fn frame_round_trip() {

@@ -30,20 +30,20 @@
 
 ## 4. Person notes
 
-- [ ] 4.1 Implement the slug function (ASCII fold, lowercase, non-alphanumeric runs to `-`, trim, 60-character cap) and unit-test it on accented names, punctuation-only names, and long names
-- [ ] 4.2 Implement front matter creation on first write only, with `haste_person` and `created`; aliases and addresses only behind the settings `person_notes.aliases` and `person_notes.include_addresses` (default off)
-- [ ] 4.3 Implement the `front_matter_mismatch` check for an existing file whose `haste_person` differs or is missing
-- [ ] 4.4 Implement the dated heading `### <YYYY-MM-DD HH:MM>` in local time followed by the attribution comment and text
-- [ ] 4.5 Add tests in a tempdir: first entry creates front matter, second entry keeps it, mismatch refused, default front matter contains no address, opted-in alias contains no address, unknown person id gives `NotFound`
-- [ ] 4.6 Resolve Q2 (slug collision) before implementing collision handling; add tests only for the chosen rule
+- [x] 4.1 Implement the slug function (ASCII fold, lowercase, non-alphanumeric runs to `-`, trim, 60-character cap) and unit-test it on accented names, punctuation-only names, and long names
+- [x] 4.2 Implement front matter creation on first write only, with `haste_person` and `created`; aliases and addresses only behind the settings `person_notes.aliases` and `person_notes.include_addresses` (default off)
+- [x] 4.3 Implement the `front_matter_mismatch` check for an existing file whose `haste_person` differs or is missing
+- [x] 4.4 Implement the dated heading `### <YYYY-MM-DD HH:MM>` in local time followed by the attribution comment and text
+- [x] 4.5 Add tests in a tempdir: first entry creates front matter, second entry keeps it, mismatch refused, default front matter contains no address, opted-in alias contains no address, unknown person id gives `NotFound`
+- [x] 4.6 Resolve Q2 (slug collision) before implementing collision handling; add tests only for the chosen rule
 
 ## 5. Work back-reference notes
 
-- [ ] 5.1 Add the typed `NoteReference` request (`kind`, `id`) to `haste-proto`, with no text field, and make unknown fields a decode error
-- [ ] 5.2 Implement identifier validation (ASCII, bounded length, store charset) and the existence check through the store
-- [ ] 5.3 Compose the single line `- haste:<kind>/<id>` in the daemon and write it under the dated heading in `tasks/<topic-slug>.md` or `projects/<project>/tasks/<topic-slug>.md`
-- [ ] 5.4 Gate the `event` kind on the calendar event model (`unknown_kind` otherwise); leave the kind out until the `google-calendar` change is archived
-- [ ] 5.5 Add tests in a tempdir: thread, reminder and event references; missing object; malformed id; a reminder title and an email subject never appear in the file
+- [x] 5.1 Add the typed `NoteReference` request (`kind`, `id`) to `haste-proto`, with no text field, and make unknown fields a decode error
+- [x] 5.2 Implement identifier validation (ASCII, bounded length, store charset) and the existence check through the store
+- [x] 5.3 Compose the single line `- haste:<kind>/<id>` in the daemon and write it under the dated heading in `tasks/<topic-slug>.md` or `projects/<project>/tasks/<topic-slug>.md`
+- [x] 5.4 Gate the `event` kind on the calendar event model (`unknown_kind` otherwise); leave the kind out until the `google-calendar` change is archived
+- [x] 5.5 Add tests in a tempdir: thread, reminder and event references; missing object; malformed id; a reminder title and an email subject never appear in the file
 
 ## 6. Policy gate and approval mode
 

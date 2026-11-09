@@ -2,12 +2,11 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Path prefixes (relative to the notes root) agents may append to.
-pub const NOTE_ALLOWED_PREFIXES: [&str; 2] = ["people", "tasks"];
+use crate::notes::{parse_note_path, NoteDenial};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -232,6 +231,14 @@ pub fn evaluate(
             reason: "human_only_action",
         };
     }
+    // Machine principals never write notes, whatever the matrix says: this rule is outside the
+    // matrix so no configuration can grant it.
+    if action == Action::NoteAppend && principal.kind == PrincipalKind::Machine {
+        return Decision {
+            outcome: Outcome::Denied,
+            reason: NoteDenial::MachinePrincipal.as_str(),
+        };
+    }
     let Some(outcome) = matrix.get(&principal.id, action) else {
         return Decision {
             outcome: Outcome::Denied,
@@ -246,13 +253,19 @@ pub fn evaluate(
     }
     if action == Action::NoteAppend && outcome == Outcome::Auto {
         return match target {
-            Target::NotePath(path) if note_path_allowed(path) => Decision {
-                outcome: Outcome::Auto,
-                reason: "allow_listed_path",
+            Target::NotePath(path) => match parse_note_path(path) {
+                Ok(_) => Decision {
+                    outcome: Outcome::Auto,
+                    reason: "allow_listed_path",
+                },
+                Err(denial) => Decision {
+                    outcome: Outcome::Denied,
+                    reason: denial.as_str(),
+                },
             },
-            _ => Decision {
+            Target::None => Decision {
                 outcome: Outcome::Denied,
-                reason: "path_outside_allow_list",
+                reason: NoteDenial::PathNotAllowed.as_str(),
             },
         };
     }
@@ -262,52 +275,36 @@ pub fn evaluate(
     }
 }
 
-/// Lexical check: relative, no `..`/`.`, first component allow-listed, at least two components.
+/// Lexical check of a notes-folder-relative path; see [`parse_note_path`] for the rules.
 #[must_use]
 pub fn note_path_allowed(path: &str) -> bool {
-    if path.is_empty() || path.contains('\0') {
-        return false;
-    }
-    let parsed = Path::new(path);
-    if parsed.is_absolute() {
-        return false;
-    }
-    let mut names: Vec<&str> = Vec::new();
-    for component in parsed.components() {
-        match component {
-            Component::Normal(name) => match name.to_str() {
-                Some(text) => names.push(text),
-                None => return false,
-            },
-            _ => return false,
-        }
-    }
-    names.len() >= 2 && NOTE_ALLOWED_PREFIXES.contains(&names[0])
+    parse_note_path(path).is_ok()
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum NotePathError {
-    NotAllowed,
-    Symlink(PathBuf),
+    Denied(NoteDenial),
     Io(String),
 }
 
-/// Resolve a relative note path under `root`, rejecting symlinks at any component.
+/// Resolve a relative note path under `root`: the lexical rules first, then no symlink at any
+/// component, and the result must stay inside the canonical root.
 ///
 /// # Errors
-/// Returns [`NotePathError`] when the path is outside the allow-list, a component is a
-/// symlink, or the filesystem cannot be inspected.
+/// [`NotePathError::Denied`] with the reason, or `Io` when the filesystem cannot be inspected
+/// (including a missing root).
 pub fn resolve_note_path(root: &Path, relative: &str) -> Result<PathBuf, NotePathError> {
-    if !note_path_allowed(relative) {
-        return Err(NotePathError::NotAllowed);
-    }
-    let canonical_root = fs::canonicalize(root).map_err(|e| NotePathError::Io(e.to_string()))?;
+    parse_note_path(relative).map_err(NotePathError::Denied)?;
+    let canonical_root = fs::canonicalize(root).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => NotePathError::Denied(NoteDenial::NotesRootMissing),
+        _ => NotePathError::Io(e.to_string()),
+    })?;
     let mut current = canonical_root.clone();
     for component in Path::new(relative).components() {
         current.push(component);
         match fs::symlink_metadata(&current) {
             Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(NotePathError::Symlink(current));
+                return Err(NotePathError::Denied(NoteDenial::Symlink));
             }
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -315,7 +312,7 @@ pub fn resolve_note_path(root: &Path, relative: &str) -> Result<PathBuf, NotePat
         }
     }
     if !current.starts_with(&canonical_root) {
-        return Err(NotePathError::NotAllowed);
+        return Err(NotePathError::Denied(NoteDenial::OutsideRoot));
     }
     Ok(current)
 }
@@ -500,6 +497,37 @@ mod tests {
     }
 
     #[test]
+    fn a_machine_principal_can_never_append_notes_even_with_a_matrix_grant() {
+        let p = principal(PrincipalKind::Machine);
+        let mut m = matrix_for(&p);
+        m.set(&p.id, Action::NoteAppend, Outcome::Auto);
+        let d = evaluate(
+            &p,
+            Action::NoteAppend,
+            &Target::NotePath("people/ana.md".into()),
+            &m,
+        );
+        assert_eq!(
+            (d.outcome, d.reason),
+            (Outcome::Denied, "machine_principal")
+        );
+    }
+
+    #[test]
+    fn denied_note_paths_name_their_reason() {
+        let p = principal(PrincipalKind::Agent);
+        let m = matrix_for(&p);
+        for (path, reason) in [
+            ("../x.md", "outside_root"),
+            (".obsidian/app.json", "hidden_path"),
+            ("private/x.md", "path_not_allowed"),
+        ] {
+            let d = evaluate(&p, Action::NoteAppend, &Target::NotePath(path.into()), &m);
+            assert_eq!((d.outcome, d.reason), (Outcome::Denied, reason), "{path}");
+        }
+    }
+
+    #[test]
     fn machine_is_read_only_by_default() {
         let p = principal(PrincipalKind::Machine);
         let m = matrix_for(&p);
@@ -527,16 +555,24 @@ mod tests {
         .unwrap();
         assert!(matches!(
             resolve_note_path(dir.path(), "people/link/x.md"),
-            Err(NotePathError::Symlink(_))
+            Err(NotePathError::Denied(NoteDenial::Symlink))
         ));
         assert!(matches!(
             resolve_note_path(dir.path(), "tasks/todo.md"),
-            Err(NotePathError::Symlink(_))
+            Err(NotePathError::Denied(NoteDenial::Symlink))
         ));
         assert!(resolve_note_path(dir.path(), "people/new.md").is_ok());
         assert_eq!(
             resolve_note_path(dir.path(), "private/x.md"),
-            Err(NotePathError::NotAllowed)
+            Err(NotePathError::Denied(NoteDenial::PathNotAllowed))
+        );
+        assert_eq!(
+            resolve_note_path(dir.path(), "../x.md"),
+            Err(NotePathError::Denied(NoteDenial::OutsideRoot))
+        );
+        assert_eq!(
+            resolve_note_path(&dir.path().join("missing-root"), "people/x.md"),
+            Err(NotePathError::Denied(NoteDenial::NotesRootMissing))
         );
     }
 }

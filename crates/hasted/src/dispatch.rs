@@ -8,6 +8,7 @@ use haste_core::connector::{
 };
 use haste_core::herdr::visible_to;
 use haste_core::model::{notes_snippet, Reminder, Source};
+use haste_core::notes::{note_project, slugify, NoteDenial};
 use haste_core::policy::{evaluate, Action, Matrix, Outcome, Principal, PrincipalKind, Target};
 use haste_core::proposal::Payload;
 use haste_core::time::now_secs;
@@ -1251,35 +1252,86 @@ fn note_append(
             bytes: 0,
         };
     }
-    match append_note(&state.config.notes_root, path, &principal.id, text, now) {
+    match guarded_note_write(state, &principal.id, path, now, || {
+        append_note(&state.config.notes_root, path, &principal.id, text, now)
+    }) {
+        Ok(bytes) => Response::Appended {
+            path: path.to_owned(),
+            bytes,
+        },
+        Err(response) => *response,
+    }
+}
+
+/// Refuse a note action: one audit row with the path and the reason code, never any text.
+pub(crate) fn note_denied(state: &State, actor: &str, path: &str, denial: NoteDenial) -> Response {
+    state.audit(
+        actor,
+        "note.append",
+        "denied",
+        Some(path),
+        Some(denial.as_str()),
+    );
+    let code = match denial {
+        NoteDenial::SizeLimit | NoteDenial::BodyRejected => ErrorCode::Validation,
+        _ => ErrorCode::Denied,
+    };
+    err(code, denial.as_str())
+}
+
+/// Whether `projects/<name>/…` names a known workspace (by slug); other paths always pass.
+fn project_is_known(state: &State, path: &str) -> bool {
+    let Some(project) = note_project(path) else {
+        return true;
+    };
+    state
+        .store
+        .known_tags()
+        .is_ok_and(|tags| tags.iter().any(|label| slugify(label) == project))
+}
+
+/// Every note write goes through here: project check, per-day budget, the write itself, and
+/// exactly one audit row (`written` with the byte count, `denied` with a reason code, or
+/// `io_error`).
+pub(crate) fn guarded_note_write(
+    state: &State,
+    actor: &str,
+    path: &str,
+    now: i64,
+    write: impl FnOnce() -> Result<u64, AppendError>,
+) -> Result<u64, Box<Response>> {
+    if !project_is_known(state, path) {
+        return Err(Box::new(note_denied(
+            state,
+            actor,
+            path,
+            NoteDenial::UnknownProject,
+        )));
+    }
+    if !state.note_budget_left(actor, now) {
+        return Err(Box::new(note_denied(
+            state,
+            actor,
+            path,
+            NoteDenial::SizeLimit,
+        )));
+    }
+    match write() {
         Ok(bytes) => {
-            // Audit records carry the path and length, never the text.
+            state.note_budget_use(actor, now);
             state.audit(
-                &principal.id,
+                actor,
                 "note.append",
                 "written",
                 Some(path),
                 Some(&format!("bytes={bytes}")),
             );
-            Response::Appended {
-                path: path.to_owned(),
-                bytes,
-            }
+            Ok(bytes)
         }
-        Err(AppendError::Denied(reason)) => {
-            state.audit(
-                &principal.id,
-                "note.append",
-                "denied",
-                Some(path),
-                Some(&reason),
-            );
-            err(ErrorCode::Denied, &reason)
-        }
-        Err(AppendError::TooLarge) => err(ErrorCode::Validation, "note text too large"),
+        Err(AppendError::Denied(d)) => Err(Box::new(note_denied(state, actor, path, d))),
         Err(AppendError::Io(m)) => {
-            state.audit(&principal.id, "note.append", "io_error", Some(path), None);
-            err(ErrorCode::Internal, &m)
+            state.audit(actor, "note.append", "io_error", Some(path), None);
+            Err(Box::new(err(ErrorCode::Internal, &m)))
         }
     }
 }

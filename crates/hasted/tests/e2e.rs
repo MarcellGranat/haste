@@ -37,6 +37,8 @@ async fn boot() -> Harness {
     config.delivery_tick = Duration::from_secs(3600);
     config.delivery_backoff = Duration::ZERO;
     let daemon = start(config).await.unwrap();
+    // the daemon never creates the notes folder: the user (here, the test) chooses and makes it
+    fs::create_dir_all(&daemon.state.config.notes_root).unwrap();
     let human = fs::read_to_string(daemon.state.config.human_token_path()).unwrap();
     Harness {
         _dir: dir,

@@ -8,6 +8,7 @@ use std::time::Duration;
 use haste_core::audit::{AuditEntry, AuditWriter};
 use haste_core::connector::{Connector, Hooks};
 use haste_core::model::Source;
+use haste_core::notes::MAX_NOTE_APPENDS_PER_DAY;
 use haste_core::proposal::DEFAULT_TTL_SECS;
 use haste_proto::Event;
 use haste_store::Store;
@@ -26,6 +27,8 @@ pub struct DaemonConfig {
     /// Directory holding the database, audit file and human token.
     pub data_dir: PathBuf,
     pub notes_root: PathBuf,
+    /// Settings from `notes.json` (person-note options).
+    pub notes_settings: crate::notes::NotesSettings,
     pub proposal_ttl_secs: i64,
     pub expiry_tick: Duration,
     pub delivery_tick: Duration,
@@ -43,6 +46,7 @@ impl DaemonConfig {
             run_dir: base.join("run"),
             data_dir: base.to_path_buf(),
             notes_root: base.join("notes"),
+            notes_settings: crate::notes::NotesSettings::default(),
             proposal_ttl_secs: DEFAULT_TTL_SECS,
             expiry_tick: Duration::from_secs(60),
             delivery_tick: Duration::from_secs(5),
@@ -83,6 +87,8 @@ pub struct State {
     pub events: broadcast::Sender<Event>,
     pub(crate) connectors: RwLock<HashMap<Source, Arc<dyn Connector>>>,
     pub(crate) note_keys: Mutex<NoteKeys>,
+    /// Appends made per principal per UTC day (in memory; a loop guard, reset by a restart).
+    pub(crate) note_counts: Mutex<HashMap<(String, i64), u32>>,
     /// What herdr reports about agents, per machine.
     pub herdr: crate::herdr::HerdrState,
     /// The Reminders helper, once the connector is started (used to read the permission state).
@@ -99,6 +105,7 @@ impl State {
             events,
             connectors: RwLock::new(HashMap::new()),
             note_keys: Mutex::new((HashSet::new(), Vec::new())),
+            note_counts: Mutex::new(HashMap::new()),
             herdr: crate::herdr::HerdrState::default(),
             reminders_helper: RwLock::new(None),
         }
@@ -171,6 +178,22 @@ impl State {
 
     pub fn publish(&self, event: Event) {
         let _ = self.events.send(event);
+    }
+
+    /// Whether `actor` may still append today (the per-day cap is a loop guard).
+    pub(crate) fn note_budget_left(&self, actor: &str, now: i64) -> bool {
+        let day = now.div_euclid(86_400);
+        self.note_counts.lock().is_ok_and(|c| {
+            c.get(&(actor.to_owned(), day)).copied().unwrap_or(0) < MAX_NOTE_APPENDS_PER_DAY
+        })
+    }
+
+    pub(crate) fn note_budget_use(&self, actor: &str, now: i64) {
+        let day = now.div_euclid(86_400);
+        if let Ok(mut counts) = self.note_counts.lock() {
+            counts.retain(|(_, d), _| *d >= day - 1);
+            *counts.entry((actor.to_owned(), day)).or_insert(0) += 1;
+        }
     }
 
     /// Remember a note idempotency key; returns `false` if it was already seen.

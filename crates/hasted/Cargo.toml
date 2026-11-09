@@ -29,6 +29,7 @@ haste-herdr.workspace = true
 haste-proto.workspace = true
 haste-store.workspace = true
 tokio.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 libc.workspace = true
 

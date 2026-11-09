@@ -86,7 +86,6 @@ fn write_private_file(path: &Path, contents: &str) -> io::Result<()> {
 pub async fn start(config: DaemonConfig) -> io::Result<DaemonHandle> {
     ensure_private_dir(&config.run_dir)?;
     ensure_private_dir(&config.data_dir)?;
-    fs::create_dir_all(&config.notes_root)?;
     let store = Store::open(&config.db_path()).map_err(|e| io::Error::other(e.to_string()))?;
     if let Some(token) = store
         .bootstrap_human()

@@ -33,8 +33,17 @@ async fn main() {
     };
     let mut config = DaemonConfig::new(&base, notifier);
     config.herdr = herdr;
-    if let Some(notes) = std::env::var_os("HASTE_NOTES_ROOT") {
-        config.notes_root = PathBuf::from(notes);
+    // The notes folder: HASTE_NOTES_ROOT (a developer override), then notes.json, then
+    // <data dir>/notes. The daemon never creates it; a missing folder denies note actions.
+    match hasted::notes::NotesSettings::load(&base) {
+        Ok(settings) => {
+            config.notes_root = hasted::notes::notes_root(&base, &settings);
+            config.notes_settings = settings;
+        }
+        Err(e) => {
+            eprintln!("hasted: {e}");
+            std::process::exit(1);
+        }
     }
     match start(config).await {
         Ok(handle) => {

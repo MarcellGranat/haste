@@ -6,6 +6,7 @@ pub mod auth;
 pub mod connector;
 pub mod herdr;
 pub mod model;
+pub mod notes;
 pub mod policy;
 pub mod proposal;
 pub mod time;

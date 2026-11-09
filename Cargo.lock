@@ -772,6 +772,7 @@ dependencies = [
  "haste-proto",
  "haste-store",
  "libc",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

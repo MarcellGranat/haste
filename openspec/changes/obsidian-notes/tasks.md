@@ -9,24 +9,24 @@
 
 ## 1. Notes folder configuration and path rules
 
-- [ ] 1.1 Load the single notes root from the configured source, require it to exist as a directory, accept it whether or not `.obsidian/` exists or lies inside or above it, and expose a `notes_root_missing` denial when it does not exist
-- [ ] 1.2 Extend `note_path_allowed` (haste-core) with the `projects/<project>/` rule, the hidden-component rule, the `.md` suffix rule, and the rejection of absolute, `..`, backslash, NUL, and `~` paths
-- [ ] 1.3 Pass the set of known project slugs (from the store's workspace labels) into the path predicate as an explicit argument, keeping the function pure
-- [ ] 1.4 Add unit tests: each rejected form, each accepted form, a project slug that is not known, and a bare `projects/` path
-- [ ] 1.5 Add a containment check on the canonical target (`outside_root`), and tests in a tempdir: `../` traversal, absolute path, a symlinked directory pointing out, and a notes root that contains a `.obsidian` directory (accepted, but `.obsidian/` writes refused with `hidden_path` and nothing outside the root touched)
+- [x] 1.1 Load the single notes root from the configured source, require it to exist as a directory, accept it whether or not `.obsidian/` exists or lies inside or above it, and expose a `notes_root_missing` denial when it does not exist
+- [x] 1.2 Extend `note_path_allowed` (haste-core) with the `projects/<project>/` rule, the hidden-component rule, the `.md` suffix rule, and the rejection of absolute, `..`, backslash, NUL, and `~` paths
+- [x] 1.3 Pass the set of known project slugs (from the store's workspace labels) into the path predicate as an explicit argument, keeping the function pure
+- [x] 1.4 Add unit tests: each rejected form, each accepted form, a project slug that is not known, and a bare `projects/` path
+- [x] 1.5 Add a containment check on the canonical target (`outside_root`), and tests in a tempdir: `../` traversal, absolute path, a symlinked directory pointing out, and a notes root that contains a `.obsidian` directory (accepted, but `.obsidian/` writes refused with `hidden_path` and nothing outside the root touched)
 
 ## 2. Body and size checks
 
-- [ ] 2.1 Implement the body check (no `---` line, no `<!-- haste:` line, no NUL, valid UTF-8) and its `body_rejected` reason
-- [ ] 2.2 Implement the per-file size check from metadata before writing, with the cap chosen in Q6 (use a named constant)
-- [ ] 2.3 Keep the existing 64 KiB per-append limit as a named constant and enforce it before opening the file
-- [ ] 2.4 Add tests in a tempdir: oversized append, file at cap, injection and spoof bodies, each leaving bytes unchanged
+- [x] 2.1 Implement the body check (no `---` line, no `<!-- haste:` line, no NUL, valid UTF-8) and its `body_rejected` reason
+- [x] 2.2 Implement the per-file size check from metadata before writing, with the cap chosen in Q6 (use a named constant)
+- [x] 2.3 Keep the existing 64 KiB per-append limit as a named constant and enforce it before opening the file
+- [x] 2.4 Add tests in a tempdir: oversized append, file at cap, injection and spoof bodies, each leaving bytes unchanged
 
 ## 3. Append executor
 
-- [ ] 3.1 Keep `O_APPEND|O_NOFOLLOW` and the attribution comment; add the reason codes `hidden_path`, `unknown_project`, `size_limit`, `body_rejected`, `symlink`, `outside_root`, `notes_root_missing`, `front_matter_mismatch`
-- [ ] 3.2 Add a test that every existing byte of a file is unchanged after any sequence of appends, using a tempdir
-- [ ] 3.3 Add a test that a symlinked component or target is refused with `symlink`
+- [x] 3.1 Keep `O_APPEND|O_NOFOLLOW` and the attribution comment; add the reason codes `hidden_path`, `unknown_project`, `size_limit`, `body_rejected`, `symlink`, `outside_root`, `notes_root_missing`, `front_matter_mismatch`
+- [x] 3.2 Add a test that every existing byte of a file is unchanged after any sequence of appends, using a tempdir
+- [x] 3.3 Add a test that a symlinked component or target is refused with `symlink`
 
 ## 4. Person notes
 
@@ -63,9 +63,9 @@
 
 ## 8. Audit and configuration
 
-- [ ] 8.1 Ensure every note outcome writes exactly one audit row with path, outcome, and `bytes=<n>` or a reason code, and no text, address, or subject
+- [x] 8.1 Ensure every note outcome writes exactly one audit row with path, outcome, and `bytes=<n>` or a reason code, and no text, address, or subject
 - [ ] 8.2 Load and validate `person_notes.aliases`, `person_notes.include_addresses`, and the note mode defaults, rejecting unknown keys
-- [ ] 8.3 Add a test that the audit file contains no body text, using a fixed sentinel string in the appended text
+- [x] 8.3 Add a test that the audit file contains no body text, using a fixed sentinel string in the appended text
 
 ## 9. Documentation
 

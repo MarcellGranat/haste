@@ -1,6 +1,6 @@
-//! The only IMAP surface the connector can use, and it is read-only by construction:
-//! LOGIN, EXAMINE, UID SEARCH, UID FETCH (always `BODY.PEEK`) and LOGOUT.
-//! There is no method that could issue STORE, APPEND, COPY, MOVE, EXPUNGE, CREATE,
+//! The only IMAP surface the connector can use: LOGIN, EXAMINE, UID SEARCH, UID FETCH (always
+//! `BODY.PEEK`), LOGOUT, and a single write, APPEND, used only to file the copy of a message the
+//! human just sent. There is no method that could issue STORE, COPY, MOVE, EXPUNGE, CREATE,
 //! DELETE or RENAME, and no free-form command string.
 
 use std::io::{Read, Write};
@@ -88,6 +88,12 @@ pub trait MailSession {
         part: &TextPart,
         max: u32,
     ) -> Result<Option<Vec<u8>>, ImapFailure>;
+    /// File a copy of a message just sent into `folder` (marked `\Seen`). The only write the
+    /// connector ever makes over IMAP; never used by the sync path.
+    ///
+    /// # Errors
+    /// See [`ImapFailure`].
+    fn append(&mut self, folder: &str, message: &[u8]) -> Result<(), ImapFailure>;
     fn logout(&mut self);
 }
 
@@ -111,6 +117,7 @@ enum Stage {
     Search,
     FetchHeaders,
     FetchBody,
+    Append,
 }
 
 impl Stage {
@@ -122,6 +129,7 @@ impl Stage {
             Self::Search => "uid search",
             Self::FetchHeaders => "fetch headers",
             Self::FetchBody => "fetch body",
+            Self::Append => "append",
         }
     }
 }
@@ -328,6 +336,13 @@ impl<T: Read + Write> MailSession for Imap<T> {
         Ok(fetches
             .iter()
             .find_map(|f| f.section(&path).map(<[u8]>::to_vec)))
+    }
+
+    fn append(&mut self, folder: &str, message: &[u8]) -> Result<(), ImapFailure> {
+        self.session
+            .append_with_flags(folder, message, &[imap::types::Flag::Seen])
+            .map_err(|e| classify(&e, Stage::Append))?;
+        Ok(())
     }
 
     fn logout(&mut self) {

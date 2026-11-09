@@ -87,6 +87,50 @@ pub fn validate_recipients(recipients: &[String]) -> Result<(), &'static str> {
     recipients.iter().try_for_each(|r| validate_address(r))
 }
 
+/// A plain-text RFC 5322 message for a human send: `text/plain; charset=UTF-8`, CRLF line ends,
+/// no multipart, no Cc or Bcc header by construction. A header value containing CR, LF or NUL is
+/// *refused*, never stripped, so what the human confirmed is exactly what goes out.
+///
+/// # Errors
+/// A fixed reason label when a header value contains CR, LF or NUL.
+#[allow(clippy::too_many_arguments)]
+pub fn compose_plain_text(
+    from: &str,
+    to: &str,
+    subject: &str,
+    body: &str,
+    date: &str,
+    message_id: &str,
+    in_reply_to: Option<&str>,
+    references: Option<&str>,
+) -> Result<String, &'static str> {
+    let values = [from, to, subject, date, message_id]
+        .into_iter()
+        .chain(in_reply_to)
+        .chain(references);
+    for v in values {
+        if v.contains(['\r', '\n', '\0']) {
+            return Err("header characters");
+        }
+    }
+    let mut out = String::new();
+    out.push_str("MIME-Version: 1.0\r\n");
+    out.push_str(&format!(
+        "From: {from}\r\nTo: {to}\r\nSubject: {subject}\r\n"
+    ));
+    out.push_str(&format!("Date: {date}\r\nMessage-ID: {message_id}\r\n"));
+    if let Some(id) = in_reply_to {
+        out.push_str(&format!("In-Reply-To: {id}\r\n"));
+    }
+    if let Some(refs) = references {
+        out.push_str(&format!("References: {refs}\r\n"));
+    }
+    out.push_str("Content-Type: text/plain; charset=UTF-8\r\n");
+    out.push_str("Content-Transfer-Encoding: 8bit\r\n\r\n");
+    out.push_str(&body.replace("\r\n", "\n").replace('\n', "\r\n"));
+    Ok(out)
+}
+
 /// `Re: <subject>` without stacking prefixes; an empty subject becomes `(no subject)`.
 #[must_use]
 pub fn reply_subject(subject: &str) -> String {
@@ -228,6 +272,46 @@ mod tests {
         let id = new_message_id("example.org");
         assert!(id.starts_with('<') && id.ends_with("@example.org>"));
         assert_ne!(id, new_message_id("example.org"));
+    }
+
+    #[test]
+    fn a_composed_message_refuses_injection_and_has_no_cc_or_bcc() {
+        let d = "Mon, 09 Nov 2026 10:00:00 +0000";
+        let ok = compose_plain_text(
+            "me@x.org",
+            "ana@x.org",
+            "Re: Lunch",
+            "Yes!\nSee you.",
+            d,
+            "<i@x>",
+            Some("<m3@x>"),
+            Some("<m1@x> <m3@x>"),
+        )
+        .unwrap();
+        let headers = ok.split("\r\n\r\n").next().unwrap();
+        for h in [
+            "From: me@x.org",
+            "To: ana@x.org",
+            "Subject: Re: Lunch",
+            "Message-ID: <i@x>",
+            "In-Reply-To: <m3@x>",
+            "References: <m1@x> <m3@x>",
+        ] {
+            assert!(headers.contains(h), "{h}");
+        }
+        assert!(!headers.to_lowercase().contains("bcc") && !headers.to_lowercase().contains("cc:"));
+        assert!(ok.ends_with("Yes!\r\nSee you."));
+        for (to, subject) in [
+            ("a@x.org\r\nBcc: e@x.org", "s"),
+            ("a@x.org", "s\nBcc: e@x.org"),
+            ("a@x.org\0", "s"),
+        ] {
+            assert_eq!(
+                compose_plain_text("me@x.org", to, subject, "b", d, "<i@x>", None, None),
+                Err("header characters"),
+                "{to:?} {subject:?}"
+            );
+        }
     }
 
     #[test]

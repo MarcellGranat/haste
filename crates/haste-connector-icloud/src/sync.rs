@@ -234,6 +234,10 @@ mod tests {
         ) -> Result<Option<Vec<u8>>, ImapFailure> {
             Ok(Some(b"body".to_vec()))
         }
+        fn append(&mut self, _folder: &str, _message: &[u8]) -> Result<(), ImapFailure> {
+            // the sync path must never write: a test double that records nothing would hide it
+            panic!("sync must never append");
+        }
         fn logout(&mut self) {}
     }
 

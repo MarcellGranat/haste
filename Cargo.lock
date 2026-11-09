@@ -663,6 +663,7 @@ dependencies = [
 name = "haste-connector-icloud"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "haste-core",
  "haste-proto",
  "imap",

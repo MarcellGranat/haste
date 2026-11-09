@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_HOST: &str = "imap.mail.me.com";
 pub const DEFAULT_PORT: u16 = 993;
 pub const DEFAULT_FOLDER: &str = "INBOX";
+/// Where mail is submitted (STARTTLS on the submission port).
+pub const DEFAULT_SMTP_HOST: &str = "smtp.mail.me.com";
+pub const DEFAULT_SMTP_PORT: u16 = 587;
+/// Where a copy of a sent message is filed over IMAP.
+pub const DEFAULT_SENT_FOLDER: &str = "Sent Messages";
 /// Newest messages fetched by a first sync (or after a UIDVALIDITY change) unless configured.
 pub const DEFAULT_BACKFILL: usize = 200;
 /// Seconds between scheduled syncs.
@@ -21,6 +26,22 @@ fn default_host() -> String {
 
 const fn default_port() -> u16 {
     DEFAULT_PORT
+}
+
+fn default_smtp_host() -> String {
+    DEFAULT_SMTP_HOST.to_owned()
+}
+
+const fn default_smtp_port() -> u16 {
+    DEFAULT_SMTP_PORT
+}
+
+fn default_sent_folder() -> String {
+    DEFAULT_SENT_FOLDER.to_owned()
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 const fn default_backfill() -> usize {
@@ -61,6 +82,17 @@ pub struct IcloudConfig {
     /// Global default for the first-sync size.
     #[serde(default = "default_backfill")]
     pub backfill_count: usize,
+    #[serde(default = "default_smtp_host")]
+    pub smtp_host: String,
+    #[serde(default = "default_smtp_port")]
+    pub smtp_port: u16,
+    /// The folder a copy of each sent message is filed in.
+    #[serde(default = "default_sent_folder")]
+    pub sent_folder: String,
+    /// File a copy in `sent_folder` after a successful send. Turn off if iCloud already files
+    /// the submissions itself (the live spike decides), or you would get duplicates.
+    #[serde(default = "default_true")]
+    pub append_sent: bool,
 }
 
 impl IcloudConfig {
@@ -72,6 +104,10 @@ impl IcloudConfig {
             port: default_port(),
             folders: Vec::new(),
             backfill_count: default_backfill(),
+            smtp_host: default_smtp_host(),
+            smtp_port: default_smtp_port(),
+            sent_folder: default_sent_folder(),
+            append_sent: true,
         }
     }
 
@@ -154,6 +190,22 @@ mod tests {
         assert_eq!(c.backfill_for("INBOX"), 50);
         assert_eq!(c.backfill_for("Sent Messages"), 1000);
         assert_eq!(c.backfill_for("Unlisted"), 50);
+    }
+
+    #[test]
+    fn send_settings_default_to_icloud_submission_and_a_sent_copy() {
+        let c: IcloudConfig = serde_json::from_str(r#"{"address":"me@icloud.com"}"#).unwrap();
+        assert_eq!(
+            (c.smtp_host.as_str(), c.smtp_port),
+            ("smtp.mail.me.com", 587)
+        );
+        assert_eq!(c.sent_folder, "Sent Messages");
+        assert!(c.append_sent);
+        let off: IcloudConfig =
+            serde_json::from_str(r#"{"address":"a@b","append_sent":false,"sent_folder":"Sent"}"#)
+                .unwrap();
+        assert!(!off.append_sent);
+        assert_eq!(off.sent_folder, "Sent");
     }
 
     #[test]

@@ -41,22 +41,22 @@
 
 ## 5. iCloud SMTP client (haste-connector-icloud)
 
-- [ ] 5.1 Add `smtp.rs` with a phase-aware client: connect, `EHLO`, `STARTTLS`, TLS upgrade through `native_tls` on the same socket, `EHLO`, `AUTH` (mechanism per task 1.3), `MAIL FROM`, `RCPT TO`, `DATA` with dot-stuffing, `QUIT`
-- [ ] 5.2 Add a plaintext transport trait for tests only, mirroring `PlainOpener`, that the production build never selects
-- [ ] 5.3 Enforce no retries: each command is sent once; a reply timeout is recorded with the phase it occurred in
-- [ ] 5.4 Map phases to outcomes: failure before `354` is `NoEffect`, `AUTH` 535 is `Checkpoint`, failure after `354` or after body write is `Ambiguous`, certificate failure is `NoEffect`
-- [ ] 5.5 Add the RFC 5322 composer (plain text, CRLF, headers from the send spec, dot-stuffing, generated Message-ID using the connector domain) with tests for header refusal and dot-stuffing
-- [ ] 5.6 Add a loopback fake SMTP server in `testing.rs` recording the command sequence and the message bytes, and able to fail at each phase
-- [ ] 5.7 SMTP tests: exact command order on success, failure at connect, STARTTLS, AUTH, RCPT TO, after DATA, and no repeated commands
+- [x] 5.1 Add `smtp.rs` with a phase-aware client: connect, `EHLO`, `STARTTLS`, TLS upgrade through `native_tls` on the same socket, `EHLO`, `AUTH` (mechanism per task 1.3), `MAIL FROM`, `RCPT TO`, `DATA` with dot-stuffing, `QUIT`
+- [x] 5.2 Add a plaintext transport trait for tests only, mirroring `PlainOpener`, that the production build never selects
+- [x] 5.3 Enforce no retries: each command is sent once; a reply timeout is recorded with the phase it occurred in
+- [x] 5.4 Map phases to outcomes: failure before `354` is `NoEffect`, `AUTH` 535 is `Checkpoint`, failure after `354` or after body write is `Ambiguous`, certificate failure is `NoEffect`
+- [x] 5.5 Add the RFC 5322 composer (plain text, CRLF, headers from the send spec, dot-stuffing, generated Message-ID using the connector domain) with tests for header refusal and dot-stuffing
+- [x] 5.6 Add a loopback fake SMTP server in `testing.rs` recording the command sequence and the message bytes, and able to fail at each phase
+- [x] 5.7 SMTP tests: exact command order on success, failure at connect, STARTTLS, AUTH, RCPT TO, after DATA, and no repeated commands
 
 ## 6. iCloud Sent copy and config
 
-- [ ] 6.1 Add `sent_folder` to `IcloudConfig` (default `Sent Messages`), serialized in `icloud.json`, with a test that the default applies to a minimal file
-- [ ] 6.2 Extend the fake IMAP server with `APPEND` (literal handling and `\Seen` flag) and keep refusing other mailbox writes
-- [ ] 6.3 Implement `append_sent(message, folder)` as one new IMAP session with its own LOGIN, one APPEND, LOGOUT; no retry
-- [ ] 6.4 Implement the iCloud `send` trait method: compose, SMTP submit, on acceptance append copy, return `SendReceipt` with `sent:smtp` or `sent:smtp;copy_failed`
-- [ ] 6.5 Tests: APPEND issued exactly once after `250`, APPEND failure keeps the send as sent with the copy_failed label and no second submission, no APPEND before acceptance, the sync-path test still records no write command other than the send path
-- [ ] 6.6 Set `capabilities().send = true` and test the capability declaration
+- [x] 6.1 Add `sent_folder` to `IcloudConfig` (default `Sent Messages`), serialized in `icloud.json`, with a test that the default applies to a minimal file
+- [x] 6.2 Extend the fake IMAP server with `APPEND` (literal handling and `\Seen` flag) and keep refusing other mailbox writes
+- [x] 6.3 Implement `append_sent(message, folder)` as one new IMAP session with its own LOGIN, one APPEND, LOGOUT; no retry
+- [x] 6.4 Implement the iCloud `send` trait method: compose, SMTP submit, on acceptance append copy, return `SendReceipt` with `sent:smtp` or `sent:smtp;copy_failed`
+- [x] 6.5 Tests: APPEND issued exactly once after `250`, APPEND failure keeps the send as sent with the copy_failed label and no second submission, no APPEND before acceptance, the sync-path test still records no write command other than the send path
+- [x] 6.6 Set `capabilities().send = true` and test the capability declaration
 
 ## 7. Daemon dispatch (hasted)
 

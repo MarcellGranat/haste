@@ -10,6 +10,7 @@ use haste_core::model::Source;
 use crate::config::IcloudConfig;
 use crate::secrets::SecretStore;
 use crate::session::{ImapFailure, Opener};
+use crate::smtp::{submit, SmtpFailure, SmtpTransport, TlsSmtp};
 use crate::sync::{sync_all, IcloudCursor};
 
 /// Receives `(outcome, detail)` once per cycle. The daemon turns it into an audit entry.
@@ -21,6 +22,8 @@ pub struct IcloudConnector {
     secrets: Arc<dyn SecretStore>,
     opener: Arc<dyn Opener>,
     audit: CycleAudit,
+    /// How mail is submitted; production uses STARTTLS, tests a loopback fake.
+    smtp: Arc<dyn SmtpTransport>,
 }
 
 impl IcloudConnector {
@@ -36,7 +39,28 @@ impl IcloudConnector {
             secrets,
             opener,
             audit,
+            smtp: Arc::new(TlsSmtp),
         }
+    }
+
+    /// Use another SMTP transport (tests point this at a loopback fake).
+    #[must_use]
+    pub fn with_smtp(mut self, smtp: Arc<dyn SmtpTransport>) -> Self {
+        self.smtp = smtp;
+        self
+    }
+}
+
+/// Map an SMTP failure to the connector error that drives the proposal's next state:
+/// nothing delivered (`Transient`/`Other`/`Checkpoint`) or possibly delivered (`Ambiguous`).
+fn smtp_error(failure: SmtpFailure) -> ConnectorError {
+    match failure {
+        SmtpFailure::Connect(m) => ConnectorError::Transient(format!("smtp: {m}")),
+        SmtpFailure::AuthRejected => ConnectorError::Checkpoint(
+            "iCloud rejected the login; renew the app-specific password".into(),
+        ),
+        SmtpFailure::Refused(m) => ConnectorError::Other(format!("send refused: {m}")),
+        SmtpFailure::Ambiguous(m) => ConnectorError::Ambiguous(format!("smtp: {m}")),
     }
 }
 
@@ -115,7 +139,8 @@ impl Connector for IcloudConnector {
         Capabilities {
             read: true,
             draft: false,
-            send: false,
+            // Consulted only by the human send path: agents are denied `Action::Send` by the gate.
+            send: true,
             archive: false,
             ..Default::default()
         }
@@ -135,14 +160,92 @@ impl Connector for IcloudConnector {
         })
     }
 
+    fn own_address(&self) -> Option<String> {
+        Some(self.config.address.clone())
+    }
+
+    /// A human send: compose, submit over SMTP exactly once, then file one copy in the Sent
+    /// folder. Nothing is retried. A failed copy never undoes the send: it is reported in the
+    /// receipt (`smtp;copy_failed`) and the message is not submitted again.
     fn send<'a>(
         &'a self,
-        _draft: &'a DraftToSend,
+        draft: &'a DraftToSend,
     ) -> BoxFuture<'a, Result<SendReceipt, ConnectorError>> {
-        Box::pin(async {
-            Err(ConnectorError::Other(
-                "sending is not supported by the iCloud connector".into(),
-            ))
+        Box::pin(async move {
+            let refused = |why: &str| ConnectorError::Other(format!("send refused: {why}"));
+            let to = draft
+                .recipients
+                .first()
+                .ok_or_else(|| refused("no recipient"))?
+                .clone();
+            let subject = draft.subject.clone().ok_or_else(|| refused("no subject"))?;
+            let password = match self.secrets.get(&self.config.address) {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    return Err(ConnectorError::Checkpoint(
+                        "no app-specific password stored; run the iCloud auth verb".into(),
+                    ))
+                }
+                Err(_) => return Err(refused("keychain unavailable")),
+            };
+            let domain = self
+                .config
+                .address
+                .rsplit('@')
+                .next()
+                .unwrap_or("localhost");
+            let message = haste_core::send::compose_plain_text(
+                &self.config.address,
+                &to,
+                &subject,
+                &draft.body,
+                &haste_core::send::format_rfc2822(haste_core::time::now_secs()),
+                &haste_core::send::new_message_id(domain),
+                None,
+                None,
+            )
+            .map_err(refused)?;
+            // One text for both the submission and the Sent copy, ending in a line break (as
+            // SMTP data always does), so the copy is byte-identical to what was sent.
+            let message = if message.ends_with("\r\n") {
+                message
+            } else {
+                message + "\r\n"
+            };
+            let (config, smtp, opener) = (
+                self.config.clone(),
+                Arc::clone(&self.smtp),
+                Arc::clone(&self.opener),
+            );
+            tokio::task::spawn_blocking(move || {
+                submit(
+                    smtp.as_ref(),
+                    &config,
+                    &password,
+                    &config.address,
+                    &to,
+                    &message,
+                )
+                .map_err(smtp_error)?;
+                // Accepted. Whatever happens to the copy, the message is not submitted again.
+                let mut receipt = "smtp".to_owned();
+                if config.append_sent {
+                    let filed = opener.open(&config, &password).and_then(|mut session| {
+                        let result = session.append(&config.sent_folder, message.as_bytes());
+                        session.logout();
+                        result
+                    });
+                    if filed.is_err() {
+                        receipt.push_str(";copy_failed");
+                    }
+                }
+                Ok(SendReceipt {
+                    external_id: receipt,
+                })
+            })
+            .await
+            // a panicked task may have submitted: the safe reading is "unknown"
+            .unwrap_or_else(|_| Err(ConnectorError::Ambiguous("send task failed".into())))
         })
     }
 }

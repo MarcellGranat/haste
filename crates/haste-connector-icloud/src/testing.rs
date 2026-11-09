@@ -93,6 +93,10 @@ pub struct FakeState {
     pub login_attempts: u32,
     /// Accept and immediately drop this many connections (a transient failure).
     pub drop_next: u32,
+    /// Messages filed with APPEND, as `(folder, message)`.
+    pub appended: Vec<(String, String)>,
+    /// Answer APPEND with `NO` (a failed Sent copy).
+    pub append_fails: bool,
 }
 
 pub struct FakeImap {
@@ -320,13 +324,37 @@ fn handle(stream: TcpStream, state: &Arc<Mutex<FakeState>>) {
                 out.extend_from_slice(format!("{tag} OK FETCH completed\r\n").as_bytes());
                 out
             }
+            "APPEND" => {
+                // `APPEND "Sent Messages" (\Seen) {123}`: the literal follows a `+` prompt.
+                let folder = rest.split('"').nth(1).unwrap_or("").to_owned();
+                let size: usize = rest
+                    .rsplit('{')
+                    .next()
+                    .and_then(|s| s.trim_end_matches('}').trim().parse().ok())
+                    .unwrap_or(0);
+                let _ = writer.write_all(b"+ Ready for literal data\r\n");
+                let mut literal = vec![0_u8; size];
+                if std::io::Read::read_exact(&mut reader, &mut literal).is_err() {
+                    return;
+                }
+                let mut tail = String::new();
+                let _ = reader.read_line(&mut tail);
+                if st.append_fails {
+                    format!("{tag} NO [OVERQUOTA] cannot store the message\r\n").into_bytes()
+                } else {
+                    st.appended
+                        .push((folder, String::from_utf8_lossy(&literal).into_owned()));
+                    format!("{tag} OK [APPENDUID 1 1] APPEND completed\r\n").into_bytes()
+                }
+            }
             "LOGOUT" => {
                 let _ = writer
                     .write_all(format!("* BYE bye\r\n{tag} OK LOGOUT completed\r\n").as_bytes());
                 return;
             }
             "CAPABILITY" => format!("* CAPABILITY IMAP4rev1\r\n{tag} OK done\r\n").into_bytes(),
-            // Anything else (STORE, APPEND, COPY, ...) is refused; the test inspects `commands`.
+            // Anything else (STORE, COPY, ...) is refused; the test inspects `commands`.
+            // APPEND is handled above: the connector files a Sent copy, and only that.
             _ => format!("{tag} BAD command not supported by the fake\r\n").into_bytes(),
         };
         drop(st);
@@ -361,4 +389,164 @@ pub fn spawn(state: FakeState) -> FakeImap {
         }
     });
     FakeImap { port, state }
+}
+
+// ------------------------------------------------------------------ fake SMTP server
+
+/// How the fake SMTP server misbehaves, if at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SmtpFault {
+    #[default]
+    None,
+    GreetingRejected,
+    AuthRejected,
+    MailFromRefused,
+    RcptToRefused,
+    DataRefused,
+    /// Read the whole message, then close without answering.
+    DropAfterBody,
+    /// Read the whole message, then answer `451`.
+    FinalReplyRejected,
+    /// Read the whole message, then stay silent for a few seconds.
+    HangAfterBody,
+}
+
+#[derive(Debug, Default)]
+pub struct SmtpLog {
+    /// Every command line received; `AUTH` arguments (credentials) are removed.
+    pub commands: Vec<String>,
+    /// Complete messages received, with CRLF line ends and dot-stuffing undone.
+    pub messages: Vec<String>,
+    pub connections: u32,
+    pub fault: SmtpFault,
+    pub user: String,
+    pub password: String,
+}
+
+pub struct FakeSmtp {
+    pub port: u16,
+    pub log: Arc<Mutex<SmtpLog>>,
+}
+
+fn smtp_session(stream: TcpStream, log: &Arc<Mutex<SmtpLog>>) {
+    let Ok(mut writer) = stream.try_clone() else {
+        return;
+    };
+    let mut reader = BufReader::new(stream);
+    let fault = log.lock().expect("fake smtp").fault;
+    if fault == SmtpFault::GreetingRejected {
+        let _ = writer.write_all(b"554 no service\r\n");
+        return;
+    }
+    let _ = writer.write_all(b"220 fake ESMTP ready\r\n");
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        let cmd = line.trim_end().to_owned();
+        let upper = cmd.to_uppercase();
+        let logged = if upper.starts_with("AUTH") {
+            cmd.split_whitespace().take(2).collect::<Vec<_>>().join(" ")
+        } else {
+            cmd.clone()
+        };
+        log.lock().expect("fake smtp").commands.push(logged);
+        let reply: &[u8] = if upper.starts_with("EHLO") {
+            b"250-fake.example\r\n250-AUTH PLAIN LOGIN\r\n250 8BITMIME\r\n"
+        } else if upper.starts_with("AUTH PLAIN") {
+            let token = cmd.split_whitespace().nth(2).unwrap_or("");
+            let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, token)
+                .unwrap_or_default();
+            let parts: Vec<&[u8]> = decoded.split(|b| *b == 0).collect();
+            let st = log.lock().expect("fake smtp");
+            let ok = parts.len() == 3
+                && parts[1] == st.user.as_bytes()
+                && parts[2] == st.password.as_bytes()
+                && st.fault != SmtpFault::AuthRejected;
+            if ok {
+                b"235 2.7.0 authenticated\r\n"
+            } else {
+                b"535 5.7.8 authentication failed\r\n"
+            }
+        } else if upper.starts_with("MAIL FROM") {
+            if fault == SmtpFault::MailFromRefused {
+                b"550 sender refused\r\n"
+            } else {
+                b"250 ok\r\n"
+            }
+        } else if upper.starts_with("RCPT TO") {
+            if fault == SmtpFault::RcptToRefused {
+                b"550 recipient refused\r\n"
+            } else {
+                b"250 ok\r\n"
+            }
+        } else if upper == "DATA" {
+            if fault == SmtpFault::DataRefused {
+                b"554 no data\r\n"
+            } else {
+                let _ = writer.write_all(b"354 go ahead\r\n");
+                let mut message = String::new();
+                loop {
+                    let mut l = String::new();
+                    if reader.read_line(&mut l).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    if l == ".\r\n" {
+                        break;
+                    }
+                    message.push_str(
+                        l.strip_prefix('.')
+                            .filter(|_| l.starts_with(".."))
+                            .unwrap_or(&l),
+                    );
+                }
+                log.lock().expect("fake smtp").messages.push(message);
+                match fault {
+                    SmtpFault::DropAfterBody => return,
+                    SmtpFault::HangAfterBody => {
+                        thread::sleep(std::time::Duration::from_secs(3));
+                        return;
+                    }
+                    SmtpFault::FinalReplyRejected => b"451 try again later\r\n",
+                    _ => b"250 2.0.0 queued\r\n",
+                }
+            }
+        } else if upper == "QUIT" {
+            let _ = writer.write_all(b"221 bye\r\n");
+            return;
+        } else {
+            b"502 not implemented\r\n"
+        };
+        if writer.write_all(reply).is_err() {
+            return;
+        }
+    }
+}
+
+/// Start a fake SMTP server on `127.0.0.1:0` accepting one user and password.
+///
+/// # Panics
+/// If the loopback listener cannot be bound.
+#[must_use]
+pub fn spawn_smtp(user: &str, password: &str, fault: SmtpFault) -> FakeSmtp {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let log = Arc::new(Mutex::new(SmtpLog {
+        user: user.to_owned(),
+        password: password.to_owned(),
+        fault,
+        ..SmtpLog::default()
+    }));
+    let shared = Arc::clone(&log);
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            shared.lock().expect("fake smtp").connections += 1;
+            let shared = Arc::clone(&shared);
+            thread::spawn(move || smtp_session(stream, &shared));
+        }
+    });
+    FakeSmtp { port, log }
 }

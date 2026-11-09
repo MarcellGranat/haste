@@ -107,10 +107,11 @@ impl Hooks for TestHooks {
 }
 
 #[test]
-fn capabilities_are_read_only() {
+fn capabilities_are_read_and_the_human_only_send() {
     let r = rig(&[]);
     let caps = r.connector.capabilities();
-    assert!(caps.read && !caps.draft && !caps.send && !caps.archive);
+    // `send` is consulted only by the human path: the gate denies Action::Send to agents
+    assert!(caps.read && !caps.draft && caps.send && !caps.archive);
     assert_eq!(r.connector.source(), Source::Icloud);
 }
 
@@ -463,7 +464,7 @@ async fn neither_the_password_nor_message_text_reaches_audit_lines_errors_or_the
 }
 
 #[tokio::test]
-async fn send_is_unsupported_and_the_guard_refuses_it() {
+async fn drafts_are_still_refused_by_the_guard_before_anything_reaches_the_server() {
     let r = rig(&[]);
     let hooks = TestHooks::default();
     let guard = Guarded {
@@ -476,10 +477,6 @@ async fn send_is_unsupported_and_the_guard_refuses_it() {
         body: "hi".into(),
         ..Default::default()
     };
-    assert_eq!(
-        guard.send(&draft).await,
-        Err(CallError::CapabilityMissing("send"))
-    );
     assert_eq!(
         guard.create_draft(&draft).await,
         Err(CallError::CapabilityMissing("draft.create"))

@@ -43,9 +43,8 @@ pub fn build_plain_text(
     out
 }
 
-/// A plain-text message for a human send. Unlike the draft builder this one *refuses* any line
-/// break or NUL in a header value instead of replacing it, so what the human confirmed is
-/// exactly what is sent. There is no Cc or Bcc header, by construction.
+/// A plain-text message for a human send (see [`haste_core::send::compose_plain_text`]): header
+/// values with a line break or NUL are refused, not stripped.
 ///
 /// # Errors
 /// A fixed reason label when a header value contains CR, LF or NUL.
@@ -60,31 +59,16 @@ pub fn build_send_message(
     in_reply_to: Option<&str>,
     references: Option<&str>,
 ) -> Result<String, &'static str> {
-    let values = [from, to, subject, date, message_id]
-        .into_iter()
-        .chain(in_reply_to)
-        .chain(references);
-    for v in values {
-        if v.contains(['\r', '\n', '\0']) {
-            return Err("header characters");
-        }
-    }
-    let mut out = String::new();
-    out.push_str("MIME-Version: 1.0\r\n");
-    out.push_str(&format!(
-        "From: {from}\r\nTo: {to}\r\nSubject: {subject}\r\n"
-    ));
-    out.push_str(&format!("Date: {date}\r\nMessage-ID: {message_id}\r\n"));
-    if let Some(id) = in_reply_to {
-        out.push_str(&format!("In-Reply-To: {id}\r\n"));
-    }
-    if let Some(refs) = references {
-        out.push_str(&format!("References: {refs}\r\n"));
-    }
-    out.push_str("Content-Type: text/plain; charset=UTF-8\r\n");
-    out.push_str("Content-Transfer-Encoding: 8bit\r\n\r\n");
-    out.push_str(&body.replace("\r\n", "\n").replace('\n', "\r\n"));
-    Ok(out)
+    haste_core::send::compose_plain_text(
+        from,
+        to,
+        subject,
+        body,
+        date,
+        message_id,
+        in_reply_to,
+        references,
+    )
 }
 
 /// Gmail's `raw` field: base64url without padding.

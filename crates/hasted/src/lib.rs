@@ -360,6 +360,70 @@ pub fn start_gmail(state: &Arc<State>, base: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Register the three Beeper connectors (WhatsApp, Messenger, iMessage), each engaged on first
+/// install, and start each one's polling loop. The token is read lazily on the first request, and
+/// no request is made while a source's kill switch is engaged, so a fresh install reads nothing.
+#[cfg(feature = "beeper")]
+pub fn start_beeper_with(
+    state: &Arc<State>,
+    client: Arc<haste_connector_beeper::client::BeeperClient>,
+    config: &haste_connector_beeper::BeeperConfig,
+    every_secs: u64,
+) {
+    use haste_connector_beeper::{BeeperConnector, BeeperSource, CycleAudit};
+
+    for which in BeeperSource::ALL {
+        let audit_state = Arc::clone(state);
+        let name = which.name();
+        // One audit entry per cycle: counts and fixed labels only, never a chat name or text.
+        let audit: CycleAudit = Arc::new(move |outcome, detail| {
+            audit_state.audit(
+                "connector",
+                &format!("{name}.sync"),
+                outcome,
+                Some(name),
+                Some(detail),
+            );
+        });
+        let connector: Arc<dyn haste_core::connector::Connector> = Arc::new(BeeperConnector::new(
+            which,
+            Arc::clone(&client),
+            config,
+            audit,
+        ));
+        state.register_connector(Arc::clone(&connector));
+        tokio::spawn(scheduler::sync_loop(
+            Arc::clone(state),
+            connector,
+            std::time::Duration::from_secs(every_secs),
+        ));
+    }
+}
+
+/// Load `beeper.json` and the Keychain token store, then register the three Beeper connectors.
+/// Returns `Ok(false)` when Beeper has not been set up (no `beeper.json` selection yet).
+///
+/// # Errors
+/// An invalid `beeper.json` (including a non-loopback base URL).
+#[cfg(feature = "beeper")]
+pub fn start_beeper(state: &Arc<State>, base: &Path) -> Result<bool, String> {
+    use haste_connector_beeper::consts::{BEEPER_POLL_SECS, KEYCHAIN_SERVICE};
+    use haste_connector_beeper::{client::BeeperClient, BeeperConfig};
+    use haste_google_oauth::keychain::KeychainStore;
+
+    if !BeeperConfig::path(base).exists() {
+        return Ok(false);
+    }
+    let config = BeeperConfig::load(base)?;
+    let client = BeeperClient::new(
+        config.base(),
+        Arc::new(KeychainStore::new(KEYCHAIN_SERVICE)),
+    )
+    .map_err(str::to_owned)?;
+    start_beeper_with(state, Arc::new(client), &config, BEEPER_POLL_SECS);
+    Ok(true)
+}
+
 /// Load `gcal.json` and the Keychain items, register the Google Calendar connector (engaged on
 /// first install) and start its scheduled sync. Returns `Ok(false)` when Calendar has not been
 /// authorized yet.

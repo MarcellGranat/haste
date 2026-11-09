@@ -779,6 +779,7 @@ name = "hasted"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "haste-connector-beeper",
  "haste-connector-gcal",
  "haste-connector-gmail",
  "haste-connector-icloud",

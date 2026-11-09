@@ -17,11 +17,14 @@ gmail = ["dep:haste-connector-gmail"]
 icloud = ["dep:haste-connector-icloud"]
 # Real Google Calendar connector (Calendar API + Keychain). Off by default.
 gcal = ["dep:haste-connector-gcal", "dep:haste-google-oauth"]
+# Beeper connectors (WhatsApp, Messenger, iMessage through Beeper Desktop's local API). Off by default.
+beeper = ["dep:haste-connector-beeper", "dep:haste-google-oauth"]
 
 [dependencies]
 haste-connector-gmail = { workspace = true, optional = true }
 haste-connector-icloud = { workspace = true, optional = true }
 haste-connector-gcal = { workspace = true, optional = true }
+haste-connector-beeper = { workspace = true, optional = true }
 haste-google-oauth = { workspace = true, optional = true }
 haste-connector-reminders.workspace = true
 haste-core.workspace = true
@@ -35,6 +38,7 @@ libc.workspace = true
 
 [dev-dependencies]
 haste-connector-gcal.workspace = true
+haste-connector-beeper.workspace = true
 haste-google-oauth.workspace = true
 haste-connector-gmail.workspace = true
 haste-connector-icloud.workspace = true

@@ -853,8 +853,13 @@ impl App {
                 remaining,
                 ..
             } => Some(format!(
-                "SEND to {} via {source}, subject '{subject}' ({remaining} left this hour)? [y/N]",
-                recipients.join(", ")
+                "SEND to {} via {source}{} ({remaining} left)? [y/N]",
+                recipients.join(", "),
+                if subject.is_empty() {
+                    String::new()
+                } else {
+                    format!(", subject '{subject}'")
+                }
             )),
             Mode::ConfirmExecute { what, .. } => Some(format!("Run: {what}? [y/N]")),
             Mode::ConfirmResolve { id, done: true } => Some(format!(

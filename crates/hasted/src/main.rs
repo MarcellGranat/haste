@@ -68,6 +68,16 @@ async fn main() {
                 ),
                 Err(e) => eprintln!("hasted: icloud connector not started: {e}"),
             }
+            #[cfg(feature = "beeper")]
+            match hasted::start_beeper(&handle.state, &base) {
+                Ok(true) => eprintln!(
+                    "hasted: beeper connectors registered (whatsapp, messenger, imessage; kill switches decide when they run)"
+                ),
+                Ok(false) => eprintln!(
+                    "hasted: beeper not set up yet (run `haste connector beeper auth`, then write beeper.json)"
+                ),
+                Err(e) => eprintln!("hasted: beeper connectors not started: {e}"),
+            }
             #[cfg(feature = "gcal")]
             match hasted::start_gcal(&handle.state, &base) {
                 Ok(true) => eprintln!(

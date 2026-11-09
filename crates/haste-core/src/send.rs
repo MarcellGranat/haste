@@ -19,6 +19,9 @@ pub const SEND_WINDOW_SECS: i64 = 3600;
 /// Time allowed for one network operation of a send.
 pub const SEND_TIMEOUT_SECS: u64 = 30;
 
+/// Largest reply text accepted for a chat send, in bytes.
+pub const CHAT_MAX_SEND_BYTES: usize = 4 * 1024;
+
 /// Chat sends (WhatsApp, Messenger, iMessage together) per hour: stricter than mail, because the
 /// networks can suspend an account that sends too much.
 pub const CHAT_MAX_SENDS_PER_HOUR: u32 = 5;
@@ -187,6 +190,26 @@ pub fn compose_plain_text(
     Ok(out)
 }
 
+/// The digest a chat send's confirmation carries: SHA-256 (hex) over the chat id, the chat name
+/// the human was shown, and the SHA-256 of the text, each separated by a zero byte. If the chat
+/// is renamed or the text changes after the confirmation, the digest no longer matches and the
+/// send is refused.
+#[must_use]
+pub fn chat_send_digest(chat_id: &str, chat_name: &str, body: &str) -> String {
+    let body_hash = Sha256::digest(body.as_bytes());
+    let mut hasher = Sha256::new();
+    hasher.update(chat_id.as_bytes());
+    hasher.update([0_u8]);
+    hasher.update(chat_name.as_bytes());
+    hasher.update([0_u8]);
+    hasher.update(body_hash);
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// `Re: <subject>` without stacking prefixes; an empty subject becomes `(no subject)`.
 #[must_use]
 pub fn reply_subject(subject: &str) -> String {
@@ -311,6 +334,27 @@ mod tests {
         assert_eq!(
             validate_address(&format!("{}@b.co", "x".repeat(260))),
             Err("address_length")
+        );
+    }
+
+    #[test]
+    fn the_chat_digest_changes_with_the_chat_its_name_or_the_text() {
+        let base = chat_send_digest("chat-1", "Family", "see you at six");
+        assert_eq!(base.len(), 64);
+        assert_eq!(base, chat_send_digest("chat-1", "Family", "see you at six"));
+        assert_ne!(base, chat_send_digest("chat-2", "Family", "see you at six"));
+        assert_ne!(
+            base,
+            chat_send_digest("chat-1", "Family (old)", "see you at six")
+        );
+        assert_ne!(
+            base,
+            chat_send_digest("chat-1", "Family", "see you at seven")
+        );
+        // field boundaries matter
+        assert_ne!(
+            chat_send_digest("ab", "c", "x"),
+            chat_send_digest("a", "bc", "x")
         );
     }
 

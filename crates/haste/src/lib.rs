@@ -423,6 +423,19 @@ pub enum ConnectorCmd {
         #[command(subcommand)]
         cmd: GcalCmd,
     },
+    /// Beeper (WhatsApp, Messenger, iMessage): store the local API token.
+    Beeper {
+        #[command(subcommand)]
+        cmd: BeeperCmd,
+    },
+}
+
+#[cfg(feature = "human")]
+#[derive(Subcommand, Debug)]
+pub enum BeeperCmd {
+    /// Paste the Beeper Desktop API token (not echoed). It is checked against the local API and
+    /// stored in the Keychain; a failed check stores nothing. Needs beeper.json first.
+    Auth,
 }
 
 #[cfg(feature = "human")]
@@ -885,6 +898,14 @@ pub fn build_body(command: &Command) -> Result<RequestBody, CliError> {
         },
         #[cfg(feature = "human")]
         Command::Connector {
+            cmd: ConnectorCmd::Beeper { .. },
+        } => {
+            return Err(CliError::Usage(
+                "beeper auth runs the token helper, not a daemon request".into(),
+            ));
+        }
+        #[cfg(feature = "human")]
+        Command::Connector {
             cmd: ConnectorCmd::Gcal { .. },
         } => {
             return Err(CliError::Usage(
@@ -1120,6 +1141,15 @@ pub fn run(cli: &Cli) -> Result<String, CliError> {
     {
         return run_gcal_auth(&base);
     }
+    #[cfg(feature = "human")]
+    if let Command::Connector {
+        cmd: ConnectorCmd::Beeper {
+            cmd: BeeperCmd::Auth,
+        },
+    } = &cli.command
+    {
+        return run_beeper_auth(&base);
+    }
     let human = is_human_command(&cli.command);
     let hint = std::env::var(AGENT_HINT_ENV).ok();
     let file = std::env::var_os(TOKEN_FILE_ENV).map(PathBuf::from);
@@ -1219,6 +1249,41 @@ pub fn run_gmail_auth(
     } else {
         Err(CliError::Usage(format!(
             "{GMAIL_AUTH_HELPER} failed with {status}"
+        )))
+    }
+}
+
+/// Name of the helper that stores the Beeper API token.
+#[cfg(feature = "human")]
+pub const BEEPER_AUTH_HELPER: &str = "haste-beeper-auth";
+
+/// Run the Beeper token helper (next to this executable, else on `PATH`). The helper prompts for
+/// the token on the terminal itself, so it never passes through this process.
+///
+/// # Errors
+/// [`CliError::Usage`] when the helper cannot be started or fails.
+#[cfg(feature = "human")]
+pub fn run_beeper_auth(base: &Path) -> Result<String, CliError> {
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(BEEPER_AUTH_HELPER)));
+    let program = beside
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| PathBuf::from(BEEPER_AUTH_HELPER));
+    let status = std::process::Command::new(&program)
+        .arg("--home")
+        .arg(base)
+        .status()
+        .map_err(|e| {
+            CliError::Usage(format!(
+                "cannot start {BEEPER_AUTH_HELPER}: {e} (build it with `cargo build -p haste-connector-beeper`)"
+            ))
+        })?;
+    if status.success() {
+        Ok("beeper authorization finished".to_owned())
+    } else {
+        Err(CliError::Usage(format!(
+            "{BEEPER_AUTH_HELPER} failed with {status}"
         )))
     }
 }

@@ -15,8 +15,9 @@ use haste_core::policy::{
 };
 use haste_core::proposal::{NoteEntry, Payload};
 use haste_core::send::{
-    classify as classify_send, recipients_digest, reply_subject, validate_recipients,
-    validate_subject, SendOutcome, MAX_SEND_BODY_BYTES,
+    chat_send_digest, classify as classify_send, recipients_digest, reply_subject,
+    validate_recipients, validate_subject, SendOutcome, SendScope, CHAT_MAX_SEND_BYTES,
+    MAX_SEND_BODY_BYTES,
 };
 use haste_core::time::now_secs;
 use haste_proto::{
@@ -1755,6 +1756,8 @@ fn register(
 
 /// Everything a send needs, resolved once from the proposal and the store.
 struct ResolvedSend {
+    /// The digest of what the human is shown (recipients for mail; chat, name and text for chats).
+    digest: String,
     source: Source,
     thread_external_id: String,
     recipients: Vec<String>,
@@ -1792,8 +1795,34 @@ fn resolve_send(
             "no connector registered for this source",
         ));
     };
-    if body.trim().is_empty() || body.len() > MAX_SEND_BODY_BYTES {
+    let Some(scope) = SendScope::of(&thread.source) else {
+        return Err(fail(ErrorCode::Validation, "cannot send to this source"));
+    };
+    let max_body = match scope {
+        SendScope::Mail => MAX_SEND_BODY_BYTES,
+        SendScope::Chat => CHAT_MAX_SEND_BYTES,
+    };
+    if body.trim().is_empty() || body.len() > max_body {
         return Err(fail(ErrorCode::Validation, "body_length"));
+    }
+    if scope == SendScope::Chat {
+        // A reply into the existing chat the thread is: no recipient list, no subject. The human
+        // confirms the chat name and the text; the digest covers both.
+        let stale = state
+            .store
+            .get_proposal(&proposal.id)
+            .map(|p| p.stale)
+            .unwrap_or(false);
+        return Ok(ResolvedSend {
+            digest: chat_send_digest(&thread.external_id, &thread.subject, body),
+            source: thread.source,
+            recipients: vec![thread.subject.clone()],
+            subject: String::new(),
+            thread_external_id: thread.external_id,
+            body: body.clone(),
+            approval_draft_id: None,
+            stale,
+        });
     }
     let recipients = match to {
         Some(t) => vec![t.trim().to_owned()],
@@ -1823,6 +1852,7 @@ fn resolve_send(
         .map(|p| p.stale)
         .unwrap_or(false);
     Ok(ResolvedSend {
+        digest: recipients_digest(&recipients),
         source: thread.source,
         thread_external_id: thread.external_id,
         recipients,
@@ -1853,11 +1883,18 @@ fn send_preview(state: &State, proposal_id: &str, now: i64) -> Response {
         Ok(r) => r,
         Err(response) => return *response,
     };
+    if state
+        .store
+        .kill_switch_engaged(&resolved.source)
+        .unwrap_or(true)
+    {
+        return err(ErrorCode::Denied, "kill_switch_engaged");
+    }
     let remaining = state.store.sends_remaining(proposal_id, now).unwrap_or(0);
     Response::SendPreview {
         preview: SendPreviewView {
             source: resolved.source.as_name(),
-            recipients_digest: recipients_digest(&resolved.recipients),
+            recipients_digest: resolved.digest.clone(),
             recipients: resolved.recipients,
             subject: resolved.subject,
             body_bytes: resolved.body.len(),
@@ -1899,7 +1936,7 @@ fn send(
             return refuse(&reason, *response);
         }
     };
-    if recipients_digest(&resolved.recipients) != digest {
+    if resolved.digest != digest {
         return refuse(
             "recipients_changed",
             err(ErrorCode::Validation, "recipients_changed"),

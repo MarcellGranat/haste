@@ -573,3 +573,209 @@ async fn bad_references_fail_before_anything_is_written() {
     );
     rig.daemon.shutdown().await;
 }
+
+// ------------------------------------------------------------------ approval mode
+
+use haste_core::policy::NoteMode;
+use haste_core::proposal::ProposalState;
+
+async fn set_mode(r: &Rig, principal: &str, mode: NoteMode) -> Response {
+    call(
+        r,
+        &r.human,
+        RequestBody::NoteMode {
+            principal_id: principal.into(),
+            mode,
+        },
+    )
+    .await
+}
+
+fn proposal_of(r: Response) -> haste_core::Proposal {
+    match r {
+        Response::Proposal { proposal } => proposal,
+        other => panic!("{other:?}"),
+    }
+}
+
+async fn approve(r: &Rig, id: &str) -> Response {
+    call(
+        r,
+        &r.human,
+        RequestBody::Approve {
+            proposal_id: id.into(),
+            acknowledge_stale: false,
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn in_approval_mode_a_note_waits_as_a_proposal_and_approval_writes_it_once() {
+    let rig = boot().await;
+    let agent = register(&rig, "agent-a", PrincipalKind::Agent).await;
+    assert!(matches!(
+        set_mode(&rig, "agent-a", NoteMode::Approval).await,
+        Response::Done
+    ));
+
+    let pending = proposal_of(append(&rig, &agent, "people/ana.md", SENTINEL, "k1").await);
+    assert_eq!(pending.state, ProposalState::Pending);
+    assert!(
+        !rig.notes.path().join("people").exists(),
+        "nothing is written while pending"
+    );
+    // the audit holds the proposal id and no text
+    assert!(!audit(&rig).contains(SENTINEL));
+    // a retry with the same key returns the same proposal
+    let again = proposal_of(append(&rig, &agent, "people/ana.md", SENTINEL, "k1").await);
+    assert_eq!(again.id, pending.id);
+
+    let approved = proposal_of(approve(&rig, &pending.id).await);
+    assert_eq!(approved.state, ProposalState::Sent);
+    assert!(approved
+        .result
+        .as_deref()
+        .unwrap()
+        .starts_with("written bytes="));
+    let text = fs::read_to_string(rig.notes.path().join("people/ana.md")).unwrap();
+    assert_eq!(text.matches(SENTINEL).count(), 1);
+    assert!(
+        text.contains("appended by agent-a"),
+        "written as the original agent"
+    );
+    // approving again does not append again
+    let twice = approve(&rig, &pending.id).await;
+    assert_eq!(code(&twice), Some(ErrorCode::IllegalTransition));
+    assert_eq!(
+        fs::read_to_string(rig.notes.path().join("people/ana.md"))
+            .unwrap()
+            .matches(SENTINEL)
+            .count(),
+        1
+    );
+    assert!(!audit(&rig).contains(SENTINEL));
+    rig.daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn rejection_writes_nothing_and_an_executor_refusal_closes_the_proposal_with_its_reason() {
+    let rig = boot().await;
+    let agent = register(&rig, "agent-a", PrincipalKind::Agent).await;
+    set_mode(&rig, "agent-a", NoteMode::Approval).await;
+
+    let p = proposal_of(append(&rig, &agent, "tasks/a.md", "x", "k1").await);
+    let rejected = proposal_of(
+        call(
+            &rig,
+            &rig.human,
+            RequestBody::Reject {
+                proposal_id: p.id,
+                reason: None,
+            },
+        )
+        .await,
+    );
+    assert_eq!(rejected.state, ProposalState::Rejected);
+    assert!(!rig.notes.path().join("tasks").exists());
+
+    // a person note that became someone else's / hand-written is refused at approval time
+    let ana = make_person(&rig, "Ana", "a@example.org");
+    let q = proposal_of(person_entry(&rig, &agent, &ana, "entry", "k2").await);
+    assert_eq!(q.state, ProposalState::Pending);
+    // the only candidate name is now taken by a hand-written note; the daemon picks the next one
+    fs::create_dir_all(rig.notes.path().join("people")).unwrap();
+    fs::write(rig.notes.path().join("people/ana.md"), "# Ana, by hand\n").unwrap();
+    let done = proposal_of(approve(&rig, &q.id).await);
+    assert_eq!(done.state, ProposalState::Sent);
+    assert_eq!(
+        fs::read_to_string(rig.notes.path().join("people/ana.md")).unwrap(),
+        "# Ana, by hand\n"
+    );
+    assert!(rig.notes.path().join("people/ana-2.md").exists());
+
+    // the folder disappears between queueing and approval: refused, recorded, nothing created
+    let r = proposal_of(append(&rig, &agent, "tasks/b.md", "y", "k3").await);
+    fs::remove_dir_all(rig.notes.path()).unwrap();
+    let closed = proposal_of(approve(&rig, &r.id).await);
+    assert_eq!(closed.state, ProposalState::Rejected);
+    assert_eq!(closed.result.as_deref(), Some("notes_root_missing"));
+    assert!(!rig.notes.path().exists());
+    rig.daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn approval_mode_covers_person_and_reference_notes_and_never_machines_or_bad_input() {
+    let rig = boot().await;
+    let agent = register(&rig, "agent-a", PrincipalKind::Agent).await;
+    let machine = register(&rig, "m1", PrincipalKind::Machine).await;
+    set_mode(&rig, "agent-a", NoteMode::Approval).await;
+    set_mode(&rig, "m1", NoteMode::Approval).await;
+    let thread = rig
+        .daemon
+        .state
+        .store
+        .upsert_thread(&Source::Gmail, "g1", "subject", &[], 1)
+        .unwrap()
+        .id;
+    let p = proposal_of(
+        call(
+            &rig,
+            &agent,
+            reference(RefKind::Thread, &thread, "Billing", None, "k1"),
+        )
+        .await,
+    );
+    assert_eq!(p.state, ProposalState::Pending);
+    approve(&rig, &p.id).await;
+    let text = fs::read_to_string(rig.notes.path().join("tasks/billing.md")).unwrap();
+    assert!(text.contains(&format!("- haste:thread/{thread}")));
+    // invalid requests still fail immediately instead of queueing
+    let bad_body = append(&rig, &agent, "tasks/x.md", "a\n---\nb", "k2").await;
+    assert_eq!(code(&bad_body), Some(ErrorCode::Validation));
+    let missing = call(
+        &rig,
+        &agent,
+        reference(RefKind::Thread, "nope", "T", None, "k3"),
+    )
+    .await;
+    assert_eq!(code(&missing), Some(ErrorCode::NotFound));
+    let hidden = append(&rig, &agent, ".obsidian/x.md", "x", "k4").await;
+    assert_eq!(message(&hidden), "hidden_path");
+    // a machine never produces a proposal, whatever its mode
+    let denied = append(&rig, &machine, "people/ana.md", "x", "k5").await;
+    assert_eq!(message(&denied), "machine_principal");
+    let pending = rig
+        .daemon
+        .state
+        .store
+        .list_proposals(&[ProposalState::Pending])
+        .unwrap();
+    assert!(pending.is_empty(), "{pending:?}");
+    rig.daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn note_mode_is_human_only_and_the_default_is_auto() {
+    let rig = boot().await;
+    let agent = register(&rig, "agent-a", PrincipalKind::Agent).await;
+    // default: the append lands directly
+    assert!(matches!(
+        append(&rig, &agent, "tasks/a.md", "direct", "k1").await,
+        Response::Appended { .. }
+    ));
+    // an agent cannot change its own (or anyone's) mode
+    let own = call(
+        &rig,
+        &agent,
+        RequestBody::NoteMode {
+            principal_id: "agent-a".into(),
+            mode: NoteMode::Auto,
+        },
+    )
+    .await;
+    assert_eq!(code(&own), Some(ErrorCode::Denied));
+    let unknown = set_mode(&rig, "nobody", NoteMode::Approval).await;
+    assert_eq!(code(&unknown), Some(ErrorCode::NotFound));
+    rig.daemon.shutdown().await;
+}

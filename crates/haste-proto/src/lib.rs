@@ -186,6 +186,11 @@ pub enum RequestBody {
     },
     /// Human-only: counts and permission state of the Reminders connector (no titles).
     RemindersStatus,
+    /// Human-only: set how a principal's note appends are decided (`auto` or `approval`).
+    NoteMode {
+        principal_id: String,
+        mode: haste_core::policy::NoteMode,
+    },
     /// Calendar events the caller may see, from `from` (unix seconds) on, soonest first.
     EventsList {
         from: i64,

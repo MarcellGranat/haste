@@ -47,24 +47,24 @@
 
 ## 6. Policy gate and approval mode
 
-- [ ] 6.1 Update the `note.append` outcome in the pure `evaluate` function to use the new path predicate, and add `pending` for `approval` mode
-- [ ] 6.2 Add the machine principal rule that always denies `note.append` with reason `machine_principal`, outside the matrix
-- [ ] 6.3 Add the per-principal `note_mode` (default as decided in Q4), stored with the principal record, changeable only through the human CLI
-- [ ] 6.4 Extend the exhaustive gate test so every `(principal kind, note mode, path class)` combination has an asserted outcome
-- [ ] 6.5 Add the `NoteAppend` proposal payload to `haste-store` and `haste-core`, with the executor path on approval and the duplicate-approval guard
-- [ ] 6.6 Add tests: approval mode creates a pending proposal and writes nothing; approval appends once; rejection and expiry write nothing; a machine principal never produces a proposal
+- [x] 6.1 Update the `note.append` outcome in the pure `evaluate` function to use the new path predicate, and add `pending` for `approval` mode
+- [x] 6.2 Add the machine principal rule that always denies `note.append` with reason `machine_principal`, outside the matrix
+- [x] 6.3 Add the per-principal `note_mode` (default as decided in Q4), stored with the principal record, changeable only through the human CLI
+- [x] 6.4 Extend the exhaustive gate test so every `(principal kind, note mode, path class)` combination has an asserted outcome
+- [x] 6.5 Add the `NoteAppend` proposal payload to `haste-store` and `haste-core`, with the executor path on approval and the duplicate-approval guard
+- [x] 6.6 Add tests: approval mode creates a pending proposal and writes nothing; approval appends once; rejection and expiry write nothing; a machine principal never produces a proposal
 
 ## 7. Human read surfaces
 
 - [ ] 7.1 Add the human-only `note show <path>` request and CLI verb (feature `human`), refusing hidden paths and any principal other than `human`
 - [ ] 7.2 Add the human-only `note log [--since]` request and verb that prints audit rows without text
-- [ ] 7.3 Add the `NoteAppend` rendering to the approvals TUI showing path and first line of text, if Q8 keeps this in scope
+- [x] 7.3 Add the `NoteAppend` rendering to the approvals TUI showing path and first line of text, if Q8 keeps this in scope
 - [ ] 7.4 Add tests: agent token denied for `note show`; `note log` output contains no text from the appended body
 
 ## 8. Audit and configuration
 
 - [x] 8.1 Ensure every note outcome writes exactly one audit row with path, outcome, and `bytes=<n>` or a reason code, and no text, address, or subject
-- [ ] 8.2 Load and validate `person_notes.aliases`, `person_notes.include_addresses`, and the note mode defaults, rejecting unknown keys
+- [x] 8.2 Load and validate `person_notes.aliases`, `person_notes.include_addresses`, and the note mode defaults, rejecting unknown keys
 - [x] 8.3 Add a test that the audit file contains no body text, using a fixed sentinel string in the appended text
 
 ## 9. Documentation

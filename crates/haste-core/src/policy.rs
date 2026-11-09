@@ -37,6 +37,35 @@ impl PrincipalKind {
     }
 }
 
+/// How an agent's note appends are decided: written directly (`auto`, the default) or queued as
+/// a proposal for the human (`approval`). It never affects machine principals, which are denied.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoteMode {
+    #[default]
+    Auto,
+    Approval,
+}
+
+impl NoteMode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Approval => "approval",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "approval" => Some(Self::Approval),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Principal {
     pub id: String,
@@ -139,6 +168,7 @@ pub struct Decision {
 #[derive(Debug, Clone, Default)]
 pub struct Matrix {
     entries: HashMap<(String, Action), Outcome>,
+    note_modes: HashMap<String, NoteMode>,
 }
 
 impl Matrix {
@@ -153,6 +183,19 @@ impl Matrix {
             let outcome = default_outcome(principal.kind, action);
             self.entries.insert((principal.id.clone(), action), outcome);
         }
+    }
+
+    /// Set a principal's note mode (`auto` by default).
+    pub fn set_note_mode(&mut self, principal_id: &str, mode: NoteMode) {
+        self.note_modes.insert(principal_id.to_owned(), mode);
+    }
+
+    #[must_use]
+    pub fn note_mode(&self, principal_id: &str) -> NoteMode {
+        self.note_modes
+            .get(principal_id)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Override one entry. `archive` and `snooze` can never be set to `auto`.
@@ -254,6 +297,10 @@ pub fn evaluate(
     if action == Action::NoteAppend && outcome == Outcome::Auto {
         return match target {
             Target::NotePath(path) => match parse_note_path(path) {
+                Ok(_) if matrix.note_mode(&principal.id) == NoteMode::Approval => Decision {
+                    outcome: Outcome::Pending,
+                    reason: "note_approval_mode",
+                },
                 Ok(_) => Decision {
                     outcome: Outcome::Auto,
                     reason: "allow_listed_path",
@@ -494,6 +541,71 @@ mod tests {
         let p = principal(PrincipalKind::Agent);
         let d = evaluate(&p, Action::Read, &Target::None, &Matrix::new());
         assert_eq!(d.outcome, Outcome::Denied);
+    }
+
+    #[test]
+    fn note_mode_decides_every_principal_kind_and_path_class() {
+        let good = Target::NotePath("people/ana.md".into());
+        let hidden = Target::NotePath(".obsidian/app.json".into());
+        let outside = Target::NotePath("../x.md".into());
+        for (kind, mode, target, expect) in [
+            (PrincipalKind::Agent, NoteMode::Auto, &good, Outcome::Auto),
+            (
+                PrincipalKind::Agent,
+                NoteMode::Approval,
+                &good,
+                Outcome::Pending,
+            ),
+            (
+                PrincipalKind::Agent,
+                NoteMode::Auto,
+                &hidden,
+                Outcome::Denied,
+            ),
+            (
+                PrincipalKind::Agent,
+                NoteMode::Approval,
+                &hidden,
+                Outcome::Denied,
+            ),
+            (
+                PrincipalKind::Agent,
+                NoteMode::Auto,
+                &outside,
+                Outcome::Denied,
+            ),
+            (
+                PrincipalKind::Agent,
+                NoteMode::Approval,
+                &outside,
+                Outcome::Denied,
+            ),
+            (
+                PrincipalKind::Machine,
+                NoteMode::Auto,
+                &good,
+                Outcome::Denied,
+            ),
+            (
+                PrincipalKind::Machine,
+                NoteMode::Approval,
+                &good,
+                Outcome::Denied,
+            ),
+            (PrincipalKind::Human, NoteMode::Auto, &good, Outcome::Auto),
+        ] {
+            let p = principal(kind);
+            let mut m = matrix_for(&p);
+            m.set_note_mode(&p.id, mode);
+            assert_eq!(
+                evaluate(&p, Action::NoteAppend, target, &m).outcome,
+                expect,
+                "{kind:?} {mode:?} {target:?}"
+            );
+        }
+        assert_eq!(NoteMode::default(), NoteMode::Auto, "the default is auto");
+        assert_eq!(NoteMode::parse("approval"), Some(NoteMode::Approval));
+        assert_eq!(NoteMode::parse("sometimes"), None);
     }
 
     #[test]

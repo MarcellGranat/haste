@@ -2,7 +2,7 @@
 
 use haste_core::auth::{issue_token, split_token, verify_secret};
 use haste_core::model::Source;
-use haste_core::policy::{Action, Principal, PrincipalKind};
+use haste_core::policy::{Action, NoteMode, Principal, PrincipalKind};
 use haste_core::time::now_secs;
 use rusqlite::{params, OptionalExtension};
 
@@ -17,6 +17,8 @@ pub struct AuthInfo {
     pub principal: Principal,
     /// The subset of actions this token may even ask for (checked before the gate).
     pub allowed: Vec<Action>,
+    /// How this principal's note appends are decided.
+    pub note_mode: NoteMode,
 }
 
 /// Deliberately uniform: callers learn nothing about why authentication failed.
@@ -89,7 +91,7 @@ impl Store {
             .read(move |conn| {
                 Ok(conn
                     .query_row(
-                        "SELECT t.salt, t.hash, t.revoked, p.id, p.kind, p.allowed_actions \
+                        "SELECT t.salt, t.hash, t.revoked, p.id, p.kind, p.allowed_actions, p.note_mode \
                          FROM tokens t JOIN principals p ON p.id = t.principal_id WHERE t.token_id = ?1",
                         [&token_id],
                         |r| {
@@ -100,13 +102,14 @@ impl Store {
                                 r.get::<_, String>(3)?,
                                 r.get::<_, String>(4)?,
                                 r.get::<_, String>(5)?,
+                                r.get::<_, String>(6)?,
                             ))
                         },
                     )
                     .optional()?)
             })
             .map_err(|e| AuthError::Store(e.to_string()))?;
-        let Some((salt, hash, revoked, principal_id, kind, allowed_json)) = row else {
+        let Some((salt, hash, revoked, principal_id, kind, allowed_json, note_mode)) = row else {
             return Err(AuthError::Unauthenticated);
         };
         if revoked != 0 || !verify_secret(&salt, &hash, &secret) {
@@ -121,6 +124,25 @@ impl Store {
                 kind,
             },
             allowed,
+            note_mode: NoteMode::parse(&note_mode).unwrap_or_default(),
+        })
+    }
+
+    /// Set how a principal's note appends are decided. Human-only (enforced by the daemon).
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] for an unknown principal.
+    pub fn set_note_mode(&self, principal_id: &str, mode: NoteMode) -> StoreResult<()> {
+        let id = principal_id.to_owned();
+        self.write(move |conn| {
+            let n = conn.execute(
+                "UPDATE principals SET note_mode = ?2 WHERE id = ?1",
+                params![id, mode.as_str()],
+            )?;
+            if n == 0 {
+                return Err(StoreError::NotFound(format!("principal {id}")));
+            }
+            Ok(())
         })
     }
 

@@ -286,12 +286,50 @@ impl Store {
                     | Payload::ReminderCreate { .. }
                     | Payload::ReminderComplete { .. }
                     | Payload::CalendarCreate { .. }
-                    | Payload::CalendarUpdate { .. } => {}
+                    | Payload::CalendarUpdate { .. }
+                    | Payload::NoteAppend { .. } => {}
                 }
             }
             let updated = set_state(&tx, &p, ProposalState::Approved, None, now)?;
             tx.commit()?;
             Ok(ApproveOutcome { proposal: updated })
+        })
+    }
+
+    /// Close an approved `NoteAppend` proposal after the daemon ran (or refused) its write:
+    /// `Ok(bytes)` marks it `sent`, `Err(reason)` closes it as `rejected` with the refusal reason
+    /// as its result, so the agent is told and nothing is written. Anything that is not an
+    /// approved note proposal is an illegal transition (so a second approval cannot repeat it).
+    ///
+    /// # Errors
+    /// [`StoreError::IllegalTransition`].
+    pub fn finish_note_proposal(
+        &self,
+        id: &str,
+        outcome: Result<u64, String>,
+        now: i64,
+    ) -> StoreResult<Proposal> {
+        let id = id.to_owned();
+        self.write(move |conn| {
+            let tx = conn.transaction()?;
+            let p = load(&tx, &id)?;
+            if !p.payload.is_note() || p.state != ProposalState::Approved {
+                return Err(StoreError::IllegalTransition(format!(
+                    "{} is not an approved note proposal",
+                    p.id
+                )));
+            }
+            let (state, result) = match outcome {
+                Ok(bytes) => (ProposalState::Sent, format!("written bytes={bytes}")),
+                Err(reason) => (ProposalState::Rejected, reason),
+            };
+            tx.execute(
+                "UPDATE proposals SET state = ?2, updated_at = ?3, result = ?4 WHERE id = ?1",
+                params![p.id, state.as_str(), now, result],
+            )?;
+            let updated = load(&tx, &id)?;
+            tx.commit()?;
+            Ok(updated)
         })
     }
 

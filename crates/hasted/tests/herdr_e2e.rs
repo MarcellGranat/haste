@@ -897,6 +897,7 @@ fn kind(body: &RequestBody) -> Kind {
         | RequestBody::NoteAppend { .. }
         | RequestBody::NotePerson { .. }
         | RequestBody::NoteReference(_)
+        | RequestBody::NoteMode { .. }
         | RequestBody::Approve { .. }
         | RequestBody::Reject { .. }
         | RequestBody::Send { .. }

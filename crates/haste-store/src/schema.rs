@@ -153,6 +153,8 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (external_id, tag)
     );
     ",
+    // 5: how a principal's note appends are decided (`auto` by default, or `approval`).
+    "ALTER TABLE principals ADD COLUMN note_mode TEXT NOT NULL DEFAULT 'auto';",
 ];
 
 /// Highest schema version this binary understands.

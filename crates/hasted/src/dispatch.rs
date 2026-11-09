@@ -10,7 +10,7 @@ use haste_core::herdr::visible_to;
 use haste_core::model::{notes_snippet, Reminder, Source};
 use haste_core::notes::{note_project, slugify, NoteDenial};
 use haste_core::policy::{evaluate, Action, Matrix, Outcome, Principal, PrincipalKind, Target};
-use haste_core::proposal::Payload;
+use haste_core::proposal::{NoteEntry, Payload};
 use haste_core::time::now_secs;
 use haste_proto::{
     AuditLine, ConnectorView, ErrorCode, Event, EventView, Hints, ReminderView,
@@ -71,6 +71,7 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::TagList
         | RequestBody::ReminderTagAdd { .. }
         | RequestBody::ReminderTagRemove { .. }
+        | RequestBody::NoteMode { .. }
         | RequestBody::EventTagAdd { .. }
         | RequestBody::EventTagRemove { .. }
         | RequestBody::RemindersStatus
@@ -99,6 +100,7 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::Execute { .. } => "execute",
         RequestBody::ReminderTagAdd { .. } => "reminder_tag_add",
         RequestBody::EventTagAdd { .. } => "event_tag_add",
+        RequestBody::NoteMode { .. } => "note_mode",
         RequestBody::EventTagRemove { .. } => "event_tag_remove",
         RequestBody::ReminderTagRemove { .. } => "reminder_tag_remove",
         RequestBody::RemindersStatus => "reminders_status",
@@ -171,6 +173,7 @@ pub fn dispatch(state: &State, request: Request) -> Response {
     };
     let mut matrix = Matrix::new();
     matrix.grant_defaults(&principal);
+    matrix.set_note_mode(&principal.id, auth.note_mode);
     let decision = evaluate(&principal, action, &target, &matrix);
     let object = match &target {
         Target::NotePath(p) => Some(p.as_str()),
@@ -186,10 +189,12 @@ pub fn dispatch(state: &State, request: Request) -> Response {
     if decision.outcome == Outcome::Denied {
         return err(ErrorCode::Denied, decision.reason);
     }
-    execute(state, &principal, request.body)
+    // A pending decision for a note request means the principal is in `approval` mode.
+    let queue_notes = decision.outcome == Outcome::Pending;
+    execute(state, &principal, request.body, queue_notes)
 }
 
-fn execute(state: &State, principal: &Principal, body: RequestBody) -> Response {
+fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes: bool) -> Response {
     let now = now_secs();
     match body {
         RequestBody::ThreadList {
@@ -266,13 +271,76 @@ fn execute(state: &State, principal: &Principal, body: RequestBody) -> Response 
             path,
             text,
             idempotency_key,
-        } => note_append(state, principal, &path, &text, &idempotency_key, now),
+        } => {
+            if queue_notes {
+                queue_note(
+                    state,
+                    principal,
+                    NoteEntry::Text { path, text },
+                    &idempotency_key,
+                    now,
+                )
+            } else {
+                note_append(state, principal, &path, &text, &idempotency_key, now)
+            }
+        }
         RequestBody::NotePerson {
             person_id,
             text,
             idempotency_key,
-        } => note_person(state, principal, &person_id, &text, &idempotency_key, now),
-        RequestBody::NoteReference(args) => note_reference(state, principal, &args, now),
+        } => {
+            if queue_notes {
+                match state.store.get_person(&person_id) {
+                    Ok(Some(_)) => queue_note(
+                        state,
+                        principal,
+                        NoteEntry::Person { person_id, text },
+                        &idempotency_key,
+                        now,
+                    ),
+                    Ok(None) => err(ErrorCode::NotFound, "person not found"),
+                    Err(e) => map_store(&e),
+                }
+            } else {
+                note_person(state, principal, &person_id, &text, &idempotency_key, now)
+            }
+        }
+        RequestBody::NoteReference(args) => {
+            if queue_notes {
+                match check_reference(state, &args) {
+                    Ok(_) => queue_note(
+                        state,
+                        principal,
+                        NoteEntry::Reference {
+                            kind: args.kind.as_str().to_owned(),
+                            id: args.id.clone(),
+                            topic: args.topic.clone(),
+                            project: args.project.clone(),
+                        },
+                        &args.idempotency_key,
+                        now,
+                    ),
+                    Err(response) => *response,
+                }
+            } else {
+                note_reference(state, principal, &args, now)
+            }
+        }
+        RequestBody::NoteMode { principal_id, mode } => {
+            match state.store.set_note_mode(&principal_id, mode) {
+                Ok(()) => {
+                    state.audit(
+                        &principal.id,
+                        "note.mode",
+                        "changed",
+                        Some(&principal_id),
+                        Some(&format!("mode={}", mode.as_str())),
+                    );
+                    Response::Done
+                }
+                Err(e) => map_store(&e),
+            }
+        }
         RequestBody::ProposalStatus { proposal_id } => {
             let found = if principal.kind == PrincipalKind::Human {
                 state.store.get_proposal(&proposal_id)
@@ -312,7 +380,12 @@ fn execute(state: &State, principal: &Principal, body: RequestBody) -> Response 
                         None,
                     );
                     // For connectors that can draft, approval also creates the provider draft.
-                    let proposal = create_provider_draft(state, principal, &out.proposal, now);
+                    let proposal = if out.proposal.payload.is_note() {
+                        // Approving a queued note runs the write, once, as the original agent.
+                        run_note_proposal(state, &out.proposal, now)
+                    } else {
+                        create_provider_draft(state, principal, &out.proposal, now)
+                    };
                     state.publish(Event::ProposalChanged {
                         proposal_id,
                         state: proposal.state,
@@ -1325,20 +1398,29 @@ fn note_person(
     }
 }
 
-fn note_reference(
+/// The checks every back-reference request passes before anything is queued or written: a valid
+/// identifier, a usable topic, and an object that exists. Returns the target path.
+fn check_reference(
     state: &State,
-    principal: &Principal,
     args: &haste_proto::NoteReferenceArgs,
-    now: i64,
-) -> Response {
+) -> Result<String, Box<Response>> {
     if args.idempotency_key.trim().is_empty() {
-        return err(ErrorCode::Validation, "idempotency key is required");
+        return Err(Box::new(err(
+            ErrorCode::Validation,
+            "idempotency key is required",
+        )));
     }
     if !valid_reference_id(&args.id) {
-        return err(ErrorCode::Validation, "the identifier is not valid");
+        return Err(Box::new(err(
+            ErrorCode::Validation,
+            "the identifier is not valid",
+        )));
     }
     let Some(path) = reference_path(&args.topic, args.project.as_deref()) else {
-        return err(ErrorCode::Validation, "a topic label is required");
+        return Err(Box::new(err(
+            ErrorCode::Validation,
+            "a topic label is required",
+        )));
     };
     let exists = match args.kind {
         haste_proto::RefKind::Thread => state.store.get_thread(&args.id).map(|t| t.is_some()),
@@ -1346,10 +1428,25 @@ fn note_reference(
         haste_proto::RefKind::Event => state.store.get_event(&args.id).map(|e| e.is_some()),
     };
     match exists {
-        Ok(true) => {}
-        Ok(false) => return err(ErrorCode::NotFound, "the referenced object does not exist"),
-        Err(e) => return map_store(&e),
+        Ok(true) => Ok(path),
+        Ok(false) => Err(Box::new(err(
+            ErrorCode::NotFound,
+            "the referenced object does not exist",
+        ))),
+        Err(e) => Err(Box::new(map_store(&e))),
     }
+}
+
+fn note_reference(
+    state: &State,
+    principal: &Principal,
+    args: &haste_proto::NoteReferenceArgs,
+    now: i64,
+) -> Response {
+    let path = match check_reference(state, args) {
+        Ok(p) => p,
+        Err(response) => return *response,
+    };
     if !state.remember_note_key(&principal.id, &args.idempotency_key) {
         return Response::Appended { path, bytes: 0 };
     }
@@ -1367,6 +1464,94 @@ fn note_reference(
         Ok(bytes) => Response::Appended { path, bytes },
         Err(response) => *response,
     }
+}
+
+/// Approval mode: hold the append as a proposal; nothing is written until the human approves.
+fn queue_note(
+    state: &State,
+    principal: &Principal,
+    entry: NoteEntry,
+    key: &str,
+    now: i64,
+) -> Response {
+    if key.trim().is_empty() {
+        return err(ErrorCode::Validation, "idempotency key is required");
+    }
+    propose(
+        state,
+        principal,
+        Payload::NoteAppend { entry },
+        None,
+        key.to_owned(),
+        None,
+        now,
+    )
+}
+
+fn reason_of(response: &Response) -> String {
+    match response {
+        Response::Error { error } => error.message.clone(),
+        _ => "refused".to_owned(),
+    }
+}
+
+/// Run an approved note proposal under its original principal, with the same checks, budget and
+/// audit as an automatic append, then close the proposal: `sent` on success, or `rejected` with
+/// the executor's refusal reason (nothing was written).
+fn run_note_proposal(
+    state: &State,
+    proposal: &haste_core::Proposal,
+    now: i64,
+) -> haste_core::Proposal {
+    let Payload::NoteAppend { entry } = &proposal.payload else {
+        return proposal.clone();
+    };
+    let who = proposal.principal_id.as_str();
+    let root = &state.config.notes_root;
+    let outcome: Result<u64, String> = match entry {
+        NoteEntry::Text { path, text } => guarded_note_write(state, who, path, now, || {
+            append_note(root, path, who, text, now)
+        })
+        .map_err(|r| reason_of(&r)),
+        NoteEntry::Person { person_id, text } => match state.store.get_person(person_id) {
+            Ok(Some(person)) => match person_note_path(root, &person) {
+                Ok(path) => guarded_note_write(state, who, &path, now, || {
+                    append_person_entry(
+                        root,
+                        &path,
+                        &person,
+                        who,
+                        text,
+                        now,
+                        &state.config.notes_settings.person_notes,
+                    )
+                })
+                .map_err(|r| reason_of(&r)),
+                Err(AppendError::Denied(d)) => {
+                    note_denied(state, who, "people/", d);
+                    Err(d.as_str().to_owned())
+                }
+                Err(AppendError::Io(m)) => Err(m),
+            },
+            _ => Err("person_not_found".to_owned()),
+        },
+        NoteEntry::Reference {
+            kind,
+            id,
+            topic,
+            project,
+        } => match reference_path(topic, project.as_deref()) {
+            Some(path) => guarded_note_write(state, who, &path, now, || {
+                append_reference(root, &path, who, kind, id, now)
+            })
+            .map_err(|r| reason_of(&r)),
+            None => Err("topic_missing".to_owned()),
+        },
+    };
+    state
+        .store
+        .finish_note_proposal(&proposal.id, outcome, now)
+        .unwrap_or_else(|_| proposal.clone())
 }
 
 /// Refuse a note action: one audit row with the path and the reason code, never any text.

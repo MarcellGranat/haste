@@ -181,6 +181,8 @@ pub fn summary(p: &Proposal) -> String {
                 .unwrap_or_default()
         ),
         Payload::CalendarUpdate { event_id, .. } => format!("update event {event_id}"),
+        // the target and the first line of the text, so the human can decide
+        Payload::NoteAppend { entry } => format!("note {}", entry.preview()),
     }
 }
 

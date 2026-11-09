@@ -136,6 +136,10 @@ pub enum Payload {
         #[serde(default)]
         project: Option<String>,
     },
+    /// A note append held for the human (the principal's `note_mode` is `approval`).
+    NoteAppend {
+        entry: NoteEntry,
+    },
     /// A change to an existing event, limited to the allow-list in [`EventChanges`].
     CalendarUpdate {
         /// Haste id of the event.
@@ -147,6 +151,41 @@ pub enum Payload {
         #[serde(default)]
         event_version: Option<u64>,
     },
+}
+
+/// What a queued note append will write. Nothing is written until the human approves it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "entry", rename_all = "snake_case")]
+pub enum NoteEntry {
+    /// Plain text at a notes-folder-relative path.
+    Text { path: String, text: String },
+    /// A dated entry in a Person's note.
+    Person { person_id: String, text: String },
+    /// An identifier-only back-reference (`kind`: thread, reminder or event); no text.
+    Reference {
+        kind: String,
+        id: String,
+        topic: String,
+        #[serde(default)]
+        project: Option<String>,
+    },
+}
+
+impl NoteEntry {
+    /// The first line of the entry's text, or a one-line description for a reference. Shown in
+    /// the approvals view; never audited.
+    #[must_use]
+    pub fn preview(&self) -> String {
+        match self {
+            Self::Text { path, text } => format!("{path}: {}", text.lines().next().unwrap_or("")),
+            Self::Person { person_id, text } => {
+                format!("person {person_id}: {}", text.lines().next().unwrap_or(""))
+            }
+            Self::Reference {
+                kind, id, topic, ..
+            } => format!("haste:{kind}/{id} in '{topic}'"),
+        }
+    }
 }
 
 /// What a `CalendarUpdate` may change: title, start, end, description and location. `attendees`
@@ -229,8 +268,17 @@ impl Payload {
                 Ok(())
             }
             Self::CalendarUpdate { changes, .. } => changes.validate(),
+            Self::NoteAppend {
+                entry: NoteEntry::Text { text, .. } | NoteEntry::Person { text, .. },
+            } => crate::notes::check_body(text).map_err(|d| d.as_str()),
             _ => Ok(()),
         }
+    }
+
+    /// A queued note append; executing it is part of approving it.
+    #[must_use]
+    pub fn is_note(&self) -> bool {
+        matches!(self, Self::NoteAppend { .. })
     }
 
     /// Calendar payloads, executed on a human's explicit action like reminders.
@@ -252,6 +300,7 @@ impl Payload {
             Self::Snooze { .. } => Action::Snooze,
             Self::ReminderCreate { .. } => Action::ReminderCreate,
             Self::ReminderComplete { .. } => Action::ReminderComplete,
+            Self::NoteAppend { .. } => Action::NoteAppend,
             Self::CalendarCreate { .. } => Action::CalendarCreate,
             Self::CalendarUpdate { .. } => Action::CalendarUpdate,
         }

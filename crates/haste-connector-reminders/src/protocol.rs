@@ -20,6 +20,9 @@ pub enum RemindersRequest {
         since: i64,
         offset: usize,
         limit: usize,
+        /// `false` returns open reminders only. Full sweeps use it: a real Reminders database
+        /// holds years of completed items that are not worth mirroring.
+        include_completed: bool,
     },
     CreateReminder {
         title: String,
@@ -126,11 +129,12 @@ mod tests {
             since: 5,
             offset: 0,
             limit: 200,
+            include_completed: true,
         })
         .unwrap();
         assert_eq!(
             json,
-            serde_json::json!({"op":"fetch_changed","since":5,"offset":0,"limit":200})
+            serde_json::json!({"op":"fetch_changed","since":5,"offset":0,"limit":200,"include_completed":true})
         );
         let json = serde_json::to_value(RemindersRequest::Authorization { prompt: false }).unwrap();
         assert_eq!(

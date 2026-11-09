@@ -2,7 +2,7 @@
   "requests": [
     {"op": "authorization", "prompt": true},
     {"op": "list_lists"},
-    {"op": "fetch_changed", "since": 0, "offset": 200, "limit": 200},
+    {"op": "fetch_changed", "since": 0, "offset": 200, "limit": 200, "include_completed": false},
     {"op": "create_reminder", "title": "Call", "due": 1700000000, "list": null, "notes": "haste:thread/abc"},
     {"op": "complete_reminder", "external_id": "x-apple-reminder://1"}
   ],

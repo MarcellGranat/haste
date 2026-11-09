@@ -48,7 +48,7 @@ func wire(_ r: EKReminder) -> [String: Any] {
 // `--check-fixture <file>`: validate the shared protocol fixture so schema drift fails the build.
 func checkFixture(_ path: String) -> Never {
     let required: [String: [String]] = [
-        "authorization": ["prompt"], "list_lists": [], "fetch_changed": ["since", "offset", "limit"],
+        "authorization": ["prompt"], "list_lists": [], "fetch_changed": ["since", "offset", "limit", "include_completed"],
         "create_reminder": ["title"], "complete_reminder": ["external_id"],
     ]
     guard let data = FileManager.default.contents(atPath: path),
@@ -98,9 +98,13 @@ case "fetch_changed":
     let since = request["since"] as? Int ?? 0
     let offset = max(0, request["offset"] as? Int ?? 0)
     let limit = max(1, min(request["limit"] as? Int ?? 200, 1000))
+    let includeCompleted = request["include_completed"] as? Bool ?? true
     let done = DispatchSemaphore(value: 0)
     var found: [EKReminder] = []
-    store.fetchReminders(matching: store.predicateForReminders(in: nil)) { result in
+    let predicate = includeCompleted
+        ? store.predicateForReminders(in: nil)
+        : store.predicateForIncompleteReminders(withDueDateStarting: nil, ending: nil, calendars: nil)
+    store.fetchReminders(matching: predicate) { result in
         found = result ?? []
         done.signal()
     }

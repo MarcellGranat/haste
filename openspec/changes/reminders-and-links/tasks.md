@@ -1,9 +1,9 @@
 ## 1. Real-machine verification and decisions (blocking)
 
-- [ ] 1.1 Human runs a helper spike from a normal Terminal window to confirm EventKit authorization prompts and reports granted or denied, and records which process received the grant (Terminal versus launchd daemon)
+- [x] 1.1 Human runs a helper spike from a normal Terminal window to confirm EventKit authorization prompts and reports granted or denied, and records which process received the grant (Terminal versus launchd daemon)
 - [ ] 1.2 Confirm that the daemon's launch path can read Reminders status without prompting, or record that it cannot and adjust the auth flow in design D3
 - [ ] 1.3 Confirm the list count and the reminder count per list from EventKit with a count-only query (no titles, notes or list names printed) and record the numbers in the design open questions
-- [ ] 1.4 Check whether an ad-hoc-signed helper keeps its TCC grant across rebuilds, and record the signing decision in design D3
+- [x] 1.4 Check whether an ad-hoc-signed helper keeps its TCC grant across rebuilds, and record the signing decision in design D3
 
 ## 2. Data model and store
 

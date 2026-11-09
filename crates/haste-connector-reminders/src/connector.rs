@@ -111,6 +111,8 @@ fn run_cycle(
                     since,
                     offset,
                     limit: FETCH_PAGE_SIZE,
+                    // sweeps list what is open; deltas also carry completions
+                    include_completed: !sweeping,
                 })
                 .map_err(helper_error)?;
             match reply {
@@ -342,11 +344,19 @@ mod tests {
         let requests = fake.requests.lock().unwrap();
         assert!(matches!(
             requests[0],
-            RemindersRequest::FetchChanged { since: 0, .. }
+            RemindersRequest::FetchChanged {
+                since: 0,
+                include_completed: false,
+                ..
+            }
         ));
         assert!(matches!(
             requests[1],
-            RemindersRequest::FetchChanged { since: 20, .. }
+            RemindersRequest::FetchChanged {
+                since: 20,
+                include_completed: true,
+                ..
+            }
         ));
         drop(requests);
         let joined = log.lock().unwrap().join("|");

@@ -194,9 +194,18 @@ variant; otherwise one forward-only migration is added.
 
 ## Open questions status
 
+All answered by the human on 2026-11-09 (accepted the recommendations):
+
 - Q1 (`.obsidian/` required): resolved, removed by the one-folder decision (D1).
-- Q4 is resolved (default `auto`); the `NoteReference` follow-up is noted in D6. Q2 (slug collisions), Q3 (free text in task notes), Q5 (project people notes), Q6 (per-file cap), Q7 (daily count cap), Q8 (TUI note browser): still open.
-- Q9 (sync conflicts): open, narrowed to the notes folder only (D10).
+- Q2 (slug collisions): a numeric suffix (`ana-2.md`); the haste Person id is recorded in the front matter so the link stays exact.
+- Q3 (free text in task and email notes): never. Agents write only identifier references there.
+- Q4 (default mode): `auto`; the `NoteReference` path follows the principal's mode (D6).
+- Q5 (people notes for project work): one shared `people/` folder, linking to the project; no per-project copies.
+- Q6 (per-file cap): 256 KiB, a named constant.
+- Q7 (per-principal daily cap): 200 appends per day, a named constant.
+- Q8 (TUI note browser): out of scope; the CLI (`note log`, `note show`) is enough.
+- Q9 (sync conflicts): not an issue for `~/Documents/haste-notes` (unsynced, see the spike results); rerun the conflict experiment if the folder ever moves into a synced location.
+- Remote herdr machines: out of scope; only agents on the hub write notes (task 0.5).
 
 ## Spike results (2026-11-09, this Mac)
 

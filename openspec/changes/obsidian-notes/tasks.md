@@ -4,8 +4,8 @@
 - [x] 0.2 (human) Check whether that folder is synced: is the path under `~/Library/Mobile Documents/` (iCloud Drive), or covered by Obsidian Sync? Record the answer in `design.md` (Q9 input).
 - [x] 0.3 (human) Conflict experiment inside the chosen notes folder, using a throwaway file deleted afterwards: append a line from two shells in quick succession, then check whether iCloud or Obsidian creates a conflict copy. Record the result in `design.md` (D10).
 - [x] 0.4 (human) Decide how the daemon learns the notes folder under launchd (plist environment key `HASTE_NOTES_ROOT` or `notes.json`), and record it as a decision in `design.md` (D1).
-- [ ] 0.5 Confirm with the human that agents on remote herdr machines are out of scope and that the hub alone writes the notes folder. Record the confirmation in `design.md` Non-Goals.
-- [ ] 0.6 Answer or explicitly defer open questions Q2 to Q9 in `design.md` with the human (Q1 is resolved and removed by the one-folder decision; Q9 concerns the notes folder only), and record each answer or a "deferred" note. Do not implement a default for a deferred question.
+- [x] 0.5 Confirm with the human that agents on remote herdr machines are out of scope and that the hub alone writes the notes folder. Record the confirmation in `design.md` Non-Goals.
+- [x] 0.6 Answer or explicitly defer open questions Q2 to Q9 in `design.md` with the human (Q1 is resolved and removed by the one-folder decision; Q9 concerns the notes folder only), and record each answer or a "deferred" note. Do not implement a default for a deferred question.
 
 ## 1. Notes folder configuration and path rules
 

@@ -7,6 +7,10 @@ The daemon SHALL serve note text only to the human principal, through a read req
 - **WHEN** the human runs `haste note show people/ana-lopez.md`
 - **THEN** the daemon returns the file text as it is on disk and the read is audited with path only
 
+#### Scenario: Path outside the notes folder
+- **WHEN** the human runs `haste note show ../other.md`
+- **THEN** the request is refused and nothing outside the notes folder is read
+
 #### Scenario: Agent tries to read a note
 - **WHEN** an agent token sends a note read request
 - **THEN** the outcome is `denied` and the attempt is audited

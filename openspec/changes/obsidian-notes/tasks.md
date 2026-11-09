@@ -1,18 +1,19 @@
 ## 0. Human spikes (before any code)
 
-- [ ] 0.1 (human) Locate the Obsidian vault on this Mac: run `find ~ -maxdepth 4 -name .obsidian -type d 2>/dev/null` and record the vault folder path in `design.md` Context. Do not open or read note contents.
-- [ ] 0.2 (human) Determine sync: check whether the vault path is under `~/Library/Mobile Documents/` (iCloud Drive), and whether Obsidian Sync is enabled in Obsidian settings. Record the answer in `design.md` (Q9 input).
-- [ ] 0.3 (human) Conflict experiment in a throwaway folder created inside the synced location and deleted afterwards: append a line to one file from two shells in quick succession, then check whether iCloud or Obsidian creates a conflict copy. Record the result in `design.md` (D10).
-- [ ] 0.4 (human) Decide how the daemon learns `HASTE_NOTES_ROOT` under launchd (plist environment key or `notes.json`), and record it as a decision in `design.md` (D1).
-- [ ] 0.5 Confirm with the human that agents on remote herdr machines are out of scope and that the hub alone writes the vault. Record the confirmation in `design.md` Non-Goals.
-- [ ] 0.6 Answer or explicitly defer open questions Q1 to Q9 in `design.md` with the human, and record each answer or a "deferred" note. Do not implement a default for a deferred question.
+- [ ] 0.1 (human) Pick the one notes folder: choose its absolute path (a subfolder of an Obsidian vault or any directory) and record it in `design.md` Context. Do not open or read note contents, and do not point haste at the vault root unless you want that.
+- [ ] 0.2 (human) Check whether that folder is synced: is the path under `~/Library/Mobile Documents/` (iCloud Drive), or covered by Obsidian Sync? Record the answer in `design.md` (Q9 input).
+- [ ] 0.3 (human) Conflict experiment inside the chosen notes folder, using a throwaway file deleted afterwards: append a line from two shells in quick succession, then check whether iCloud or Obsidian creates a conflict copy. Record the result in `design.md` (D10).
+- [x] 0.4 (human) Decide how the daemon learns the notes folder under launchd (plist environment key `HASTE_NOTES_ROOT` or `notes.json`), and record it as a decision in `design.md` (D1).
+- [ ] 0.5 Confirm with the human that agents on remote herdr machines are out of scope and that the hub alone writes the notes folder. Record the confirmation in `design.md` Non-Goals.
+- [ ] 0.6 Answer or explicitly defer open questions Q2 to Q9 in `design.md` with the human (Q1 is resolved and removed by the one-folder decision; Q9 concerns the notes folder only), and record each answer or a "deferred" note. Do not implement a default for a deferred question.
 
-## 1. Vault configuration and path rules
+## 1. Notes folder configuration and path rules
 
-- [ ] 1.1 Load the vault root from the configured source, require it to exist as a directory, and expose a `vault_missing` denial when it does not
+- [ ] 1.1 Load the single notes root from the configured source, require it to exist as a directory, accept it whether or not `.obsidian/` exists or lies inside or above it, and expose a `notes_root_missing` denial when it does not exist
 - [ ] 1.2 Extend `note_path_allowed` (haste-core) with the `projects/<project>/` rule, the hidden-component rule, the `.md` suffix rule, and the rejection of absolute, `..`, backslash, NUL, and `~` paths
 - [ ] 1.3 Pass the set of known project slugs (from the store's workspace labels) into the path predicate as an explicit argument, keeping the function pure
 - [ ] 1.4 Add unit tests: each rejected form, each accepted form, a project slug that is not known, and a bare `projects/` path
+- [ ] 1.5 Add a containment check on the canonical target (`outside_root`), and tests in a tempdir: `../` traversal, absolute path, a symlinked directory pointing out, and a notes root that contains a `.obsidian` directory (accepted, but `.obsidian/` writes refused with `hidden_path` and nothing outside the root touched)
 
 ## 2. Body and size checks
 
@@ -23,7 +24,7 @@
 
 ## 3. Append executor
 
-- [ ] 3.1 Keep `O_APPEND|O_NOFOLLOW` and the attribution comment; add the reason codes `hidden_path`, `unknown_project`, `size_limit`, `body_rejected`, `symlink`, `vault_missing`, `front_matter_mismatch`
+- [ ] 3.1 Keep `O_APPEND|O_NOFOLLOW` and the attribution comment; add the reason codes `hidden_path`, `unknown_project`, `size_limit`, `body_rejected`, `symlink`, `outside_root`, `notes_root_missing`, `front_matter_mismatch`
 - [ ] 3.2 Add a test that every existing byte of a file is unchanged after any sequence of appends, using a tempdir
 - [ ] 3.3 Add a test that a symlinked component or target is refused with `symlink`
 
@@ -68,20 +69,21 @@
 
 ## 9. Documentation
 
-- [ ] 9.1 Add a README section "Obsidian vault" covering the vault folder setting, vault-relative paths, hidden-path rule, person notes, back-reference notes, approval mode, and the `note show` and `note log` verbs
-- [ ] 9.2 Document the sync findings from group 0 and the chosen mitigation for Q9 in the README
+- [ ] 9.1 Add a README section "Notes folder" covering the single notes folder setting (may be inside an Obsidian vault; haste never touches the rest), notes-root-relative paths, the containment rule, hidden-path rule, person notes, back-reference notes, approval mode, and the `note show` and `note log` verbs
+- [ ] 9.2 Document the sync findings from group 0 and the chosen mitigation for Q9 (notes folder only) in the README
 
 ## 10. Quality checks
 
 - [ ] 10.1 Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` and fix all failures
-- [ ] 10.2 Confirm every test uses a tempdir or a fake; no test touches the real vault path or the real data directory
+- [ ] 10.2 Confirm every test uses a tempdir or a fake; no test touches the real notes folder or the real data directory
 
-## 11. Manual smoke (human, live vault)
+## 11. Manual smoke (human, live notes folder)
 
-- [ ] 11.1 (human) Set the vault setting to a throwaway folder inside the vault location, start `hasted`, and confirm `haste note show` works for the human and is refused for an agent token
+- [ ] 11.1 (human) Set the notes folder setting to a throwaway folder (inside the vault if that is where you will use it), start `hasted`, and confirm `haste note show` works for the human and is refused for an agent token
 - [ ] 11.2 (human) As an agent in `auto` mode, append to `people/<slug>.md` for a real person id; open the note in Obsidian and confirm front matter appears once and the entry is dated
 - [ ] 11.3 (human) Append a second entry and confirm no earlier bytes changed (compare with a copy taken before the append)
 - [ ] 11.4 (human) Record a thread and a reminder reference in a task note; confirm the note contains only `haste:` identifier lines
 - [ ] 11.5 (human) Switch the agent to `approval` mode, request an append, confirm nothing is written, approve in the TUI, and confirm exactly one entry appears
 - [ ] 11.6 (human) Confirm `haste note log` lists the writes with byte counts and no text
-- [ ] 11.7 (human) Delete the throwaway folder in Obsidian and in the synced location, and check the sync result from group 0 again
+- [ ] 11.7 (human) Confirm an `outside_root` attempt (an agent request with `../` or through a symlink pointing out) is refused and that nothing outside the throwaway folder changed
+- [ ] 11.8 (human) Delete the throwaway folder in Obsidian and in the synced location, and check the sync result from group 0 again

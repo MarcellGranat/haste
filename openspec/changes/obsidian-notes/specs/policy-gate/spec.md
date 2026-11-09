@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Note append is auto only inside allow-listed paths
-The `note.append` action SHALL resolve to `auto` only when the canonical target path, relative to the vault root, lies under `people/**`, under `tasks/**`, or under `projects/<project>/**` where `<project>` is the slug of a known herdr workspace label, and no path component starts with `.`. Any other target path SHALL resolve to `denied`. For a principal in `approval` mode, an otherwise allowed append SHALL resolve to `pending` instead of `auto`.
+The `note.append` action SHALL resolve to `auto` only when the canonical target path, relative to the notes root, lies inside the notes root and under `people/**`, under `tasks/**`, or under `projects/<project>/**` where `<project>` is the slug of a known herdr workspace label, and no path component starts with `.`. Any other target path, including any path that resolves outside the notes root, SHALL resolve to `denied`. For a principal in `approval` mode, an otherwise allowed append SHALL resolve to `pending` instead of `auto`.
 
 #### Scenario: Append inside allow-list
 - **WHEN** an agent requests `note.append` for `people/ana.md`
@@ -14,6 +14,10 @@ The `note.append` action SHALL resolve to `auto` only when the canonical target 
 #### Scenario: Path traversal attempt
 - **WHEN** an agent requests `note.append` for `people/../private/keys.md`
 - **THEN** the canonical path is outside the allow-list, the outcome is `denied`, and nothing is written
+
+#### Scenario: Escape from the notes folder
+- **WHEN** an agent requests `note.append` for `../elsewhere/x.md`, or for a path through a symlink pointing outside the notes root
+- **THEN** the outcome is `denied` and nothing is written outside the notes root
 
 #### Scenario: Hidden folder
 - **WHEN** an agent requests `note.append` for `.obsidian/workspace.md`

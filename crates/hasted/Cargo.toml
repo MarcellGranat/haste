@@ -15,10 +15,14 @@ path = "src/main.rs"
 gmail = ["dep:haste-connector-gmail"]
 # Real iCloud Mail connector (IMAP over TLS + Keychain). Off by default.
 icloud = ["dep:haste-connector-icloud"]
+# Real Google Calendar connector (Calendar API + Keychain). Off by default.
+gcal = ["dep:haste-connector-gcal", "dep:haste-google-oauth"]
 
 [dependencies]
 haste-connector-gmail = { workspace = true, optional = true }
 haste-connector-icloud = { workspace = true, optional = true }
+haste-connector-gcal = { workspace = true, optional = true }
+haste-google-oauth = { workspace = true, optional = true }
 haste-connector-reminders.workspace = true
 haste-core.workspace = true
 haste-herdr.workspace = true
@@ -29,6 +33,8 @@ serde_json.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+haste-connector-gcal.workspace = true
+haste-google-oauth.workspace = true
 haste-connector-gmail.workspace = true
 haste-connector-icloud.workspace = true
 base64.workspace = true

@@ -106,6 +106,26 @@ impl State {
 
     /// Register a connector (real ones arrive in later changes; tests use doubles).
     pub fn register_connector(&self, connector: Arc<dyn Connector>) {
+        // A connector that asks for it starts engaged the first time it is ever registered. A
+        // persisted choice (engaged or released) is never overridden.
+        if connector.default_engaged() {
+            let source = connector.source();
+            let known = self
+                .store
+                .list_kill_switches()
+                .map(|all| all.iter().any(|(s, _)| s == &source))
+                .unwrap_or(true);
+            if !known {
+                let _ = self.store.set_kill_switch(&source, true);
+                self.audit(
+                    "system",
+                    "connector.engage",
+                    "first_install",
+                    Some(&source.as_name()),
+                    None,
+                );
+            }
+        }
         if let Ok(mut map) = self.connectors.write() {
             map.insert(connector.source(), connector);
         }

@@ -8,11 +8,11 @@ The Google Calendar connector SHALL declare the capabilities `read = true`, `dra
 - **THEN** the declared capabilities are `read` and the calendar write flag, and no others
 
 #### Scenario: Delete not available
-- **WHEN** any caller asks the Google Calendar connector to delete an event
-- **THEN** the guard refuses with a capability-missing error and writes a `refused_capability` audit entry
+- **WHEN** the connector and its guard are inspected for a way to delete, cancel or send an invitation for an event
+- **THEN** none exists: the connector trait, the guard and the API client have no such method, the capability set has no such flag, and a test asserts that no HTTP DELETE is ever issued
 
 ### Requirement: Separate consent reusing the Gmail OAuth client
-The calendar connector SHALL authorize with OAuth 2.0 using the same Google OAuth client, PKCE and loopback redirect on `127.0.0.1` as the Gmail connector. Its refresh token SHALL be stored only in the macOS Keychain under service `com.haste.gcal`. The Gmail refresh token and the `com.haste.gmail` item SHALL NOT be read, changed, or revoked by calendar authorization. The requested scopes SHALL be the minimal set confirmed by the spike and SHALL NOT include `gmail` scopes.
+The calendar connector SHALL authorize with OAuth 2.0 using the same Google OAuth client, PKCE and loopback redirect on `127.0.0.1` as the Gmail connector. Its refresh token SHALL be stored only in the macOS Keychain under service `com.haste.gcal`; the OAuth client id and secret are kept in the same service under a separate account, never in `gcal.json`. The Gmail refresh token and the `com.haste.gmail` item SHALL NOT be read, changed, or revoked by calendar authorization. The requested scopes SHALL be the minimal set confirmed by the spike and SHALL NOT include `gmail` scopes.
 
 #### Scenario: Consent creates a separate token
 - **WHEN** the human runs `haste connector gcal auth` and approves consent
@@ -70,7 +70,7 @@ Each event SHALL map to one `Event` with `source = gcal` and `external_id` equal
 A `CalendarCreate` or `CalendarUpdate` proposal SHALL be executed only after a human approves it. Execution SHALL use an insert or patch call with `sendUpdates` set to `none`. The hub SHALL NOT request `sendUpdates=all` or any value that emails attendees.
 
 #### Scenario: Approved create
-- **WHEN** the human approves a `CalendarCreate` proposal
+- **WHEN** the human approves a `CalendarCreate` proposal and then runs it (the explicit execute action, as for reminders)
 - **THEN** one insert request is made with `sendUpdates=none`, the new event ID is recorded on the proposal, and an audit entry `calendar.create` with source `gcal` is written
 
 #### Scenario: Pending or rejected creates nothing

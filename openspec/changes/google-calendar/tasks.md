@@ -13,39 +13,39 @@
 
 - [x] 3.1 Add `Source::GoogleCalendar` (name `gcal`) in `haste-core`
 - [x] 3.2 Add the `Event` record and its store table with local-field separation for scope tags and triage state
-- [ ] 3.3 Add `CalendarCreate` and `CalendarUpdate` proposal payloads, with the `CalendarUpdate` field allow-list enforced at creation
+- [x] 3.3 Add `CalendarCreate` and `CalendarUpdate` proposal payloads, with the `CalendarUpdate` field allow-list enforced at creation
 - [x] 3.4 Add `calendar.create` and `calendar.update` to the policy gate as `pending` for agents; confirm `calendar.delete` resolves to `denied` as an undefined action
-- [ ] 3.5 Add the default-engaged flag to the connector descriptor and a test that a fresh store starts the flagged connector engaged
+- [x] 3.5 Add the default-engaged flag to the connector descriptor and a test that a fresh store starts the flagged connector engaged
 - [x] 3.6 Coordinate with the `reminders-and-links` capability-flag and proposal-kind set before adding flags, and rebase if that change has landed
 
 ## 4. Google Calendar connector
 
 - [x] 4.1 Create `crates/haste-connector-gcal` with the `Connector` implementation, read capability and the calendar write flag, and no delete or cancel method
-- [ ] 4.2 Implement the `gcal` consent verb in the human build, storing the token under `com.haste.gcal` and leaving the Gmail item untouched
+- [x] 4.2 Implement the `gcal` consent verb in the human build, storing the token under `com.haste.gcal` and leaving the Gmail item untouched
 - [x] 4.3 Read the non-secret `gcal.json` calendar list (mode `0600`) and refuse unlisted calendars; a missing or empty list reads nothing
 - [x] 4.4 Implement the unwindowed first listing storing only in-window events, and `syncToken` delta sync, with a single bounded reset on `410 Gone` and no loop
 - [x] 4.5 Implement the event to `Event` mapping, attendee to person mapping, and the local-field preservation on re-sync
-- [ ] 4.6 Implement `CalendarCreate` execution with `events.insert` and `sendUpdates=none`, and `CalendarUpdate` execution with `events.patch` limited to the allow-list and refusing attendee or cancel changes
-- [ ] 4.7 Implement the stale-event check on update approval, reusing the existing stale confirmation
+- [x] 4.6 Implement `CalendarCreate` execution with `events.insert` and `sendUpdates=none`, and `CalendarUpdate` execution with `events.patch` limited to the allow-list and refusing attendee or cancel changes
+- [x] 4.7 Implement the stale-event check on update approval, reusing the existing stale confirmation
 - [x] 4.8 Map invalid-grant and restriction responses to `Checkpoint` with the breaker and re-authorization notice
-- [ ] 4.9 Implement the per-cycle counts-only audit entry and `calendar.create` / `calendar.update` audit entries with the event ID as detail
-- [ ] 4.10 Register the connector with default-engaged kill switch and the `haste connector release|engage|status gcal` verbs
+- [x] 4.9 Implement the per-cycle counts-only audit entry and `calendar.create` / `calendar.update` audit entries with the event ID as detail
+- [x] 4.10 Register the connector with default-engaged kill switch and the `haste connector release|engage|status gcal` verbs
 - [x] 4.11 Build the local fake Google Calendar server in the style of the Gmail test server, serving calendarList, events.list with syncToken (and a windowed listing without one), a 410 response, events.insert and events.patch
-- [ ] 4.12 Add tests for: sendUpdates=none on every write, no delete route, token isolation from the Gmail item, syncToken delta, unwindowed first listing with in-window storage, 410 single reset, allow-list refusal, attendee and cancel refusal, stale confirmation, invalid-grant breaker, and audit content
+- [x] 4.12 Add tests for: sendUpdates=none on every write, no delete route, token isolation from the Gmail item, syncToken delta, unwindowed first listing with in-window storage, 410 single reset, allow-list refusal, attendee and cancel refusal, stale confirmation, invalid-grant breaker, and audit content
 
 ## 5. Daemon, scope and TUI
 
-- [ ] 5.1 Wire the connector into the scheduler through `Guarded` with its own interval and kill switch
-- [ ] 5.2 Dispatch approved calendar proposals through the connector only after approval, with the proposal recording the result
-- [ ] 5.3 Extend the exhaustive per-principal scope-filter test to `Event`
-- [ ] 5.4 Render calendar proposals (title, calendar, time, project) in the approvals view, and show the default-engaged state in the connectors status
-- [ ] 5.5 Add the `haste connector status` line for `gcal` in the human build and confirm the agent build does not list the auth verb
+- [x] 5.1 Wire the connector into the scheduler through `Guarded` with its own interval and kill switch
+- [x] 5.2 Dispatch approved calendar proposals through the connector only after approval, with the proposal recording the result
+- [x] 5.3 Extend the exhaustive per-principal scope-filter test to `Event`
+- [x] 5.4 Render calendar proposals (title, calendar, time, project) in the approvals view, and show the default-engaged state in the connectors status
+- [x] 5.5 Add the `haste connector status` line for `gcal` in the human build and confirm the agent build does not list the auth verb
 
 ## 6. Docs and checks
 
-- [ ] 6.1 Add a README section for the Google Calendar consent step and `gcal.json`, with the human-only verbs stated
-- [ ] 6.2 Run `cargo test` for the workspace and the new crate's tests, with no test calling Google
-- [ ] 6.3 Run `cargo clippy` with warnings as errors on the changed crates and `cargo fmt --check`
+- [x] 6.1 Add a README section for the Google Calendar consent step and `gcal.json`, with the human-only verbs stated
+- [x] 6.2 Run `cargo test` for the workspace and the new crate's tests, with no test calling Google
+- [x] 6.3 Run `cargo clippy` with warnings as errors on the changed crates and `cargo fmt --check`
 
 ## 7. Manual smoke and config (end, human-run on this Mac, real accounts)
 

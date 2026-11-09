@@ -59,6 +59,16 @@ async fn main() {
                 ),
                 Err(e) => eprintln!("hasted: icloud connector not started: {e}"),
             }
+            #[cfg(feature = "gcal")]
+            match hasted::start_gcal(&handle.state, &base) {
+                Ok(true) => eprintln!(
+                    "hasted: gcal connector registered (kill switch decides when it runs)"
+                ),
+                Ok(false) => {
+                    eprintln!("hasted: gcal not authorized yet (run `haste connector gcal auth`)")
+                }
+                Err(e) => eprintln!("hasted: gcal connector not started: {e}"),
+            }
             #[cfg(feature = "gmail")]
             match hasted::start_gmail(&handle.state, &base) {
                 Ok(true) => eprintln!("hasted: gmail connector started"),

@@ -147,6 +147,7 @@ pub struct SyncReport {
     pub threads: usize,
     pub messages: usize,
     pub reminders: usize,
+    pub events: usize,
 }
 
 /// One scheduled cycle for any connector: fetch through the guard (capability check, kill
@@ -246,6 +247,17 @@ fn store_batch(
             state.store.finish_sweep(&sweep.id, now_secs())?;
         }
     }
+    if !batch.events.is_empty() || !batch.calendar_sweeps.is_empty() {
+        state
+            .store
+            .upsert_events(&batch.events, &batch.calendar_sweeps)?;
+        // Each complete listing may mark only its own calendar's absent events missing.
+        for sweep in &batch.calendar_sweeps {
+            state
+                .store
+                .finish_calendar_sweep(&sweep.calendar, &sweep.id, now_secs())?;
+        }
+    }
     if let Some(Cursor(c)) = &batch.next_cursor {
         state.store.set_connector_cursor(source, Some(c))?;
     }
@@ -254,6 +266,7 @@ fn store_batch(
             threads: batch.threads.len(),
             messages,
             reminders: batch.reminders.len(),
+            events: batch.events.len(),
         },
         changed,
     ))

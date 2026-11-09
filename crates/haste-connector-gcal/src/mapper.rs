@@ -141,7 +141,7 @@ mod tests {
         assert_eq!(e.external_id, "primary/e1");
         assert_eq!(
             (e.start_at, e.end_at, e.all_day),
-            (1_794_218_400 - 3600, 1_794_218_400 + 0, false)
+            (1_794_218_400 - 3600, 1_794_218_400, false)
         );
         assert_eq!(e.attendees, ["ana@x.org", "b@x.org"]);
         assert!(e.location_present());

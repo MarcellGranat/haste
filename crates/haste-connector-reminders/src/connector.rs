@@ -200,6 +200,10 @@ impl Connector for RemindersConnector {
         }
     }
 
+    fn default_engaged(&self) -> bool {
+        true
+    }
+
     fn fetch(&self, cursor: Option<Cursor>) -> BoxFuture<'_, Result<Batch, ConnectorError>> {
         Box::pin(async move {
             let helper = Arc::clone(&self.helper);

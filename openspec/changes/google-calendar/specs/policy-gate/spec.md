@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Calendar actions are pending for agents
-The policy gate SHALL evaluate `calendar.create` and `calendar.update` for agent and machine principals as `pending`, never `auto`. The gate SHALL NOT define a `calendar.delete` action.
+The policy gate SHALL evaluate `calendar.create` and `calendar.update` for agent principals as `pending`, never `auto`, and for machine principals (read-only) as `denied`. The gate SHALL NOT define a `calendar.delete` action.
 
 #### Scenario: Agent calendar create pending
 - **WHEN** an agent requests `calendar.create`

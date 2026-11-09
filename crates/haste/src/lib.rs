@@ -61,6 +61,11 @@ pub enum Command {
         #[command(subcommand)]
         cmd: ReminderCmd,
     },
+    /// Read calendar events and propose creating or changing one (a human approves each).
+    Event {
+        #[command(subcommand)]
+        cmd: EventCmd,
+    },
     /// Email actions (human shell only).
     #[cfg(feature = "human")]
     Email {
@@ -197,6 +202,59 @@ pub enum ReminderCmd {
     },
 }
 
+#[derive(Subcommand, Debug)]
+pub enum EventCmd {
+    /// List the calendar events you may see.
+    List {
+        /// Only events ending at or after this Unix time (default: now).
+        #[arg(long)]
+        from: Option<i64>,
+    },
+    /// Propose a new event. Nobody is emailed an invitation by haste.
+    Create {
+        #[arg(long)]
+        calendar: String,
+        #[arg(long)]
+        title: String,
+        /// Start as Unix seconds.
+        #[arg(long)]
+        start: i64,
+        /// End as Unix seconds.
+        #[arg(long)]
+        end: i64,
+        #[arg(long)]
+        all_day: bool,
+        /// Attendee address (repeatable). They are stored, not notified.
+        #[arg(long = "attendee")]
+        attendees: Vec<String>,
+        #[arg(long)]
+        description: Option<String>,
+        /// Project tag (a herdr workspace name). Defaults to your pane's workspace.
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Propose changing an event's title, times, description or location. Attendees and
+    /// cancelling cannot be changed from here.
+    Update {
+        /// Haste event id (from `event list`).
+        event: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        start: Option<i64>,
+        #[arg(long)]
+        end: Option<i64>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        location: Option<String>,
+        #[arg(long)]
+        key: Option<String>,
+    },
+}
+
 #[cfg(feature = "human")]
 #[derive(Subcommand, Debug)]
 pub enum EmailCmd {
@@ -321,6 +379,19 @@ pub enum ConnectorCmd {
         #[command(subcommand)]
         cmd: RemindersCmd,
     },
+    /// Provider-specific setup for Google Calendar.
+    Gcal {
+        #[command(subcommand)]
+        cmd: GcalCmd,
+    },
+}
+
+#[cfg(feature = "human")]
+#[derive(Subcommand, Debug)]
+pub enum GcalCmd {
+    /// One-time consent for the two calendar scopes (opens your browser). Uses
+    /// $HASTE_GMAIL_CLIENT_ID and $HASTE_GMAIL_CLIENT_SECRET.
+    Auth,
 }
 
 #[cfg(feature = "human")]
@@ -350,6 +421,10 @@ pub enum TagCmd {
     AddReminder { reminder: String, tag: String },
     /// Remove a tag from a reminder.
     RemoveReminder { reminder: String, tag: String },
+    /// Tag a calendar event with a project (a known herdr workspace name).
+    AddEvent { event: String, tag: String },
+    /// Remove a tag from a calendar event.
+    RemoveEvent { event: String, tag: String },
 }
 
 #[cfg(feature = "human")]
@@ -549,6 +624,69 @@ pub fn build_body(command: &Command) -> Result<RequestBody, CliError> {
         } => RequestBody::RemindersList {
             include_completed: *completed,
         },
+        Command::Event {
+            cmd: EventCmd::List { from },
+        } => RequestBody::EventsList {
+            from: from.unwrap_or_else(haste_core::time::now_secs),
+        },
+        Command::Event {
+            cmd:
+                EventCmd::Create {
+                    calendar,
+                    title,
+                    start,
+                    end,
+                    all_day,
+                    attendees,
+                    description,
+                    project,
+                    key,
+                },
+        } => RequestBody::Propose {
+            payload: Payload::CalendarCreate {
+                calendar: calendar.clone(),
+                title: title.clone(),
+                start: *start,
+                end: *end,
+                all_day: *all_day,
+                attendees: attendees.clone(),
+                description: description.clone(),
+                project: project.clone(),
+            },
+            thread_id: None,
+            idempotency_key: key_or_new(key),
+            hints: env_hints(),
+        },
+        Command::Event {
+            cmd:
+                EventCmd::Update {
+                    event,
+                    title,
+                    start,
+                    end,
+                    description,
+                    location,
+                    key,
+                },
+        } => RequestBody::Propose {
+            payload: Payload::CalendarUpdate {
+                event_id: event.clone(),
+                changes: haste_core::proposal::EventChanges {
+                    title: title.clone(),
+                    start: *start,
+                    end: *end,
+                    description: description.clone(),
+                    location: location.clone(),
+                    attendees: None,
+                    status: None,
+                },
+                project: None,
+                event_version: None,
+            },
+            thread_id: None,
+            idempotency_key: key_or_new(key),
+            hints: env_hints(),
+        },
         #[cfg(feature = "human")]
         Command::Email {
             cmd:
@@ -634,6 +772,28 @@ pub fn build_body(command: &Command) -> Result<RequestBody, CliError> {
             proposal_id: id.clone(),
             done: *done,
         },
+        #[cfg(feature = "human")]
+        Command::Tag {
+            cmd: TagCmd::AddEvent { event, tag },
+        } => RequestBody::EventTagAdd {
+            event_id: event.clone(),
+            tag: tag.clone(),
+        },
+        #[cfg(feature = "human")]
+        Command::Tag {
+            cmd: TagCmd::RemoveEvent { event, tag },
+        } => RequestBody::EventTagRemove {
+            event_id: event.clone(),
+            tag: tag.clone(),
+        },
+        #[cfg(feature = "human")]
+        Command::Connector {
+            cmd: ConnectorCmd::Gcal { .. },
+        } => {
+            return Err(CliError::Usage(
+                "gcal auth runs the consent helper, not a daemon request".into(),
+            ));
+        }
         #[cfg(feature = "human")]
         Command::Tag {
             cmd: TagCmd::AddReminder { reminder, tag },
@@ -842,6 +1002,13 @@ pub fn run(cli: &Cli) -> Result<String, CliError> {
     {
         return run_reminders_auth(&base);
     }
+    #[cfg(feature = "human")]
+    if let Command::Connector {
+        cmd: ConnectorCmd::Gcal { cmd: GcalCmd::Auth },
+    } = &cli.command
+    {
+        return run_gcal_auth(&base);
+    }
     let human = is_human_command(&cli.command);
     let hint = std::env::var(AGENT_HINT_ENV).ok();
     let file = std::env::var_os(TOKEN_FILE_ENV).map(PathBuf::from);
@@ -941,6 +1108,41 @@ pub fn run_gmail_auth(
     } else {
         Err(CliError::Usage(format!(
             "{GMAIL_AUTH_HELPER} failed with {status}"
+        )))
+    }
+}
+
+/// Name of the helper that runs the Google Calendar consent flow.
+#[cfg(feature = "human")]
+pub const GCAL_AUTH_HELPER: &str = "haste-gcal-auth";
+
+/// Run the Calendar consent helper (next to this executable, else on `PATH`). It reads the OAuth
+/// client from the environment and never prints a token.
+///
+/// # Errors
+/// [`CliError::Usage`] when the helper cannot be started or fails.
+#[cfg(feature = "human")]
+pub fn run_gcal_auth(base: &Path) -> Result<String, CliError> {
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(GCAL_AUTH_HELPER)));
+    let program = beside
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| PathBuf::from(GCAL_AUTH_HELPER));
+    let status = std::process::Command::new(&program)
+        .arg("--home")
+        .arg(base)
+        .status()
+        .map_err(|e| {
+            CliError::Usage(format!(
+                "cannot start {GCAL_AUTH_HELPER}: {e} (build it with `cargo build -p haste-connector-gcal`)"
+            ))
+        })?;
+    if status.success() {
+        Ok("gcal authorization finished".to_owned())
+    } else {
+        Err(CliError::Usage(format!(
+            "{GCAL_AUTH_HELPER} failed with {status}"
         )))
     }
 }
@@ -1195,6 +1397,86 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(argv).is_err());
         }
+    }
+
+    #[test]
+    fn agents_can_propose_events_but_have_no_attendee_or_status_flags() {
+        let cli = Cli::try_parse_from([
+            "haste",
+            "event",
+            "create",
+            "--calendar",
+            "primary",
+            "--title",
+            "Sync",
+            "--start",
+            "100",
+            "--end",
+            "200",
+            "--attendee",
+            "a@x.org",
+            "--key",
+            "k",
+        ])
+        .unwrap();
+        assert!(!is_human_command(&cli.command));
+        match build_body(&cli.command).unwrap() {
+            RequestBody::Propose {
+                payload:
+                    Payload::CalendarCreate {
+                        attendees, title, ..
+                    },
+                idempotency_key,
+                ..
+            } => {
+                assert_eq!((title.as_str(), idempotency_key.as_str()), ("Sync", "k"));
+                assert_eq!(attendees, ["a@x.org"]);
+            }
+            other => panic!("{other:?}"),
+        }
+        let cli =
+            Cli::try_parse_from(["haste", "event", "update", "e1", "--title", "New"]).unwrap();
+        match build_body(&cli.command).unwrap() {
+            RequestBody::Propose {
+                payload: Payload::CalendarUpdate { changes, .. },
+                ..
+            } => {
+                assert_eq!(changes.title.as_deref(), Some("New"));
+                assert!(changes.attendees.is_none() && changes.status.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+        // the update verb has no way to name attendees, a status, or a delete
+        for argv in [
+            vec!["haste", "event", "update", "e1", "--attendee", "a@x.org"],
+            vec!["haste", "event", "update", "e1", "--status", "cancelled"],
+            vec!["haste", "event", "delete", "e1"],
+            vec!["haste", "event", "cancel", "e1"],
+        ] {
+            assert!(Cli::try_parse_from(argv).is_err());
+        }
+        #[cfg(not(feature = "human"))]
+        for argv in [
+            vec!["haste", "connector", "gcal", "auth"],
+            vec!["haste", "tag", "add-event", "e1", "haste"],
+        ] {
+            assert!(Cli::try_parse_from(argv).is_err());
+        }
+    }
+
+    #[cfg(feature = "human")]
+    #[test]
+    fn human_calendar_verbs_map_to_human_requests() {
+        for argv in [
+            vec!["haste", "tag", "add-event", "e1", "haste"],
+            vec!["haste", "tag", "remove-event", "e1", "haste"],
+        ] {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            assert!(is_human_command(&cli.command));
+            assert!(build_body(&cli.command).is_ok());
+        }
+        let cli = Cli::try_parse_from(["haste", "connector", "gcal", "auth"]).unwrap();
+        assert!(is_human_command(&cli.command));
     }
 
     #[cfg(feature = "human")]

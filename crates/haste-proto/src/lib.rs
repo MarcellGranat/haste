@@ -5,7 +5,7 @@
 use std::io::{self, Read, Write};
 
 use haste_core::herdr::{AgentStatusRecord, MachineState};
-use haste_core::model::{Message, Reminder, Thread, Triage};
+use haste_core::model::{Event as CalendarEvent, Message, Reminder, Thread, Triage};
 use haste_core::policy::PrincipalKind;
 use haste_core::proposal::{Payload, Proposal, ProposalState};
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,9 @@ pub enum Topic {
     Notices,
 }
 
+// Requests live for one round trip, so the size gap between `Propose` and the small variants
+// costs nothing; boxing the payload would only churn every call site.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RequestBody {
@@ -139,6 +142,20 @@ pub enum RequestBody {
     },
     /// Human-only: counts and permission state of the Reminders connector (no titles).
     RemindersStatus,
+    /// Calendar events the caller may see, from `from` (unix seconds) on, soonest first.
+    EventsList {
+        from: i64,
+    },
+    /// Human-only: add a project tag (a known workspace label) to a calendar event.
+    EventTagAdd {
+        event_id: String,
+        tag: String,
+    },
+    /// Human-only: remove a project tag from a calendar event.
+    EventTagRemove {
+        event_id: String,
+        tag: String,
+    },
     /// Human-only: run an approved reminder proposal (`approved -> executing -> sent`).
     Execute {
         proposal_id: String,
@@ -205,6 +222,14 @@ pub struct MachineView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReminderView {
     pub reminder: Reminder,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// A calendar event with its project tags.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventView {
+    pub event: CalendarEvent,
     #[serde(default)]
     pub tags: Vec<String>,
 }
@@ -292,6 +317,9 @@ pub enum Response {
     },
     Reminders {
         reminders: Vec<ReminderView>,
+    },
+    Events {
+        events: Vec<EventView>,
     },
     RemindersStatus {
         status: RemindersStatusView,

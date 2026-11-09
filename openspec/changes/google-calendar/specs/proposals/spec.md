@@ -15,8 +15,8 @@ The proposal system SHALL support two calendar payloads: `CalendarCreate` with c
 Approval of a calendar proposal SHALL be a separate human action from creating the proposal. Execution SHALL happen only on approval and SHALL be audited with the Google event ID as detail.
 
 #### Scenario: Approval executes once
-- **WHEN** the human approves a calendar proposal
-- **THEN** the connector executes it once and the proposal records the result
+- **WHEN** the human approves a calendar proposal and then runs it
+- **THEN** the connector executes it once (the proposal moves through `executing` to `sent`) and the proposal records the Google event id as its result; an unknown outcome stays `executing` and is never re-run automatically
 
 #### Scenario: Rejected proposal executes nothing
 - **WHEN** the human rejects a calendar proposal

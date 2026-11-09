@@ -168,6 +168,19 @@ pub fn summary(p: &Proposal) -> String {
         Payload::ReminderComplete { reminder_id, .. } => {
             format!("complete reminder {reminder_id}")
         }
+        Payload::CalendarCreate {
+            title,
+            calendar,
+            project,
+            ..
+        } => format!(
+            "event '{title}' on {calendar}{}",
+            project
+                .as_ref()
+                .map(|p| format!(" [{p}]"))
+                .unwrap_or_default()
+        ),
+        Payload::CalendarUpdate { event_id, .. } => format!("update event {event_id}"),
     }
 }
 
@@ -726,7 +739,7 @@ impl App {
         let Some(p) = self.selected_proposal().cloned() else {
             return;
         };
-        if p.payload.is_reminder() {
+        if p.payload.is_reminder() || p.payload.is_calendar() {
             self.start_execute(&p);
             return;
         }
@@ -752,7 +765,7 @@ impl App {
         };
     }
 
-    /// `s` on a reminder proposal: run it in Reminders after one confirmation.
+    /// `s` on a reminder or calendar proposal: run it after one confirmation.
     fn start_execute(&mut self, p: &Proposal) {
         match p.state {
             ProposalState::Approved => {
@@ -764,7 +777,7 @@ impl App {
             }
             ProposalState::Executing => {
                 self.status = format!(
-                    "outcome unknown: check Reminders, then `haste proposal resolve {} [--done]`",
+                    "outcome unknown: check the app (Reminders or Google Calendar), then `haste proposal resolve {} [--done]`",
                     p.id
                 );
             }
@@ -799,7 +812,7 @@ impl App {
             Mode::ConfirmSend {
                 recipient, source, ..
             } => Some(format!("SEND to {recipient} via {source}? [y/N]")),
-            Mode::ConfirmExecute { what, .. } => Some(format!("Run in Reminders: {what}? [y/N]")),
+            Mode::ConfirmExecute { what, .. } => Some(format!("Run: {what}? [y/N]")),
             _ => None,
         }
     }
@@ -869,7 +882,7 @@ mod tests {
         press(&mut app, "j"); // onto the item
         assert!(press(&mut app, "s").is_empty());
         assert!(matches!(app.mode, Mode::ConfirmExecute { .. }));
-        assert!(app.confirm_prompt().unwrap().contains("Run in Reminders"));
+        assert!(app.confirm_prompt().unwrap().contains("Run:"));
         assert!(press(&mut app, "n").is_empty(), "anything but y cancels");
         press(&mut app, "s");
         assert_eq!(

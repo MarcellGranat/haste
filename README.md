@@ -21,6 +21,8 @@ The other connectors are separate, later changes (see the roadmap below).
 | `haste-herdr` | herdr link: local socket feed, the hub's `--machine` CLI feed, safe command builder, pinned protocol schema |
 | `haste-connector-icloud` | iCloud Mail connector (read-only IMAP), authorization helper `haste-icloud-auth`, Keychain secret store |
 | `haste-connector-reminders` | Apple Reminders connector: typed helper protocol, runner, and the Swift EventKit helper (`helper/`) |
+| `haste-google-oauth` | shared Google OAuth (PKCE loopback, token refresh, Keychain store, error mapping); each connector brings its own scopes and Keychain service |
+| `haste-connector-gcal` | Google Calendar connector (incremental read, approved create/update, no delete), consent helper `haste-gcal-auth` |
 | `haste-connector-gmail` | Gmail connector (read + plain-text drafts), OAuth helper `haste-gmail-auth`, Keychain token store |
 
 ```
@@ -310,6 +312,64 @@ proposal **and** run it. haste never deletes or edits a reminder.
 4. `haste email to-reminder <thread>`, approve, run: the reminder appears with only the identifier in its notes.
 5. Propose and run a completion for it, then delete it by hand in Reminders.
 
+## Google Calendar
+
+haste mirrors events from the calendars **you choose** (read-only), and an agent can *propose*
+creating or changing an event. Nothing is written until you approve the proposal **and** run it.
+There is no delete, no cancel, no attendee change, and no invitation is ever emailed
+(`sendUpdates=none` on every write).
+
+### Setup
+
+1. In your Google Cloud project enable the **Google Calendar API** (the same Desktop OAuth
+   client as Gmail works; the consent screen may stay in *Testing*, but then refresh tokens
+   expire after 7 days and you re-run the auth verb).
+2. Build the daemon with the calendar feature and the human CLI:
+   `cargo build --release -p hasted --features gcal -p haste-connector-gcal` and
+   `cargo build --release -p haste --features human --target-dir target/human`.
+3. Authorize once (opens your browser; the app is unverified, choose *Advanced*, then continue):
+
+```sh
+export HASTE_GMAIL_CLIENT_ID=...  HASTE_GMAIL_CLIENT_SECRET=...
+target/human/release/haste connector gcal auth
+```
+
+   It asks for `calendar.events` and `calendar.calendarlist.readonly`, stores the refresh token
+   in the Keychain under `com.haste.gcal` (Gmail's `com.haste.gmail` item is never touched), and
+   prints the calendars it found.
+4. Put the ids of the calendars to sync in `gcal.json` in the data directory (written with mode
+   `0600`, no secrets): `{"account": "you@example.org", "calendars": ["primary"]}`. An empty list
+   reads nothing.
+5. Restart `hasted`. The connector starts **engaged**: release it with
+   `haste connector release gcal`.
+
+### Using it
+
+- Agents: `haste event list`, `haste event create --calendar primary --title ".." --start <unix> --end <unix>`,
+  `haste event update <event-id> --title ".."`. Their `project` defaults to the workspace of their herdr pane.
+- You: approve (`a`), then run (`s` in the TUI, or `haste proposal execute <id>`). Tag an event with
+  `haste tag add-event <event-id> <project>`; a machine sees an event only if it is tagged with a
+  workspace that exists on that machine.
+- An update proposed against an event that changed afterwards is marked STALE and needs your
+  acknowledgement (`--ack-stale`).
+
+### Known limits
+
+- The first sync lists the whole calendar (Google only gives a sync token for an unwindowed
+  listing) but stores only events within 30 days back and 180 days ahead; recurring series are
+  kept as one master event, not expanded.
+- Changing the times of an all-day event is written as a timed event; use a timed event for that.
+- If a write times out the proposal stays `executing` (NEEDS CHECK) and is never re-run
+  automatically: look in Google Calendar, then `haste proposal resolve <id> [--done]`.
+
+### Manual smoke check (real calendar)
+
+1. Fresh install: `haste connector status` lists `gcal` engaged and no event is read.
+2. `connector gcal auth`, choose one test calendar, release, and see its events appear.
+3. Propose a throwaway event, approve and run it: it exists in Google Calendar and no invitation email went out.
+4. Propose a title change; an attendee-change proposal is refused. Engage `gcal` again: reads and approved writes are refused.
+   Delete the throwaway event by hand (haste never deletes).
+
 ## Policy
 
 | Action | Agent outcome |
@@ -369,6 +429,6 @@ cargo test -p haste --features human
 2. ~~`icloud-imap-connector` (IMAP with an app-specific password in the keychain)~~ done
 3. ~~`herdr-agents-panel` (status feeds, blocked agents, workspace tags)~~ done
 4. ~~`reminders-and-links` (EventKit helper, email to reminder)~~ implemented, awaiting live smoke check
-5. `imessage-calendar`
+5. ~~`google-calendar`~~ implemented, awaiting live smoke check; `imessage-connector` is parked until Messages is set up on the hub Mac
 6. `obsidian-notes` (Person notes, allow-listed append)
 7. `whatsapp-messenger-spike` (go/no-go, flagged connectors)

@@ -3,15 +3,17 @@
 use std::collections::BTreeSet;
 
 use haste_core::audit::read_recent;
-use haste_core::connector::{CallError, ConnectorError, DraftToSend, Guarded, NewReminder};
+use haste_core::connector::{
+    CallError, ConnectorError, DraftToSend, EventPatch, Guarded, NewEvent, NewReminder,
+};
 use haste_core::herdr::visible_to;
 use haste_core::model::{notes_snippet, Reminder, Source};
 use haste_core::policy::{evaluate, Action, Matrix, Outcome, Principal, PrincipalKind, Target};
 use haste_core::proposal::Payload;
 use haste_core::time::now_secs;
 use haste_proto::{
-    AuditLine, ConnectorView, ErrorCode, Event, Hints, ReminderView, RemindersStatusView, Request,
-    RequestBody, Response, ThreadView, PROTOCOL_VERSION,
+    AuditLine, ConnectorView, ErrorCode, Event, EventView, Hints, ReminderView,
+    RemindersStatusView, Request, RequestBody, Response, ThreadView, PROTOCOL_VERSION,
 };
 use haste_store::{AuthError, NewProposal, StoreError, ThreadFilter};
 
@@ -43,7 +45,8 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::ProposalStatus { .. }
         | RequestBody::ProposalList { .. }
         | RequestBody::AgentList
-        | RequestBody::RemindersList { .. } => Action::Read,
+        | RequestBody::RemindersList { .. }
+        | RequestBody::EventsList { .. } => Action::Read,
         RequestBody::Propose { payload, .. } => payload.action(),
         RequestBody::NoteAppend { .. } => Action::NoteAppend,
         RequestBody::Approve { .. } => Action::Approve,
@@ -62,6 +65,8 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::TagList
         | RequestBody::ReminderTagAdd { .. }
         | RequestBody::ReminderTagRemove { .. }
+        | RequestBody::EventTagAdd { .. }
+        | RequestBody::EventTagRemove { .. }
         | RequestBody::RemindersStatus
         | RequestBody::ResolveExecuting { .. }
         | RequestBody::Subscribe { .. } => Action::Manage,
@@ -87,6 +92,8 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::Send { .. } => "send",
         RequestBody::Execute { .. } => "execute",
         RequestBody::ReminderTagAdd { .. } => "reminder_tag_add",
+        RequestBody::EventTagAdd { .. } => "event_tag_add",
+        RequestBody::EventTagRemove { .. } => "event_tag_remove",
         RequestBody::ReminderTagRemove { .. } => "reminder_tag_remove",
         RequestBody::RemindersStatus => "reminders_status",
         RequestBody::ResolveExecuting { .. } => "resolve_executing",
@@ -415,6 +422,13 @@ fn execute(state: &State, principal: &Principal, body: RequestBody) -> Response 
         RequestBody::ReminderTagRemove { reminder_id, tag } => {
             change_reminder_tag(state, principal, &reminder_id, &tag, false)
         }
+        RequestBody::EventsList { from } => events_list(state, principal, from),
+        RequestBody::EventTagAdd { event_id, tag } => {
+            change_event_tag(state, principal, &event_id, &tag, true)
+        }
+        RequestBody::EventTagRemove { event_id, tag } => {
+            change_event_tag(state, principal, &event_id, &tag, false)
+        }
         RequestBody::RemindersStatus => reminders_status(state),
         RequestBody::Execute {
             proposal_id,
@@ -511,6 +525,68 @@ fn change_reminder_tag(
     }
 }
 
+/// Event reads pass through the same scope filter as thread and reminder reads.
+fn events_list(state: &State, principal: &Principal, from: i64) -> Response {
+    let tags = state.store.all_event_tags().unwrap_or_default();
+    let machine_labels = machine_labels_for(state, principal);
+    match state.store.list_events(from) {
+        Ok(rows) => Response::Events {
+            events: rows
+                .into_iter()
+                .filter_map(|event| {
+                    let own = tags.get(&event.id).cloned().unwrap_or_default();
+                    visible_to(principal, &own, machine_labels.as_ref())
+                        .then_some(EventView { event, tags: own })
+                })
+                .collect(),
+        },
+        Err(e) => map_store(&e),
+    }
+}
+
+fn change_event_tag(
+    state: &State,
+    actor: &Principal,
+    event_id: &str,
+    tag: &str,
+    add: bool,
+) -> Response {
+    let result = if add {
+        state.store.add_event_tag(event_id, tag)
+    } else {
+        state.store.remove_event_tag(event_id, tag)
+    };
+    match result {
+        Ok(changed) => {
+            if changed {
+                state.audit(
+                    &actor.id,
+                    "event.tag",
+                    if add { "added" } else { "removed" },
+                    Some(event_id),
+                    Some(&format!("tag={tag}")),
+                );
+            }
+            Response::Done
+        }
+        Err(e) => {
+            let reason = match &e {
+                StoreError::NotFound(_) => "event_not_found",
+                StoreError::Validation(m) if m.contains("not a known") => "unknown_tag",
+                _ => "invalid_tag",
+            };
+            state.audit(
+                &actor.id,
+                "event.tag",
+                "refused",
+                Some(event_id),
+                Some(reason),
+            );
+            map_store(&e)
+        }
+    }
+}
+
 fn reminders_status(state: &State) -> Response {
     let source = Source::Reminders;
     let registered = state.registered_sources().contains(&source);
@@ -568,6 +644,9 @@ fn certainly_no_effect(error: &CallError) -> bool {
         CallError::Connector(ConnectorError::Other(m)) => {
             m.starts_with("reminders helper refused")
                 || m.starts_with("reminders helper unavailable")
+                // Google rejected the request (4xx) or the event is gone: nothing was written
+                || m.starts_with("http 4")
+                || m == "event not found"
         }
         CallError::Connector(_) => false,
     }
@@ -601,8 +680,13 @@ fn execute_reminder(
         proposal_id: proposal_id.to_owned(),
         state: started.state,
     });
-    let Some(connector) = state.connector_for(&Source::Reminders) else {
-        return back_to_approved(state, actor, proposal_id, "no reminders connector", now);
+    let (source, no_connector) = if started.payload.is_calendar() {
+        (Source::GoogleCalendar, "no calendar connector")
+    } else {
+        (Source::Reminders, "no reminders connector")
+    };
+    let Some(connector) = state.connector_for(&source) else {
+        return back_to_approved(state, actor, proposal_id, no_connector, now);
     };
     let guard = Guarded {
         connector: connector.as_ref(),
@@ -660,18 +744,72 @@ fn execute_reminder(
                 Err(e) => Err(e),
             }
         }
+        Payload::CalendarCreate {
+            calendar,
+            title,
+            start,
+            end,
+            all_day,
+            attendees,
+            description,
+            ..
+        } => {
+            let new = NewEvent {
+                calendar: calendar.clone(),
+                title: title.clone(),
+                start: *start,
+                end: *end,
+                all_day: *all_day,
+                attendees: attendees.clone(),
+                description: description.clone(),
+            };
+            match handle.block_on(guard.create_event(&new)) {
+                Ok(receipt) => Ok(state
+                    .store
+                    .finish_event_create(proposal_id, &receipt.event, now)
+                    .map(|r| r.0)),
+                Err(e) => Err(e),
+            }
+        }
+        Payload::CalendarUpdate {
+            event_id, changes, ..
+        } => {
+            let external = match state.store.get_event(event_id) {
+                Ok(Some(e)) => e.external_id,
+                Ok(None) => {
+                    return back_to_approved(state, actor, proposal_id, "event not found", now)
+                }
+                Err(e) => return map_store(&e),
+            };
+            let patch = EventPatch {
+                title: changes.title.clone(),
+                start: changes.start,
+                end: changes.end,
+                description: changes.description.clone(),
+                location: changes.location.clone(),
+            };
+            match handle.block_on(guard.update_event(&external, &patch)) {
+                Ok(receipt) => {
+                    Ok(state
+                        .store
+                        .finish_event_update(proposal_id, &receipt.event, now))
+                }
+                Err(e) => Err(e),
+            }
+        }
         _ => {
-            return back_to_approved(state, actor, proposal_id, "not a reminder proposal", now);
+            return back_to_approved(state, actor, proposal_id, "not an executable proposal", now);
         }
     };
     match finished {
         Ok(Ok(p)) => {
+            // For calendar proposals the detail is the Google event id; never a title.
             state.audit(
                 &actor.id,
                 "proposal.execute",
                 "sent",
                 Some(proposal_id),
-                None,
+                p.result.as_deref().filter(|r| r.starts_with("event:")),
             );
             state.publish(Event::ProposalChanged {
                 proposal_id: proposal_id.to_owned(),
@@ -694,7 +832,7 @@ fn execute_reminder(
             let reason = match &e {
                 CallError::Connector(ConnectorError::Authorization(_)) => "permission needed",
                 CallError::KillSwitchEngaged => "kill switch engaged",
-                _ => "reminder write refused",
+                _ => "write refused",
             };
             back_to_approved(state, actor, proposal_id, reason, now)
         }
@@ -708,7 +846,7 @@ fn execute_reminder(
             );
             err(
                 ErrorCode::Internal,
-                "the outcome is unknown; the proposal stays 'executing' until you check Reminders",
+                "the outcome is unknown; the proposal stays 'executing' until you check the app",
             )
         }
     }
@@ -993,7 +1131,49 @@ fn prepare_reminder_payload(
     thread_id: Option<&str>,
     hinted_project: &Option<String>,
 ) -> Result<Payload, Box<Response>> {
+    // Refused fields, empty titles and impossible times never reach the store as pending.
+    if let Err(why) = payload.validate() {
+        return Err(Box::new(err(ErrorCode::Validation, why)));
+    }
     match payload {
+        Payload::CalendarCreate {
+            calendar,
+            title,
+            start,
+            end,
+            all_day,
+            attendees,
+            description,
+            project,
+        } => {
+            let project = project.or_else(|| hinted_project.clone());
+            check_known_project(state, project.as_deref())?;
+            Ok(Payload::CalendarCreate {
+                calendar,
+                title,
+                start,
+                end,
+                all_day,
+                attendees,
+                description,
+                project,
+            })
+        }
+        Payload::CalendarUpdate {
+            event_id,
+            changes,
+            project,
+            event_version,
+        } => match state.store.get_event(&event_id) {
+            Ok(Some(e)) => Ok(Payload::CalendarUpdate {
+                event_id,
+                changes,
+                project: project.or_else(|| hinted_project.clone()),
+                event_version: event_version.or(Some(e.version)),
+            }),
+            Ok(None) => Err(Box::new(err(ErrorCode::NotFound, "event not found"))),
+            Err(e) => Err(Box::new(map_store(&e))),
+        },
         Payload::ReminderCreate {
             title,
             due,
@@ -1036,6 +1216,21 @@ fn prepare_reminder_payload(
             Err(e) => Err(Box::new(map_store(&e))),
         },
         other => Ok(other),
+    }
+}
+
+/// A project given with a proposal must be a known workspace label.
+fn check_known_project(state: &State, project: Option<&str>) -> Result<(), Box<Response>> {
+    let Some(p) = project else {
+        return Ok(());
+    };
+    match state.store.known_tags() {
+        Ok(known) if known.contains(p) => Ok(()),
+        Ok(_) => Err(Box::new(err(
+            ErrorCode::Validation,
+            &format!("'{p}' is not a known project (workspace) label"),
+        ))),
+        Err(e) => Err(Box::new(map_store(&e))),
     }
 }
 

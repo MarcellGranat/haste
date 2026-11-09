@@ -891,7 +891,8 @@ fn kind(body: &RequestBody) -> Kind {
         | RequestBody::ProposalStatus { .. }
         | RequestBody::ProposalList { .. }
         | RequestBody::AgentList
-        | RequestBody::RemindersList { .. } => Kind::ScopedRead,
+        | RequestBody::RemindersList { .. }
+        | RequestBody::EventsList { .. } => Kind::ScopedRead,
         RequestBody::Propose { .. }
         | RequestBody::NoteAppend { .. }
         | RequestBody::Approve { .. }
@@ -909,6 +910,8 @@ fn kind(body: &RequestBody) -> Kind {
         | RequestBody::TagList
         | RequestBody::ReminderTagAdd { .. }
         | RequestBody::ReminderTagRemove { .. }
+        | RequestBody::EventTagAdd { .. }
+        | RequestBody::EventTagRemove { .. }
         | RequestBody::RemindersStatus
         | RequestBody::Execute { .. }
         | RequestBody::ResolveExecuting { .. }
@@ -968,6 +971,42 @@ async fn every_scoped_read_returns_only_what_each_kind_of_principal_may_see() {
         )
         .await;
     }
+    // three events: tagged haste, tagged dotfiles, untagged
+    let event = |ext: &str| haste_core::model::Event {
+        id: String::new(),
+        external_id: format!("primary/{ext}"),
+        calendar: "primary".into(),
+        title: format!("event {ext}"),
+        start_at: 4_000_000_000,
+        end_at: 4_000_003_600,
+        all_day: false,
+        status: "confirmed".into(),
+        attendees: vec![],
+        location: String::new(),
+        description_snippet: String::new(),
+        updated_at: 1,
+        missing_since: None,
+        version: 0,
+    };
+    rig.daemon
+        .state
+        .store
+        .upsert_events(&[event("e1"), event("e2"), event("e3")], &[])
+        .unwrap();
+    let mut event_by_ext = std::collections::HashMap::new();
+    for e in rig.daemon.state.store.list_events(0).unwrap() {
+        event_by_ext.insert(e.external_id.clone(), e.id);
+    }
+    for (ext, tag) in [("primary/e1", "haste"), ("primary/e2", "dotfiles")] {
+        human(
+            &rig,
+            RequestBody::EventTagAdd {
+                event_id: event_by_ext[ext].clone(),
+                tag: tag.into(),
+            },
+        )
+        .await;
+    }
     let owner = register(&rig, "agent-a", PrincipalKind::Agent).await;
     let other = register(&rig, "agent-b", PrincipalKind::Agent).await;
     let machine = register(&rig, "m1", PrincipalKind::Machine).await;
@@ -995,6 +1034,7 @@ async fn every_scoped_read_returns_only_what_each_kind_of_principal_may_see() {
         RequestBody::RemindersList {
             include_completed: true,
         },
+        RequestBody::EventsList { from: 0 },
     ];
     assert!(
         reads.iter().all(|r| kind(r) == Kind::ScopedRead),
@@ -1010,12 +1050,13 @@ async fn every_scoped_read_returns_only_what_each_kind_of_principal_may_see() {
             Response::Proposals { proposals } => proposals.len(),
             Response::Agents { machines } => machines.iter().map(|m| m.agents.len()).sum(),
             Response::Reminders { reminders } => reminders.len(),
+            Response::Events { events } => events.len(),
             Response::Error { .. } => 0,
             other => panic!("{other:?}"),
         }
     };
     let tokens = [rig.human.clone(), owner, other, machine, ghost];
-    let expected: [[usize; 5]; 6] = [
+    let expected: [[usize; 5]; 7] = [
         //        human owner other m1 ghost
         /* ThreadList     */ [3, 3, 3, 1, 0],
         /* ThreadShow dot */ [1, 1, 1, 0, 0],
@@ -1023,6 +1064,7 @@ async fn every_scoped_read_returns_only_what_each_kind_of_principal_may_see() {
         /* ProposalList   */ [1, 1, 0, 0, 0],
         /* AgentList      */ [3, 0, 0, 1, 0],
         /* RemindersList  */ [3, 3, 3, 1, 0],
+        /* EventsList      */ [3, 3, 3, 1, 0],
     ];
     for (row, read) in reads.iter().enumerate() {
         for (col, token) in tokens.iter().enumerate() {

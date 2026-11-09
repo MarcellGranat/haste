@@ -294,24 +294,7 @@ pub fn start_reminders_with(
     every_secs: u64,
 ) {
     use haste_connector_reminders::{CycleAudit, RemindersConnector};
-    use haste_core::model::Source;
 
-    // First install: engaged until a human releases it. A stored choice is never overridden.
-    let known = state
-        .store
-        .list_kill_switches()
-        .map(|all| all.iter().any(|(s, _)| s == &Source::Reminders))
-        .unwrap_or(true);
-    if !known {
-        let _ = state.store.set_kill_switch(&Source::Reminders, true);
-        state.audit(
-            "system",
-            "connector.engage",
-            "first_install",
-            Some("reminders"),
-            None,
-        );
-    }
     let audit_state = Arc::clone(state);
     // One audit entry per cycle: counts only, never a title, note or list name.
     let audit: CycleAudit = Arc::new(move |outcome, detail| {
@@ -374,6 +357,47 @@ pub fn start_gmail(state: &Arc<State>, base: &Path) -> Result<bool, String> {
         Arc::clone(state),
         connector,
         std::time::Duration::from_secs(GMAIL_SYNC_INTERVAL_SECS),
+    ));
+    Ok(true)
+}
+
+/// Load `gcal.json` and the Keychain items, register the Google Calendar connector (engaged on
+/// first install) and start its scheduled sync. Returns `Ok(false)` when Calendar has not been
+/// authorized yet.
+///
+/// # Errors
+/// An unreadable `gcal.json` or Keychain failure.
+#[cfg(feature = "gcal")]
+pub fn start_gcal(state: &Arc<State>, base: &Path) -> Result<bool, String> {
+    use haste_connector_gcal::consts::{GCAL_SYNC_INTERVAL_SECS, KEYCHAIN_SERVICE};
+    use haste_connector_gcal::{ClientCredentials, CycleAudit, GcalConfig, GcalConnector};
+    use haste_google_oauth::keychain::KeychainStore;
+
+    if !GcalConfig::path(base).exists() {
+        return Ok(false);
+    }
+    let config = GcalConfig::load(base)?;
+    let store = Arc::new(KeychainStore::new(KEYCHAIN_SERVICE));
+    let credentials = ClientCredentials::load(store.as_ref())?;
+    let audit_state = Arc::clone(state);
+    // One audit entry per cycle: counts only, never a title, attendee or location.
+    let audit: CycleAudit = Arc::new(move |outcome, detail| {
+        audit_state.audit(
+            "connector",
+            "gcal.sync",
+            outcome,
+            Some("gcal"),
+            Some(detail),
+        );
+    });
+    let connector: Arc<dyn haste_core::connector::Connector> = Arc::new(
+        GcalConnector::from_config(&config, &credentials, store, audit),
+    );
+    state.register_connector(Arc::clone(&connector));
+    tokio::spawn(scheduler::sync_loop(
+        Arc::clone(state),
+        connector,
+        std::time::Duration::from_secs(GCAL_SYNC_INTERVAL_SECS),
     ));
     Ok(true)
 }

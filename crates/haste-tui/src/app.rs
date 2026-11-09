@@ -1173,6 +1173,36 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_send_confirmation_names_the_chat_and_network_and_has_no_subject() {
+        let mut app = app_with(vec![proposal(
+            "p2",
+            "agent-a",
+            ProposalState::Approved,
+            false,
+        )]);
+        press(&mut app, "j");
+        app.show_send_preview(
+            "p2",
+            SendPreviewView {
+                source: "whatsapp".into(),
+                recipients: vec!["Family chat".into()],
+                subject: String::new(),
+                body_bytes: 12,
+                stale: false,
+                sends_remaining: 4,
+                recipients_digest: "digest-chat".into(),
+            },
+        );
+        let prompt = app.confirm_prompt().unwrap();
+        assert!(
+            prompt.contains("SEND to Family chat via whatsapp"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("subject"), "{prompt}");
+        assert!(prompt.contains("4 left"), "{prompt}");
+    }
+
+    #[test]
     fn a_proposal_that_needs_a_check_is_settled_only_after_a_confirmation_each_way() {
         let mut app = app_with(vec![
             reminder_proposal("e1", ProposalState::Executing),

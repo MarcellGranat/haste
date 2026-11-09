@@ -47,19 +47,19 @@
 ## 6. Human-only send path
 
 - [x] 6.1 Implement the send request builder: one `POST /v1/chats/{chatID}/messages` with the text only, refusing an attachment field and any chat not selected
-- [ ] 6.2 Implement the digest over chat id, displayed name and body SHA-256 (reuse the `recipients_digest` helper of `email-send`) with a test that a name change alters it
+- [x] 6.2 Implement the digest over chat id, displayed name and body SHA-256 (reuse the `recipients_digest` helper of `email-send`) with a test that a name change alters it
 - [x] 6.3 Implement the outcome classification table of design D8 onto `SendOutcome` (`NoEffect`, `Ambiguous`, `Sent`) and the `Authorization` and `Checkpoint` mapping
 - [x] 6.4 Implement the send method on each Beeper connector, performing exactly one request, with no retry, and the on-device and selection checks before any request
-- [ ] 6.5 Send tests: one request on success, no request on refusal before send (cloud, unselected, kill switch, cap, digest mismatch), 401 returns to approved with no retry, connection refused returns to approved, 429 returns to approved, timeout after write is ambiguous, 2xx without id is ambiguous, 400 returns to approved, 403 restriction opens the breaker
+- [x] 6.5 Send tests: one request on success, no request on refusal before send (cloud, unselected, kill switch, cap, digest mismatch), 401 returns to approved with no retry, connection refused returns to approved, 429 returns to approved, timeout after write is ambiguous, 2xx without id is ambiguous, 400 returns to approved, 403 restriction opens the breaker
 
 ## 7. Daemon wiring and dispatch (hasted)
 
-- [ ] 7.1 Register the three Beeper connectors with default-engaged switches, their own polling intervals and the `Guarded` wrapper
-- [ ] 7.2 Route the `SendPreview` and `Send` requests from `email-send` to the Beeper connectors for Beeper threads, without changing the email path
-- [ ] 7.3 Make approval of a Beeper draft skip provider draft creation, and test that no Beeper request occurs on approval
+- [x] 7.1 Register the three Beeper connectors with default-engaged switches, their own polling intervals and the `Guarded` wrapper
+- [x] 7.2 Route the `SendPreview` and `Send` requests from `email-send` to the Beeper connectors for Beeper threads, without changing the email path
+- [x] 7.3 Make approval of a Beeper draft skip provider draft creation, and test that no Beeper request occurs on approval
 - [ ] 7.4 Map Beeper refusals (`kill switch engaged`, `connector stopped by circuit breaker`, `recipients_changed`, caps, `unsupported network`, `cloud connection`) to distinct codes with no content in the message
-- [ ] 7.5 Audit `proposal.send` (sent, refused, needs_check, failed) with labels and the Beeper message id only
-- [ ] 7.6 Dispatch tests with fake connectors: one connector call per send, agent denied for preview and send, kill switch refuses preview and send, a restart leaves `executing` untouched
+- [x] 7.5 Audit `proposal.send` (sent, refused, needs_check, failed) with labels and the Beeper message id only
+- [x] 7.6 Dispatch tests with fake connectors: one connector call per send, agent denied for preview and send, kill switch refuses preview and send, a restart leaves `executing` untouched
 
 ## 8. Approvals TUI and status (haste-tui)
 
@@ -72,16 +72,16 @@
 ## 9. Cross-cutting tests and scope
 
 - [ ] 9.1 Extend the exhaustive per-principal scope-filter test to Beeper threads
-- [ ] 9.2 Add a scan test: a distinctive chat name, message text and token marker never appear in audit output or captured logs for success, refusal, not-running and ambiguous outcomes
-- [ ] 9.3 Add a test that agents and machine principals are denied `SendPreview` and `Send` for Beeper threads
-- [ ] 9.4 Add a test that the agent CLI and TUI crates do not depend on `haste-connector-beeper` or `reqwest`
+- [x] 9.2 Add a scan test: a distinctive chat name, message text and token marker never appear in audit output or captured logs for success, refusal, not-running and ambiguous outcomes
+- [x] 9.3 Add a test that agents and machine principals are denied `SendPreview` and `Send` for Beeper threads
+- [x] 9.4 Add a test that the agent CLI and TUI crates do not depend on `haste-connector-beeper` or `reqwest`
 
 ## 10. Documentation and checks
 
-- [ ] 10.1 Add a README section "Beeper (WhatsApp, Messenger, iMessage)": setup, the on-device requirement and the attestation, the token step, the selection file, the send limits, the Terms-of-Service risk (Beeper's own warning about suspension and that unofficial integrations can be blocked), and that this is for personal use
-- [ ] 10.2 Update the README Policy table (Beeper send: human only, one chat, confirmed) and the Spec coverage notes
-- [ ] 10.3 Update the roadmap entry `whatsapp-messenger-spike` to point to this change
-- [ ] 10.4 Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace`; record results
+- [x] 10.1 Add a README section "Beeper (WhatsApp, Messenger, iMessage)": setup, the on-device requirement and the attestation, the token step, the selection file, the send limits, the Terms-of-Service risk (Beeper's own warning about suspension and that unofficial integrations can be blocked), and that this is for personal use
+- [x] 10.2 Update the README Policy table (Beeper send: human only, one chat, confirmed) and the Spec coverage notes
+- [x] 10.3 Update the roadmap entry `whatsapp-messenger-spike` to point to this change
+- [x] 10.4 Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace`; record results
 
 ## 11. Manual smoke (human, real Beeper Desktop, throwaway chat)
 

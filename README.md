@@ -458,6 +458,62 @@ Appends are safe for several agents at once on a local disk. If the folder is sy
 Obsidian Sync) a conflict copy can appear when the sync service touches the same file. On this setup
 the folder is not synced; if you move it into a synced location, test it first.
 
+## Beeper (WhatsApp, Messenger, iMessage)
+
+WhatsApp, Messenger and iMessage come in through **Beeper Desktop's local API** (a loopback server
+on this Mac, `http://127.0.0.1:23373`). haste starts the three connectors **engaged**: nothing is
+requested until you release a source (`haste connector release whatsapp`, and so on).
+
+Read this before you turn it on:
+
+- **Terms of service.** These networks do not offer an official API for personal accounts, and
+  Beeper itself warns that accounts can be suspended and that unofficial integrations can be
+  blocked. This is for personal use, a few chats, human-paced sending. You carry that risk.
+- **On-device connections only.** A cloud-bridged account is refused. If Beeper does not say how
+  an account is connected, haste refuses it unless you attest it (`"on_device_attested": true`).
+- **Agents never send.** They propose a reply; approving it creates nothing at Beeper. Only you can
+  send, from the TUI, after a confirmation that shows the chat name, the network and the text.
+
+### Setup
+
+1. In Beeper Desktop, create an API token (Settings, Developers).
+2. Write `beeper.json` in the haste data directory. It is the only thing that selects what is read:
+
+   ```json
+   {
+     "accounts": [{ "id": "<account id>", "on_device_attested": false }],
+     "chats": { "allow": ["<chat id>"], "deny": [] },
+     "history_days": 30
+   }
+   ```
+
+   Unknown keys are rejected; the file must be mode 0600. Nothing outside `allow` is ever
+   requested, and `deny` wins over `allow`.
+3. `haste connector beeper auth` (the human build) asks for the token without echoing it, checks it
+   against the local API, and stores it in the Keychain (`com.haste.beeper`) only if the check
+   passes. It then lists your accounts and chats so you can fill in `beeper.json`.
+4. Restart `hasted`, then release the sources you want.
+
+### Sending (human only)
+
+The same flow as email (preview, confirmation, at most once, NEEDS CHECK when the outcome is
+unknown) with chat limits: one chat per message, at most 4 KiB of text, **5 per hour and 20 per
+day counted across all three networks**. The confirmation is bound to a digest of the chat id, the
+chat name and the text, so a changed chat is refused. A refused or failed send returns the
+proposal to approved; a send whose outcome is unknown stays `executing` and is never repeated.
+`haste` records only counts and fixed labels in the audit log, never a chat name or text.
+
+### Known limits
+
+The API field names are provisional until the live spike (`openspec/changes/beeper-messaging`,
+tasks 1.x) confirms them; unknown shapes fail closed. Attachments are shown as `[attachment]`
+and are never fetched or sent. Beeper Desktop must be running; when it is not, haste reports
+"not running" and does not retry in a loop.
+
+### Manual smoke check (real Beeper Desktop, throwaway chat)
+
+Tasks 11.x of the change walk through it: one throwaway chat, one account, one send.
+
 ## Policy
 
 | Action | Agent outcome |
@@ -465,7 +521,7 @@ the folder is not synced; if you move it into a synced location, test it first.
 | read | auto |
 | draft, archive, snooze, reminder.create | pending: a proposal is created, nothing happens until a human approves |
 | note.append | auto inside `people/**` and `tasks/**` only; daemon-performed, append-only, attributed |
-| send, send preview, approve, reject, manage | denied: human only; sending exists only in the TUI (the CLI has no `send` verb) |
+| send, send preview, approve, reject, manage | denied: human only; sending exists only in the TUI (the CLI has no `send` verb); a Beeper send is one chat, 5/hour and 20/day across networks |
 
 Proposals return a pending id immediately. They expire after **7 days**, are superseded by a
 newer proposal for the same thread and action, and carry a stale flag when the thread changed.
@@ -520,4 +576,4 @@ cargo test -p haste --features human
 4. ~~`reminders-and-links` (EventKit helper, email to reminder)~~ implemented, awaiting live smoke check
 5. ~~`google-calendar`~~ implemented, awaiting live smoke check; `imessage-connector` is parked until Messages is set up on the hub Mac
 6. ~~`obsidian-notes` (Person notes, one notes folder)~~ implemented, awaiting live smoke check
-7. `whatsapp-messenger-spike` (go/no-go, flagged connectors)
+7. ~~`beeper-messaging` (WhatsApp, Messenger, iMessage through Beeper Desktop; replaces `whatsapp-messenger-spike`)~~ implemented against fakes, awaiting the live spike and smoke check

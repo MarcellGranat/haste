@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod errors;
 pub mod keychain;
+pub mod testing;
 
 use std::time::Duration;
 

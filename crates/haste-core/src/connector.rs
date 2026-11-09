@@ -6,7 +6,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::model::{Message, Reminder, Source, Thread};
+use crate::model::{Event, Message, Reminder, Source, Thread};
 
 /// Attempts allowed for transient errors within one scheduled cycle.
 pub const TRANSIENT_ATTEMPTS_PER_CYCLE: u32 = 3;
@@ -23,6 +23,8 @@ pub struct Capabilities {
     pub reminders_create: bool,
     /// May mark a reminder completed (only after a human approved the proposal).
     pub reminders_complete: bool,
+    /// May create or update calendar events (only after a human approved the proposal).
+    pub calendar_write: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +40,14 @@ pub struct Sweep {
     pub complete: bool,
 }
 
+/// A complete, untruncated listing of one calendar: events of that calendar not stamped with
+/// `id` are marked missing. Scoped per calendar so a reset of one calendar never touches another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalendarSweep {
+    pub calendar: String,
+    pub id: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Batch {
     pub threads: Vec<Thread>,
@@ -45,6 +55,9 @@ pub struct Batch {
     /// Reminders (only the Reminders connector fills this).
     pub reminders: Vec<Reminder>,
     pub sweep: Option<Sweep>,
+    /// Calendar events (only the Calendar connector fills these).
+    pub events: Vec<Event>,
+    pub calendar_sweeps: Vec<CalendarSweep>,
     pub next_cursor: Option<Cursor>,
 }
 
@@ -90,6 +103,34 @@ pub struct NewReminder {
     pub notes: Option<String>,
 }
 
+/// A calendar event to create. Attendees are stored on the event but never emailed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewEvent {
+    pub calendar: String,
+    pub title: String,
+    pub start: i64,
+    pub end: i64,
+    pub all_day: bool,
+    pub attendees: Vec<String>,
+    pub description: Option<String>,
+}
+
+/// The only fields an update may carry: no attendees, no status.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EventPatch {
+    pub title: Option<String>,
+    pub start: Option<i64>,
+    pub end: Option<i64>,
+    pub description: Option<String>,
+    pub location: Option<String>,
+}
+
+/// Provider-side result of creating or updating an event: the event as it now exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventReceipt {
+    pub event: Event,
+}
+
 /// Provider-side result of creating a reminder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReminderReceipt {
@@ -123,6 +164,36 @@ pub trait Connector: Send + Sync {
         Box::pin(async {
             Err(ConnectorError::Unsupported(
                 "reminders cannot be created".into(),
+            ))
+        })
+    }
+
+    /// Whether the kill switch starts engaged when no state is persisted yet (fresh install).
+    fn default_engaged(&self) -> bool {
+        false
+    }
+
+    /// Create a calendar event. Default: unsupported. Only called after a human approved.
+    fn create_event<'a>(
+        &'a self,
+        _event: &'a NewEvent,
+    ) -> BoxFuture<'a, Result<EventReceipt, ConnectorError>> {
+        Box::pin(async {
+            Err(ConnectorError::Unsupported(
+                "events cannot be created".into(),
+            ))
+        })
+    }
+
+    /// Change an event (title, times, description, location). Default: unsupported.
+    fn update_event<'a>(
+        &'a self,
+        _external_id: &'a str,
+        _patch: &'a EventPatch,
+    ) -> BoxFuture<'a, Result<EventReceipt, ConnectorError>> {
+        Box::pin(async {
+            Err(ConnectorError::Unsupported(
+                "events cannot be updated".into(),
             ))
         })
     }
@@ -298,6 +369,60 @@ impl Guarded<'_> {
             }
             Err(e) => {
                 self.hooks.audit("reminder.complete", &source, "error");
+                Err(CallError::Connector(e))
+            }
+        }
+    }
+
+    /// Create a calendar event after a human approved the proposal. Never retried.
+    ///
+    /// # Errors
+    /// See [`CallError`].
+    pub async fn create_event(&self, event: &NewEvent) -> Result<EventReceipt, CallError> {
+        self.precheck(
+            self.connector.capabilities().calendar_write,
+            "calendar.create",
+        )?;
+        let source = self.connector.source();
+        match self.connector.create_event(event).await {
+            Ok(receipt) => {
+                self.hooks.audit("calendar.create", &source, "ok");
+                Ok(receipt)
+            }
+            Err(e @ (ConnectorError::Challenge(_) | ConnectorError::Checkpoint(_))) => {
+                Err(self.trip("calendar.create", e))
+            }
+            Err(e) => {
+                self.hooks.audit("calendar.create", &source, "error");
+                Err(CallError::Connector(e))
+            }
+        }
+    }
+
+    /// Update a calendar event after a human approved the proposal. Never retried.
+    ///
+    /// # Errors
+    /// See [`CallError`].
+    pub async fn update_event(
+        &self,
+        external_id: &str,
+        patch: &EventPatch,
+    ) -> Result<EventReceipt, CallError> {
+        self.precheck(
+            self.connector.capabilities().calendar_write,
+            "calendar.update",
+        )?;
+        let source = self.connector.source();
+        match self.connector.update_event(external_id, patch).await {
+            Ok(receipt) => {
+                self.hooks.audit("calendar.update", &source, "ok");
+                Ok(receipt)
+            }
+            Err(e @ (ConnectorError::Challenge(_) | ConnectorError::Checkpoint(_))) => {
+                Err(self.trip("calendar.update", e))
+            }
+            Err(e) => {
+                self.hooks.audit("calendar.update", &source, "error");
                 Err(CallError::Connector(e))
             }
         }
@@ -503,6 +628,59 @@ mod tests {
         ));
         assert!(matches!(
             block_on(g.complete_reminder("x")),
+            Err(CallError::Connector(ConnectorError::Unsupported(_)))
+        ));
+    }
+
+    #[test]
+    fn calendar_writes_are_gated_by_the_flag_and_default_to_unsupported() {
+        let h = TestHooks::default();
+        let none = connector(None, false);
+        let g = Guarded {
+            connector: &none,
+            hooks: &h,
+        };
+        let new = NewEvent {
+            calendar: "primary".into(),
+            title: "t".into(),
+            start: 1,
+            end: 2,
+            all_day: false,
+            attendees: vec![],
+            description: None,
+        };
+        assert_eq!(
+            block_on(g.create_event(&new)),
+            Err(CallError::CapabilityMissing("calendar.create"))
+        );
+        assert_eq!(
+            block_on(g.update_event("c/e", &EventPatch::default())),
+            Err(CallError::CapabilityMissing("calendar.update"))
+        );
+        assert_eq!(none.calls.load(Ordering::SeqCst), 0, "never invoked");
+        assert!(
+            !none.default_engaged(),
+            "existing connectors keep their default"
+        );
+        let flagged = TestConnector {
+            caps: Capabilities {
+                read: true,
+                calendar_write: true,
+                ..Default::default()
+            },
+            error: None,
+            calls: AtomicU32::new(0),
+        };
+        let g = Guarded {
+            connector: &flagged,
+            hooks: &h,
+        };
+        assert!(matches!(
+            block_on(g.create_event(&new)),
+            Err(CallError::Connector(ConnectorError::Unsupported(_)))
+        ));
+        assert!(matches!(
+            block_on(g.update_event("c/e", &EventPatch::default())),
             Err(CallError::Connector(ConnectorError::Unsupported(_)))
         ));
     }

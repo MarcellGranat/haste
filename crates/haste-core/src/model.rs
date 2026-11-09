@@ -14,6 +14,8 @@ pub enum Source {
     Email,
     /// Apple Reminders.
     Reminders,
+    /// Google Calendar.
+    GoogleCalendar,
     Other(String),
 }
 
@@ -29,6 +31,7 @@ impl Source {
             Self::Messenger => "messenger".into(),
             Self::Email => "email".into(),
             Self::Reminders => "reminders".into(),
+            Self::GoogleCalendar => "gcal".into(),
             Self::Other(name) => format!("other:{name}"),
         }
     }
@@ -44,6 +47,7 @@ impl From<String> for Source {
             "messenger" => Self::Messenger,
             "email" => Self::Email,
             "reminders" => Self::Reminders,
+            "gcal" => Self::GoogleCalendar,
             other => Self::Other(other.strip_prefix("other:").unwrap_or(other).to_owned()),
         }
     }
@@ -131,6 +135,7 @@ pub enum ObjectKind {
     Person,
     Proposal,
     Reminder,
+    Event,
 }
 
 impl ObjectKind {
@@ -142,6 +147,7 @@ impl ObjectKind {
             Self::Person => "person",
             Self::Proposal => "proposal",
             Self::Reminder => "reminder",
+            Self::Event => "event",
         }
     }
 
@@ -153,6 +159,7 @@ impl ObjectKind {
             "person" => Some(Self::Person),
             "proposal" => Some(Self::Proposal),
             "reminder" => Some(Self::Reminder),
+            "event" => Some(Self::Event),
             _ => None,
         }
     }
@@ -179,6 +186,55 @@ pub struct Reminder {
     pub missing_since: Option<i64>,
     /// Increases by one whenever a remote-owned field changes; drives stale detection.
     pub version: u64,
+}
+
+/// Most characters of an event description kept locally.
+pub const DESCRIPTION_SNIPPET_MAX: usize = 280;
+
+/// A calendar event mirrored from Google Calendar. Scope tags and triage state are stored apart
+/// (keyed by `external_id`) so a re-sync never drops them. Titles, descriptions, locations and
+/// attendee addresses are never written to logs or audit records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Event {
+    pub id: String,
+    /// `<calendarId>/<eventId>`; unique within the `gcal` source.
+    pub external_id: String,
+    pub calendar: String,
+    pub title: String,
+    /// Unix seconds (start of the day in UTC for all-day events).
+    pub start_at: i64,
+    pub end_at: i64,
+    pub all_day: bool,
+    /// `confirmed`, `tentative` or `cancelled`.
+    pub status: String,
+    /// Attendee email addresses.
+    #[serde(default)]
+    pub attendees: Vec<String>,
+    /// Local only: never audited.
+    #[serde(default)]
+    pub location: String,
+    /// Local only, cut to [`DESCRIPTION_SNIPPET_MAX`]: never audited.
+    #[serde(default)]
+    pub description_snippet: String,
+    /// The provider's last-modified time (unix seconds).
+    pub updated_at: i64,
+    /// Set when a complete listing no longer returned it; cleared when it reappears.
+    pub missing_since: Option<i64>,
+    /// Increases by one whenever a remote-owned field changes; drives stale detection.
+    pub version: u64,
+}
+
+impl Event {
+    #[must_use]
+    pub fn location_present(&self) -> bool {
+        !self.location.is_empty()
+    }
+}
+
+/// Cut a description down to [`DESCRIPTION_SNIPPET_MAX`] characters.
+#[must_use]
+pub fn description_snippet(text: &str) -> String {
+    text.chars().take(DESCRIPTION_SNIPPET_MAX).collect()
 }
 
 /// Cut a notes text down to [`NOTES_SNIPPET_MAX`] characters.

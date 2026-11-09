@@ -127,6 +127,32 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (external_id, tag)
     );
     ",
+    // 4: Google Calendar events. Same shape as reminders: tags apart, keyed by external id.
+    "
+    CREATE TABLE events (
+        id TEXT PRIMARY KEY,
+        external_id TEXT NOT NULL UNIQUE,
+        calendar TEXT NOT NULL,
+        title TEXT NOT NULL,
+        start_at INTEGER NOT NULL,
+        end_at INTEGER NOT NULL,
+        all_day INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'confirmed',
+        attendees TEXT NOT NULL DEFAULT '[]',
+        location TEXT NOT NULL DEFAULT '',
+        description_snippet TEXT NOT NULL DEFAULT '',
+        updated_at INTEGER NOT NULL DEFAULT 0,
+        missing_since INTEGER,
+        version INTEGER NOT NULL DEFAULT 1,
+        sweep_id TEXT
+    );
+    CREATE INDEX events_start ON events (start_at);
+    CREATE TABLE event_scope_tags (
+        external_id TEXT NOT NULL,
+        tag TEXT NOT NULL,
+        PRIMARY KEY (external_id, tag)
+    );
+    ",
 ];
 
 /// Highest schema version this binary understands.

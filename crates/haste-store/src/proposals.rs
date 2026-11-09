@@ -89,7 +89,9 @@ pub(crate) fn set_state(
 /// Reflect the current thread version in `stale` for open proposals (read-only).
 fn apply_live_stale(conn: &Connection, p: &mut Proposal) -> StoreResult<()> {
     if matches!(p.state, ProposalState::Pending | ProposalState::Approved) {
-        if crate::reminders::reminder_stale(conn, &p.payload)? {
+        if crate::reminders::reminder_stale(conn, &p.payload)?
+            || crate::events::event_stale(conn, &p.payload)?
+        {
             p.stale = true;
         }
         if let (Some(id), Some(recorded)) = (&p.source_thread_id, p.source_thread_version) {
@@ -106,7 +108,8 @@ pub(crate) fn refresh_stale(conn: &Connection, p: &Proposal) -> StoreResult<bool
     let stale = match (&p.source_thread_id, p.source_thread_version) {
         (Some(id), Some(recorded)) => thread_version(conn, id)?.is_some_and(|now| now != recorded),
         _ => false,
-    } || crate::reminders::reminder_stale(conn, &p.payload)?;
+    } || crate::reminders::reminder_stale(conn, &p.payload)?
+        || crate::events::event_stale(conn, &p.payload)?;
     if stale != p.stale {
         conn.execute(
             "UPDATE proposals SET stale = ?2 WHERE id = ?1",
@@ -281,7 +284,9 @@ impl Store {
                     )?,
                     Payload::Draft { .. }
                     | Payload::ReminderCreate { .. }
-                    | Payload::ReminderComplete { .. } => {}
+                    | Payload::ReminderComplete { .. }
+                    | Payload::CalendarCreate { .. }
+                    | Payload::CalendarUpdate { .. } => {}
                 }
             }
             let updated = set_state(&tx, &p, ProposalState::Approved, None, now)?;

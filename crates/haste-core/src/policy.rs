@@ -53,6 +53,8 @@ pub enum Action {
     Snooze,
     ReminderCreate,
     ReminderComplete,
+    CalendarCreate,
+    CalendarUpdate,
     NoteAppend,
     Send,
     Approve,
@@ -61,13 +63,15 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 13] = [
         Self::Read,
         Self::Draft,
         Self::Archive,
         Self::Snooze,
         Self::ReminderCreate,
         Self::ReminderComplete,
+        Self::CalendarCreate,
+        Self::CalendarUpdate,
         Self::NoteAppend,
         Self::Send,
         Self::Approve,
@@ -84,6 +88,8 @@ impl Action {
             Self::Snooze => "snooze",
             Self::ReminderCreate => "reminder.create",
             Self::ReminderComplete => "reminder.complete",
+            Self::CalendarCreate => "calendar.create",
+            Self::CalendarUpdate => "calendar.update",
             Self::NoteAppend => "note.append",
             Self::Send => "send",
             Self::Approve => "approve",
@@ -175,7 +181,12 @@ impl Matrix {
 pub fn is_never_auto(action: Action) -> bool {
     matches!(
         action,
-        Action::Archive | Action::Snooze | Action::ReminderCreate | Action::ReminderComplete
+        Action::Archive
+            | Action::Snooze
+            | Action::ReminderCreate
+            | Action::ReminderComplete
+            | Action::CalendarCreate
+            | Action::CalendarUpdate
     )
 }
 
@@ -190,7 +201,9 @@ pub fn default_outcome(kind: PrincipalKind, action: Action) -> Outcome {
             | Action::Archive
             | Action::Snooze
             | Action::ReminderCreate
-            | Action::ReminderComplete => Outcome::Pending,
+            | Action::ReminderComplete
+            | Action::CalendarCreate
+            | Action::CalendarUpdate => Outcome::Pending,
             Action::Send | Action::Approve | Action::Reject | Action::Manage => Outcome::Denied,
         },
         PrincipalKind::Machine => match action {
@@ -409,6 +422,45 @@ mod tests {
         assert_eq!(
             Action::parse("reminder.complete"),
             Some(Action::ReminderComplete)
+        );
+    }
+
+    #[test]
+    fn calendar_actions_are_pending_for_agents_never_auto_and_delete_is_undefined() {
+        let agent = principal(PrincipalKind::Agent);
+        let m = matrix_for(&agent);
+        for action in [Action::CalendarCreate, Action::CalendarUpdate] {
+            assert_eq!(
+                evaluate(&agent, action, &Target::None, &m).outcome,
+                Outcome::Pending,
+                "{action:?}"
+            );
+            let machine = principal(PrincipalKind::Machine);
+            assert_eq!(
+                evaluate(&machine, action, &Target::None, &matrix_for(&machine)).outcome,
+                Outcome::Denied,
+                "machines are read-only"
+            );
+            for kind in [
+                PrincipalKind::Human,
+                PrincipalKind::Agent,
+                PrincipalKind::Machine,
+            ] {
+                let p = principal(kind);
+                let mut matrix = matrix_for(&p);
+                matrix.set(&p.id, action, Outcome::Auto);
+                assert_ne!(
+                    evaluate(&p, action, &Target::None, &matrix).outcome,
+                    Outcome::Auto,
+                    "{kind:?} {action:?}"
+                );
+            }
+        }
+        // there is no delete action to grant, request or approve
+        assert_eq!(Action::parse("calendar.delete"), None);
+        assert_eq!(
+            Action::parse("calendar.create"),
+            Some(Action::CalendarCreate)
         );
     }
 

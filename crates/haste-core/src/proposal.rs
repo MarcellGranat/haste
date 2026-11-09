@@ -120,6 +120,127 @@ pub enum Payload {
         #[serde(default)]
         reminder_version: Option<u64>,
     },
+    /// A new Google Calendar event. Attendees are never emailed by haste (`sendUpdates=none`).
+    CalendarCreate {
+        /// Google calendar id.
+        calendar: String,
+        title: String,
+        start: i64,
+        end: i64,
+        #[serde(default)]
+        all_day: bool,
+        #[serde(default)]
+        attendees: Vec<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        project: Option<String>,
+    },
+    /// A change to an existing event, limited to the allow-list in [`EventChanges`].
+    CalendarUpdate {
+        /// Haste id of the event.
+        event_id: String,
+        changes: EventChanges,
+        #[serde(default)]
+        project: Option<String>,
+        /// The event's version when the proposal was made; a change makes it stale.
+        #[serde(default)]
+        event_version: Option<u64>,
+    },
+}
+
+/// What a `CalendarUpdate` may change: title, start, end, description and location. `attendees`
+/// and `status` exist only so a proposal naming them can be refused with a clear error
+/// instead of failing to parse; they must always be `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventChanges {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub start: Option<i64>,
+    #[serde(default)]
+    pub end: Option<i64>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+    /// Always refused.
+    #[serde(default)]
+    pub attendees: Option<Vec<String>>,
+    /// Always refused.
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+impl EventChanges {
+    /// # Errors
+    /// A reason when the change names attendees or a status, changes nothing, or is incoherent.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.attendees.is_some() {
+            return Err("attendee changes are not allowed");
+        }
+        if self.status.is_some() {
+            return Err("status changes (including cancelling) are not allowed");
+        }
+        if self.title.is_none()
+            && self.start.is_none()
+            && self.end.is_none()
+            && self.description.is_none()
+            && self.location.is_none()
+        {
+            return Err("the update changes nothing");
+        }
+        if self.title.as_deref().is_some_and(|t| t.trim().is_empty()) {
+            return Err("the title cannot be empty");
+        }
+        if let (Some(s), Some(e)) = (self.start, self.end) {
+            if e <= s {
+                return Err("the event must end after it starts");
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Payload {
+    /// Checks that do not need the store: refused fields, empty titles, impossible times.
+    ///
+    /// # Errors
+    /// A reason suitable for a validation error.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        match self {
+            Self::CalendarCreate {
+                calendar,
+                title,
+                start,
+                end,
+                ..
+            } => {
+                if calendar.trim().is_empty() {
+                    return Err("a calendar is required");
+                }
+                if title.trim().is_empty() {
+                    return Err("the title cannot be empty");
+                }
+                if end <= start {
+                    return Err("the event must end after it starts");
+                }
+                Ok(())
+            }
+            Self::CalendarUpdate { changes, .. } => changes.validate(),
+            _ => Ok(()),
+        }
+    }
+
+    /// Calendar payloads, executed on a human's explicit action like reminders.
+    #[must_use]
+    pub fn is_calendar(&self) -> bool {
+        matches!(
+            self,
+            Self::CalendarCreate { .. } | Self::CalendarUpdate { .. }
+        )
+    }
 }
 
 impl Payload {
@@ -131,6 +252,8 @@ impl Payload {
             Self::Snooze { .. } => Action::Snooze,
             Self::ReminderCreate { .. } => Action::ReminderCreate,
             Self::ReminderComplete { .. } => Action::ReminderComplete,
+            Self::CalendarCreate { .. } => Action::CalendarCreate,
+            Self::CalendarUpdate { .. } => Action::CalendarUpdate,
         }
     }
 
@@ -233,6 +356,79 @@ mod tests {
             serde_json::from_str(r#"{"kind":"reminder_create","title":"x","project":null}"#)
                 .unwrap();
         assert_eq!(old.action(), Action::ReminderCreate);
+    }
+
+    #[test]
+    fn calendar_payloads_map_to_actions_and_the_update_allow_list_is_enforced() {
+        let create = Payload::CalendarCreate {
+            calendar: "primary".into(),
+            title: "Sync".into(),
+            start: 100,
+            end: 200,
+            all_day: false,
+            attendees: vec![],
+            description: None,
+            project: Some("haste".into()),
+        };
+        assert_eq!(create.action(), Action::CalendarCreate);
+        assert!(create.is_calendar() && !create.is_reminder());
+        assert_eq!(create.validate(), Ok(()));
+        let update = |changes: EventChanges| Payload::CalendarUpdate {
+            event_id: "e".into(),
+            changes,
+            project: None,
+            event_version: None,
+        };
+        let ok = EventChanges {
+            title: Some("New".into()),
+            ..EventChanges::default()
+        };
+        assert_eq!(update(ok.clone()).action(), Action::CalendarUpdate);
+        assert_eq!(update(ok).validate(), Ok(()));
+        for (bad, why) in [
+            (
+                EventChanges {
+                    attendees: Some(vec!["a@b".into()]),
+                    title: Some("x".into()),
+                    ..EventChanges::default()
+                },
+                "attendee",
+            ),
+            (
+                EventChanges {
+                    status: Some("cancelled".into()),
+                    ..EventChanges::default()
+                },
+                "status",
+            ),
+            (EventChanges::default(), "nothing"),
+            (
+                EventChanges {
+                    start: Some(5),
+                    end: Some(5),
+                    ..EventChanges::default()
+                },
+                "end after",
+            ),
+        ] {
+            let err = update(bad).validate().unwrap_err();
+            assert!(err.contains(why), "{err}");
+        }
+        // a field outside the allow-list does not even parse
+        let bad: Result<EventChanges, _> =
+            serde_json::from_str(r#"{"title":"x","organizer":"me@x"}"#);
+        assert!(bad.is_err());
+        let end_before_start = Payload::CalendarCreate {
+            calendar: "primary".into(),
+            title: "x".into(),
+            start: 9,
+            end: 9,
+            all_day: false,
+            attendees: vec![],
+            description: None,
+            project: None,
+        };
+        assert!(end_before_start.validate().is_err());
     }
 
     #[test]

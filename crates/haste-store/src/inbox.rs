@@ -412,6 +412,7 @@ impl Store {
                     ObjectKind::Person => "people",
                     ObjectKind::Proposal => "proposals",
                     ObjectKind::Reminder => "reminders",
+                    ObjectKind::Event => "events",
                 };
                 let exists: bool = conn.query_row(
                     &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = ?1)"),
@@ -441,7 +442,11 @@ impl Store {
     }
 }
 
-fn insert_identifier(conn: &Connection, person_id: &str, ident: &Identifier) -> StoreResult<()> {
+pub(crate) fn insert_identifier(
+    conn: &Connection,
+    person_id: &str,
+    ident: &Identifier,
+) -> StoreResult<()> {
     let owner: Option<String> = conn
         .query_row(
             "SELECT person_id FROM identifiers WHERE kind = ?1 AND value = ?2",

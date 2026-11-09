@@ -11,10 +11,10 @@
 
 ## 3. Core model and policy
 
-- [ ] 3.1 Add `Source::GoogleCalendar` (name `gcal`) in `haste-core`
-- [ ] 3.2 Add the `Event` record and its store table with local-field separation for scope tags and triage state
+- [x] 3.1 Add `Source::GoogleCalendar` (name `gcal`) in `haste-core`
+- [x] 3.2 Add the `Event` record and its store table with local-field separation for scope tags and triage state
 - [ ] 3.3 Add `CalendarCreate` and `CalendarUpdate` proposal payloads, with the `CalendarUpdate` field allow-list enforced at creation
-- [ ] 3.4 Add `calendar.create` and `calendar.update` to the policy gate as `pending` for agents; confirm `calendar.delete` resolves to `denied` as an undefined action
+- [x] 3.4 Add `calendar.create` and `calendar.update` to the policy gate as `pending` for agents; confirm `calendar.delete` resolves to `denied` as an undefined action
 - [ ] 3.5 Add the default-engaged flag to the connector descriptor and a test that a fresh store starts the flagged connector engaged
 - [x] 3.6 Coordinate with the `reminders-and-links` capability-flag and proposal-kind set before adding flags, and rebase if that change has landed
 

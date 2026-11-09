@@ -321,9 +321,9 @@ impl Store {
         self.write(move |conn| {
             let tx = conn.transaction()?;
             let p = load(&tx, &id)?;
-            if !p.payload.is_reminder() {
+            if !p.payload.is_reminder() && !p.payload.is_calendar() {
                 return Err(StoreError::IllegalTransition(
-                    "only reminder proposals are executed".into(),
+                    "only reminder and calendar proposals are executed".into(),
                 ));
             }
             transition(p.state, ProposalState::Executing).map_err(|e| {

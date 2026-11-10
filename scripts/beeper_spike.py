@@ -196,9 +196,8 @@ def main() -> None:
         per_network[network] = per_network.get(network, 0) + 1
     print("   accounts per network value:", per_network)
     for account in accounts:
-        bridge = (
-            account.get("bridge") if isinstance(account.get("bridge"), dict) else {}
-        )
+        raw = account.get("bridge")
+        bridge: dict[str, Any] = raw if isinstance(raw, dict) else {}
         print(
             f"   ACCOUNT network={account.get('network')!r} bridge.type={bridge.get('type')!r}"
             f" bridge.provider={bridge.get('provider')!r} status={account.get('status')!r}"

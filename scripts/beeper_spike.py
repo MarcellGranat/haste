@@ -77,7 +77,9 @@ def nested(prefix: str, value: Any, depth: int = 2) -> None:
     """Print key names and value types of nested objects, and values of enum-like short strings."""
     if not isinstance(value, dict) or depth == 0:
         return
-    for key, inner in sorted(value.items()):
+    for raw_key, inner in sorted(value.items()):
+        # a key that looks like a user, room or event id is never printed
+        key = "<id-like key>" if re.match(r"^[@!$#]|:", raw_key) else raw_key
         shown = ""
         if (
             ENUMISH.search(key)
@@ -193,6 +195,14 @@ def main() -> None:
         network = pick(account, "network", "type", "platform") or "?"
         per_network[network] = per_network.get(network, 0) + 1
     print("   accounts per network value:", per_network)
+    for account in accounts:
+        bridge = (
+            account.get("bridge") if isinstance(account.get("bridge"), dict) else {}
+        )
+        print(
+            f"   ACCOUNT network={account.get('network')!r} bridge.type={bridge.get('type')!r}"
+            f" bridge.provider={bridge.get('provider')!r} status={account.get('status')!r}"
+        )
 
     account_id = pick(accounts[0], "id", "accountID") if accounts else None
     if account_id:

@@ -10,6 +10,7 @@ import getpass
 import json
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
@@ -72,6 +73,22 @@ def items_of(body: Any) -> list[dict[str, Any]]:
     return []
 
 
+def nested(prefix: str, value: Any, depth: int = 2) -> None:
+    """Print key names and value types of nested objects, and values of enum-like short strings."""
+    if not isinstance(value, dict) or depth == 0:
+        return
+    for key, inner in sorted(value.items()):
+        shown = ""
+        if (
+            ENUMISH.search(key)
+            and isinstance(inner, (str, bool))
+            and len(str(inner)) <= MAX_ENUM_LEN
+        ):
+            shown = f" = {inner!r}"
+        print(f"   {prefix}.{key}: {shape_of(inner)}{shown}")
+        nested(f"{prefix}.{key}", inner, depth - 1)
+
+
 def describe(label: str, reply: Reply) -> list[dict[str, Any]]:
     print(f"\n== {label}: status {reply.status}")
     if not isinstance(reply.body, (dict, list)):
@@ -103,6 +120,14 @@ def describe(label: str, reply: Reply) -> list[dict[str, Any]]:
         print(f"   field {key}: {sorted(kinds)}")
     for key, values in sorted(enums.items()):
         print(f"   VALUES of {key}: {sorted(values)}")
+    if items:
+        for key, value in items[0].items():
+            if isinstance(value, dict):
+                nested(f"item.{key}", value)
+    if isinstance(reply.body, dict):
+        for key, value in reply.body.items():
+            if isinstance(value, dict):
+                nested(key, value)
     return items
 
 
@@ -118,9 +143,47 @@ def pick(item: dict[str, Any], *names: str) -> str | None:
     return None
 
 
+def ids(items: list[dict[str, Any]]) -> list[str]:
+    return [str(i.get("id")) for i in items]
+
+
+def paging(chat_id: str, token: str) -> None:
+    """Which cursor and direction fetch OLDER messages? Prints counts and booleans only."""
+    first = get(f"/v1/chats/{chat_id}/messages?limit=3", token)
+    if not isinstance(first.body, dict):
+        return
+    page1 = items_of(first.body)
+    stamps = [str(m.get("timestamp")) for m in page1]
+    print("\n== paging experiment (3 per page)")
+    print(
+        f"   page 1: {len(page1)} items; timestamps newest-first: {stamps == sorted(stamps, reverse=True)};"
+        f" oldest-first: {stamps == sorted(stamps)}; hasMore={first.body.get('hasMore')}"
+    )
+    for name in ("oldestCursor", "newestCursor"):
+        cursor = first.body.get(name)
+        if not isinstance(cursor, str):
+            continue
+        for extra in ("", "&direction=before", "&direction=after"):
+            r = get(
+                f"/v1/chats/{chat_id}/messages?limit=3&cursor={urllib.parse.quote(cursor)}{extra}",
+                token,
+            )
+            page = items_of(r.body)
+            stamps2 = [str(m.get("timestamp")) for m in page]
+            overlap = len(set(ids(page)) & set(ids(page1)))
+            older = bool(stamps2) and bool(stamps) and max(stamps2) <= min(stamps)
+            newer = bool(stamps2) and bool(stamps) and min(stamps2) >= max(stamps)
+            print(
+                f"   cursor={name}{extra or ' (no direction)'}: status {r.status}, items {len(page)},"
+                f" overlap with page 1: {overlap}, strictly older: {older}, strictly newer: {newer}"
+            )
+
+
 def main() -> None:
     print("1.7a wrong token (expect a 401/403 error shape):")
     describe("GET /v1/info with a wrong token", get("/v1/info", "wrong-token"))
+    describe("GET /v1/accounts with a wrong token", get("/v1/accounts", "wrong-token"))
+    describe("GET /v1/accounts with no token", get("/v1/accounts", None))
     token = getpass.getpass("Beeper API token (hidden): ")
 
     describe("GET /v1/info", get("/v1/info", token))

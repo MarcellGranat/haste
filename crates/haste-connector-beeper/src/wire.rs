@@ -21,8 +21,11 @@ pub struct WireAccount {
         alias = "bridgeType"
     )]
     pub connection: Option<String>,
+    /// The bridge object as Beeper reports it (spike 2026-11-10: present on every account; its
+    /// keys decide whether it can tell on-device from cloud). Kept raw, never stored.
+    #[serde(default)]
+    pub bridge: Option<Value>,
 }
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct WireChat {
     #[serde(alias = "chatID", alias = "chatId")]
@@ -53,6 +56,11 @@ pub struct WireMessage {
     pub kind: Option<String>,
     #[serde(default, alias = "isSender", alias = "fromMe")]
     pub is_sender: bool,
+    /// Spike 2026-11-10: messages carry `isDeleted` and `isHidden`; both are skipped.
+    #[serde(default, rename = "isDeleted")]
+    pub is_deleted: bool,
+    #[serde(default, rename = "isHidden")]
+    pub is_hidden: bool,
 }
 
 /// A list answer: `{items, hasMore, cursor}` or a bare array.

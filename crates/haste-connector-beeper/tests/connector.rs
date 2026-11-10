@@ -51,7 +51,14 @@ fn serve(world: &Shared) -> impl Fn(&Recorded) -> (u16, String) + Send + Sync + 
                 },
                 r#"{"version":"x"}"#.into(),
             ),
-            ("GET", ["v1", "accounts"]) => (200, json!({ "items": w.accounts }).to_string()),
+            ("GET", ["v1", "accounts"]) => (
+                if w.info_status == 0 {
+                    200
+                } else {
+                    w.info_status
+                },
+                json!({ "items": w.accounts }).to_string(),
+            ),
             ("GET", ["v1", "chats"]) => (200, json!({ "items": w.chats }).to_string()),
             ("GET", ["v1", "chats", id]) => match w.chats.iter().find(|c| c["id"] == *id) {
                 Some(c) => (200, c.to_string()),

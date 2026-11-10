@@ -125,11 +125,13 @@ impl BeeperClient {
     }
 
     /// The cheapest authenticated call: proves the token and that Beeper Desktop is running.
+    /// `/v1/info` is NOT authenticated (spike 2026-11-10: it answers 200 to a wrong token), so the
+    /// account list is the check.
     ///
     /// # Errors
     /// `Authorization` when Beeper is not running or the token is missing or rejected.
     pub async fn check(&self) -> Result<(), ConnectorError> {
-        let _: serde_json::Value = self.get(&["v1", "info"], &[]).await?;
+        let _: serde_json::Value = self.get(&["v1", "accounts"], &[]).await?;
         Ok(())
     }
 

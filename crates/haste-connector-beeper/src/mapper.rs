@@ -79,6 +79,14 @@ pub struct Mapped {
 /// attachment's name.
 #[must_use]
 pub fn map_message(chat_id: &str, source: &Source, wire: &WireMessage) -> Option<Mapped> {
+    // Reactions, deleted and hidden messages are not conversation text (spike 2026-11-10).
+    let reaction = wire
+        .kind
+        .as_deref()
+        .is_some_and(|k| k.eq_ignore_ascii_case("reaction"));
+    if reaction || wire.is_deleted || wire.is_hidden {
+        return None;
+    }
     let timestamp = parse_rfc3339(&wire.timestamp)?;
     let sort_key = wire.sort_key.as_ref().and_then(sort_key_string)?;
     let is_text = wire
@@ -179,6 +187,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(empty.message.body_text, ATTACHMENT_LABEL);
+    }
+
+    #[test]
+    fn reactions_deleted_and_hidden_messages_are_skipped() {
+        for json in [
+            r#"{"id":"m","type":"REACTION","text":"x","timestamp":"2026-11-09T10:00:00Z","sortKey":"1"}"#,
+            r#"{"id":"m","type":"TEXT","text":"x","isDeleted":true,"timestamp":"2026-11-09T10:00:00Z","sortKey":"1"}"#,
+            r#"{"id":"m","type":"TEXT","text":"x","isHidden":true,"timestamp":"2026-11-09T10:00:00Z","sortKey":"1"}"#,
+        ] {
+            assert!(
+                map_message("c", &Source::Whatsapp, &wire(json)).is_none(),
+                "{json}"
+            );
+        }
+        let plain = r#"{"id":"m","type":"TEXT","text":"x","timestamp":"2026-11-09T10:00:00Z","sortKey":"1"}"#;
+        assert!(map_message("c", &Source::Whatsapp, &wire(plain)).is_some());
     }
 
     #[test]

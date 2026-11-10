@@ -32,6 +32,17 @@ fn home_from_args() -> Option<PathBuf> {
     None
 }
 
+/// `--find <text>`: list only chats whose name matches, using Beeper's search.
+fn find_from_args() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--find" {
+            return args.next();
+        }
+    }
+    None
+}
+
 /// Best effort: ask the running daemon to audit the authorization.
 fn tell_daemon(home: &Path) -> Result<(), String> {
     let token = std::fs::read_to_string(home.join("human.token")).map_err(|e| e.to_string())?;
@@ -114,7 +125,11 @@ async fn main() -> ExitCode {
         }
         Err(e) => eprintln!("could not list accounts: {e:?}"),
     }
-    match client.chats().await {
+    let listed = match find_from_args() {
+        Some(q) => client.search_chats(&q).await,
+        None => client.chats().await,
+    };
+    match listed {
         Ok(chats) => {
             println!("\nChats ({}): id, account, name", chats.len());
             for c in chats.iter().take(200) {

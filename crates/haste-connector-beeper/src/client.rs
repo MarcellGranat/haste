@@ -149,6 +149,17 @@ impl BeeperClient {
         Ok(list.into_parts().0)
     }
 
+    /// Chats whose name matches `query` (Beeper's own search, first page).
+    ///
+    /// # Errors
+    /// Classified [`ConnectorError`].
+    pub async fn search_chats(&self, query: &str) -> Result<Vec<WireChat>, ConnectorError> {
+        let list: List<WireChat> = self
+            .get(&["v1", "chats", "search"], &[("query", query.to_owned())])
+            .await?;
+        Ok(list.into_parts().0)
+    }
+
     /// # Errors
     /// Classified [`ConnectorError`].
     pub async fn chat(&self, chat_id: &str) -> Result<WireChat, ConnectorError> {

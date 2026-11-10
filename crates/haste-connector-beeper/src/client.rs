@@ -155,6 +155,19 @@ impl BeeperClient {
         self.get(&["v1", "chats", chat_id], &[]).await
     }
 
+    /// A chat by id, or `None` when Beeper does not know it (a stale selection is skipped, not a
+    /// failure of the whole cycle).
+    ///
+    /// # Errors
+    /// Classified [`ConnectorError`] for anything but a missing chat.
+    pub async fn chat_if_exists(&self, chat_id: &str) -> Result<Option<WireChat>, ConnectorError> {
+        match self.chat(chat_id).await {
+            Ok(chat) => Ok(Some(chat)),
+            Err(ConnectorError::Other(m)) if m == "beeper http 404" => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// One page of a chat's messages (newest first, as far as the API says; the caller does not
     /// rely on the order). Returns the items, whether more exist and the cursor for the next page.
     ///

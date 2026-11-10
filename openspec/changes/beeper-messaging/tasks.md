@@ -2,12 +2,12 @@
 
 - [ ] 1.1 Confirm Beeper Desktop is installed and running on this Mac, and record its version (no account names)
 - [ ] 1.2 Human creates the API token in Beeper Desktop settings and records where the setting is; the token is not written into any file or the shell history
-- [ ] 1.3 Spike S2: confirm the base URL and port (default `http://localhost:23373`), the auth header format and the cheapest authenticated call (for example `GET /v1/info`) with a single manual request whose output shows status code and key names only
+- [x] 1.3 Spike S2: confirm the base URL and port (default `http://localhost:23373`), the auth header format and the cheapest authenticated call (for example `GET /v1/info`) with a single manual request whose output shows status code and key names only
 - [ ] 1.4 Spike S3: from `GET /v1/accounts`, record the count of accounts per `network` value (exact strings) and whether each account is WhatsApp, Messenger or iMessage; confirm the iMessage bridge on this Mac, given that `chat.db` is empty here
-- [ ] 1.5 Spike S4: determine whether `GET /v1/accounts`, `GET /v1/accounts/{accountID}` or `GET /v1/bridges/{bridgeID}/logins` expose an on-device versus cloud connection type (record the field name and value set, or record that none exists); decide whether human attestation is the permanent mechanism (design Q1)
-- [ ] 1.6 Spike S5: confirm the chat list and message list field names, the message sort key type and stability, the timestamp field, and whether history is complete for a chat on this Mac (record counts only)
+- [x] 1.5 Spike S4: determine whether `GET /v1/accounts`, `GET /v1/accounts/{accountID}` or `GET /v1/bridges/{bridgeID}/logins` expose an on-device versus cloud connection type (record the field name and value set, or record that none exists); decide whether human attestation is the permanent mechanism (design Q1)
+- [x] 1.6 Spike S5: confirm the chat list and message list field names, the message sort key type and stability, the timestamp field, and whether history is complete for a chat on this Mac (record counts only)
 - [ ] 1.7 Spike S6: confirm the error shape when Beeper Desktop is not running and when the token is wrong, by requesting with the app stopped or with a wrong token; no send is made
-- [ ] 1.8 Record the spike outcomes (structure only, no message text, no names, no ids) in design.md under Spike results
+- [x] 1.8 Record the spike outcomes (structure only, no message text, no names, no ids) in design.md under Spike results
 - [ ] 1.9 Human decides design Q3 (per-source switches only), Q5 (iMessage overlap with `imessage-connector`), Q7 (history window), Q8 (digest content) and Q9 (cap scope); record decisions in design.md
 - [ ] 1.10 Human sign-off on section 1 before section 2 starts
 

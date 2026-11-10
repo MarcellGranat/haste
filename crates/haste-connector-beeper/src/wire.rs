@@ -1,7 +1,8 @@
-//! PROVISIONAL wire shapes of the Beeper Desktop API. The reference page lists the endpoints but
-//! not the field names; the live spike (tasks 1.3-1.6) confirms them. Everything that depends on a
-//! name lives here, with tolerant aliases, so confirming or changing one is a one-file edit. A
-//! missing required field fails closed (the parse errors) instead of guessing.
+//! Wire shapes of the Beeper Desktop API, confirmed on 2026-11-10 against a live run and the
+//! local OpenAPI spec the app serves at `/v1/spec` (see the change's design.md, Spike results).
+//! Everything that depends on a name lives here, with tolerant aliases for older shapes, so a
+//! change is a one-file edit. A missing required field fails closed (the parse errors) instead of
+//! guessing.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -26,6 +27,31 @@ pub struct WireAccount {
     #[serde(default)]
     pub bridge: Option<Value>,
 }
+impl WireAccount {
+    /// Where the account runs, as Beeper reports it. Spike 2026-11-10 and the local OpenAPI spec:
+    /// `bridge.provider` is one of `cloud`, `self-hosted`, `local`, `platform-sdk` (Beeper Desktop
+    /// 4.2.785 and later). Older shapes fall back to a flat connection field.
+    #[must_use]
+    pub fn provider(&self) -> Option<String> {
+        self.bridge
+            .as_ref()
+            .and_then(|b| b.get("provider"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| self.connection.clone())
+    }
+
+    /// The underlying bridge type (`whatsapp`, ...), a steadier network key than the display name.
+    #[must_use]
+    pub fn bridge_type(&self) -> Option<String> {
+        self.bridge
+            .as_ref()
+            .and_then(|b| b.get("type"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct WireChat {
     #[serde(alias = "chatID", alias = "chatId")]

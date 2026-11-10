@@ -79,11 +79,12 @@ pub struct Mapped {
 /// attachment's name.
 #[must_use]
 pub fn map_message(chat_id: &str, source: &Source, wire: &WireMessage) -> Option<Mapped> {
-    // Reactions, deleted and hidden messages are not conversation text (spike 2026-11-10).
+    // Reactions, notices (state events), deleted and hidden messages are not conversation text
+    // (spike 2026-11-10; message types per the local OpenAPI spec).
     let reaction = wire
         .kind
         .as_deref()
-        .is_some_and(|k| k.eq_ignore_ascii_case("reaction"));
+        .is_some_and(|k| k.eq_ignore_ascii_case("reaction") || k.eq_ignore_ascii_case("notice"));
     if reaction || wire.is_deleted || wire.is_hidden {
         return None;
     }

@@ -82,11 +82,12 @@ impl BeeperConnector {
     /// whatever the settings say; when the API does not say, the human's attestation in
     /// `beeper.json` stands in, and without it the account is refused too. Never a silent skip.
     fn check_on_device(&self, account: &WireAccount) -> Result<&'static str, ConnectorError> {
-        match account.connection.as_deref().map(str::to_lowercase) {
+        match account.provider().map(|c| c.to_lowercase()) {
             Some(c) if c.contains("cloud") => {
                 Err(ConnectorError::Other("refused: cloud connection".into()))
             }
             Some(c) if c.contains("device") || c == "local" => Ok("on_device"),
+            // `platform-sdk` and `self-hosted` do not say the account is on this device
             _ if self
                 .config
                 .account(&account.id)
@@ -107,7 +108,12 @@ impl BeeperConnector {
             if self.config.account(&account.id).is_none() {
                 continue; // not selected: never read
             }
-            match BeeperSource::from_network(&account.network) {
+            let network = BeeperSource::from_network(&account.network).or_else(|| {
+                account
+                    .bridge_type()
+                    .and_then(|t| BeeperSource::from_network(&t))
+            });
+            match network {
                 Some(s) if s == self.which => {}
                 Some(_) => continue, // another registration handles it
                 None => {
@@ -198,16 +204,26 @@ impl BeeperConnector {
         let mut batch = Batch::default();
         let (mut chats_read, mut skipped_chats, mut skipped_msgs) = (0_usize, 0_usize, 0_usize);
         if !accounts.is_empty() {
-            let chats = self.client.chats().await?;
-            let selected: Vec<_> = chats
-                .into_iter()
-                .filter(|c| {
-                    accounts.iter().any(|(a, _)| a.id == c.account_id)
-                        && self.config.selects_chat(&c.id)
-                })
-                .collect();
-            skipped_chats = selected.len().saturating_sub(BEEPER_MAX_CHATS_PER_CYCLE);
-            for chat in selected.into_iter().take(BEEPER_MAX_CHATS_PER_CYCLE) {
+            // Only the chats named in beeper.json are requested, each by id: the chat list is
+            // paginated newest-first, so a listing could miss a selected chat that is quiet.
+            let mut named: Vec<&String> = Vec::new();
+            for id in &self.config.chats.allow {
+                if self.config.selects_chat(id) && !named.contains(&id) {
+                    named.push(id);
+                }
+            }
+            skipped_chats = named.len().saturating_sub(BEEPER_MAX_CHATS_PER_CYCLE);
+            let mut selected = Vec::new();
+            for id in named.into_iter().take(BEEPER_MAX_CHATS_PER_CYCLE) {
+                match self.client.chat_if_exists(id).await? {
+                    Some(c) if accounts.iter().any(|(a, _)| a.id == c.account_id) => {
+                        selected.push(c);
+                    }
+                    Some(_) => {} // another network's chat or an unselected account
+                    None => skipped_chats += 1,
+                }
+            }
+            for chat in selected {
                 let after = state.chats.get(&chat.id).cloned();
                 let (mapped, skipped) = self.read_chat(&chat.id, after.as_deref(), now).await?;
                 skipped_msgs += skipped;

@@ -33,6 +33,8 @@ struct World {
     pages: HashMap<String, Vec<Vec<Value>>>,
     send: Option<(u16, String)>,
     info_status: u16,
+    /// When true the chat list answers empty (a selected chat beyond the first page).
+    hide_chat_list: bool,
 }
 
 type Shared = Arc<Mutex<World>>;
@@ -59,7 +61,11 @@ fn serve(world: &Shared) -> impl Fn(&Recorded) -> (u16, String) + Send + Sync + 
                 },
                 json!({ "items": w.accounts }).to_string(),
             ),
-            ("GET", ["v1", "chats"]) => (200, json!({ "items": w.chats }).to_string()),
+            ("GET", ["v1", "chats"]) => (
+                200,
+                json!({ "items": if w.hide_chat_list { vec![] } else { w.chats.clone() } })
+                    .to_string(),
+            ),
             ("GET", ["v1", "chats", id]) => match w.chats.iter().find(|c| c["id"] == *id) {
                 Some(c) => (200, c.to_string()),
                 None => (404, "{}".into()),
@@ -261,6 +267,79 @@ async fn the_messenger_registration_reads_only_its_own_network() {
     assert_eq!(batch.threads.len(), 1);
     assert_eq!(batch.threads[0].source, Source::Messenger);
     assert_eq!(gets(&r.server, "chat-a/messages"), 0);
+}
+
+fn bridge_account(id: &str, provider: &str) -> Value {
+    json!({ "accountID": id, "network": "WhatsApp", "status": "connected",
+            "bridge": { "id": "whatsapp", "type": "whatsapp", "provider": provider } })
+}
+
+fn one_chat_world(provider: &'static str) -> impl FnOnce(&mut World) {
+    move |w: &mut World| {
+        w.accounts = vec![bridge_account("acc-wa", provider)];
+        w.chats = vec![chat("chat-a", "acc-wa", NAME_MARKER)];
+        w.pages
+            .insert("chat-a".into(), vec![vec![msg("m1", 1, NOW - 60, "hi")]]);
+    }
+}
+
+#[tokio::test]
+async fn bridge_provider_decides_on_device_and_cloud_is_refused_even_when_attested() {
+    // local: accepted without any attestation
+    let r = rig(
+        BeeperSource::Whatsapp,
+        one_chat_world("local"),
+        config(&[("acc-wa", false)], &["chat-a"], &[]),
+    )
+    .await;
+    assert_eq!(r.connector.fetch(None).await.unwrap().threads.len(), 1);
+    // cloud: refused whatever the attestation says, and no chat is requested
+    let r = rig(
+        BeeperSource::Whatsapp,
+        one_chat_world("cloud"),
+        config(&[("acc-wa", true)], &["chat-a"], &[]),
+    )
+    .await;
+    assert!(r.connector.fetch(None).await.is_err());
+    assert_eq!(gets(&r.server, "chat-a"), 0);
+    // self-hosted does not say "this device": needs the human's attestation
+    let r = rig(
+        BeeperSource::Whatsapp,
+        one_chat_world("self-hosted"),
+        config(&[("acc-wa", false)], &["chat-a"], &[]),
+    )
+    .await;
+    assert!(r.connector.fetch(None).await.is_err());
+    let r = rig(
+        BeeperSource::Whatsapp,
+        one_chat_world("self-hosted"),
+        config(&[("acc-wa", true)], &["chat-a"], &[]),
+    )
+    .await;
+    assert_eq!(r.connector.fetch(None).await.unwrap().threads.len(), 1);
+}
+
+#[tokio::test]
+async fn a_selected_chat_is_fetched_by_id_so_a_quiet_one_is_never_missed_and_a_stale_id_is_skipped()
+{
+    let r = rig(
+        BeeperSource::Whatsapp,
+        |w: &mut World| {
+            one_chat_world("local")(w);
+            // the chat list (newest first, paginated) is empty: only a by-id fetch finds the chat
+            w.hide_chat_list = true;
+        },
+        config(&[("acc-wa", false)], &["chat-a", "gone"], &[]),
+    )
+    .await;
+    let batch = r.connector.fetch(None).await.unwrap();
+    assert_eq!(batch.threads.len(), 1);
+    assert_eq!(
+        gets(&r.server, "/v1/chats"),
+        0,
+        "the chat list is never requested"
+    );
+    assert!(r.audits.lock().unwrap()[0].contains("skipped_chats=1"));
 }
 
 #[tokio::test]

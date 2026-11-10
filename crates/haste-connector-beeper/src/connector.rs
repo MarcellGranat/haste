@@ -78,13 +78,26 @@ impl BeeperConnector {
         self
     }
 
-    /// An account may be used only if its connection is on-device. A cloud connection is refused
-    /// whatever the settings say; when the API does not say, the human's attestation in
-    /// `beeper.json` stands in, and without it the account is refused too. Never a silent skip.
+    /// An account may be used only if its connection is on-device, or if the human has allowed
+    /// cloud for that account in `beeper.json` (`allow_cloud`). A cloud connection is refused
+    /// unless allowed, and attesting on-device never overrides what Beeper reports; when the API
+    /// does not say, the human's attestation stands in, and without it the account is refused
+    /// too. Never a silent skip.
     fn check_on_device(&self, account: &WireAccount) -> Result<&'static str, ConnectorError> {
         match account.provider().map(|c| c.to_lowercase()) {
             Some(c) if c.contains("cloud") => {
-                Err(ConnectorError::Other("refused: cloud connection".into()))
+                if self
+                    .config
+                    .account(&account.id)
+                    .is_some_and(|a| a.allow_cloud)
+                {
+                    Ok("cloud_allowed")
+                } else {
+                    Err(ConnectorError::Other(
+                        "refused: cloud connection; set allow_cloud for this account in beeper.json to use it"
+                            .into(),
+                    ))
+                }
             }
             Some(c) if c.contains("device") || c == "local" => Ok("on_device"),
             // `platform-sdk` and `self-hosted` do not say the account is on this device

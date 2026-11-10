@@ -20,9 +20,13 @@ fn default_history() -> u32 {
 pub struct AccountSelection {
     pub id: String,
     /// The human states this account's connection is on-device. Used only when the API does not
-    /// say; a connection the API reports as cloud is refused whatever this says.
+    /// say; a connection the API reports as cloud is never made on-device by this.
     #[serde(default)]
     pub on_device_attested: bool,
+    /// The human accepts that this account runs in Beeper's cloud (its messages pass through
+    /// Beeper's servers) and wants it used anyway. Per account, off unless written here.
+    #[serde(default)]
+    pub allow_cloud: bool,
 }
 
 /// Which chats are read. `deny` wins over `allow`; an empty `allow` reads nothing.
@@ -217,6 +221,7 @@ mod tests {
             accounts: vec![AccountSelection {
                 id: "acc".into(),
                 on_device_attested: true,
+                allow_cloud: true,
             }],
             chats: ChatSelection {
                 allow: vec!["c1".into()],

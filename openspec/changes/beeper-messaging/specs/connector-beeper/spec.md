@@ -49,10 +49,14 @@ When the Beeper Desktop API cannot be reached because the application is not run
 - **THEN** the cycle ends with `Authorization`, the kill switch stays released, and the next scheduled cycle tries again
 
 ### Requirement: On-device connections only
-Before reading or sending through an account, the connector SHALL verify that the account is an on-device connection. When the API exposes the connection type, a cloud connection SHALL be refused with the reason "cloud connection" and no chat of that account SHALL be read or sent. When the API does not expose the connection type, the account SHALL be read only if `beeper.json` records `on_device_attested: true` for that account id. An account with neither signal SHALL be refused with the reason "connection type unknown".
+Before reading or sending through an account, the connector SHALL verify that the account is an on-device connection. When the API exposes the connection type, a cloud connection SHALL be refused with the reason "cloud connection" and no chat of that account SHALL be read or sent, unless `beeper.json` records `allow_cloud: true` for that account id (a per-account human decision that never applies to another account and is never implied by `on_device_attested`). When the API does not expose the connection type, the account SHALL be read only if `beeper.json` records `on_device_attested: true` for that account id. An account with neither signal SHALL be refused with the reason "connection type unknown".
+
+#### Scenario: Cloud account allowed per account
+- **WHEN** a selected account is reported as a cloud connection and `beeper.json` records `allow_cloud: true` for it
+- **THEN** its selected chats are read and replies may be sent, the cycle is audited with the label `cloud_allowed`, and another cloud account without the setting is still refused
 
 #### Scenario: Cloud account refused
-- **WHEN** a selected account is reported as a cloud connection
+- **WHEN** a selected account is reported as a cloud connection and `allow_cloud` is not set for it
 - **THEN** no chat of that account is read, the refusal reason "cloud connection" is recorded as a counts-only label, and no request is made for its chats
 
 #### Scenario: Unknown connection type without attestation

@@ -156,6 +156,10 @@ The README states that Beeper's own docs warn of account suspension for sending 
 - **Q10. Account restriction response.** Which response body or status Beeper returns when a network restricts an account; the spike cannot trigger it without sending, so the mapping stays a best guess until a real restriction is seen. Until then any unexpected 403 that is not an auth failure is `Other`, and the human must watch the audit log.
 - **Q11. WebSocket.** Whether to add it after the poll path is proven. Not in v1.
 
+## Decisions after the spike
+
+- **Cloud accounts (2026-11-10).** The human chose per-account opt-in over a blanket refusal: `allow_cloud: true` on an account in `beeper.json` lets a cloud-bridged account be read and replied to; without it a cloud account is refused. Attestation never overrides a reported cloud connection. Rationale: the user's WhatsApp and Messenger accounts are both cloud-bridged and the user accepts that for them.
+
 ## Spike results
 
 Recorded during section 1 (2026-11-10). Sources: the human's structure-only runs of `scripts/beeper_spike.py` against Beeper Desktop (app version not recorded here) and the local OpenAPI spec the app serves at `GET /v1/spec` (Beeper Client API 5.0.0, unauthenticated, no account data). Structure only: no names, text or ids.

@@ -101,10 +101,12 @@ async fn boot() -> Harness {
             AccountSelection {
                 id: "acc-wa".into(),
                 on_device_attested: false,
+                allow_cloud: false,
             },
             AccountSelection {
                 id: "acc-ms".into(),
                 on_device_attested: false,
+                allow_cloud: false,
             },
         ],
         chats: ChatSelection {

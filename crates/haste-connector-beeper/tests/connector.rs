@@ -145,6 +145,7 @@ fn config(accounts: &[(&str, bool)], allow: &[&str], deny: &[&str]) -> BeeperCon
             .map(|(id, att)| AccountSelection {
                 id: (*id).into(),
                 on_device_attested: *att,
+                allow_cloud: false,
             })
             .collect(),
         chats: ChatSelection {
@@ -317,6 +318,22 @@ async fn bridge_provider_decides_on_device_and_cloud_is_refused_even_when_attest
     )
     .await;
     assert_eq!(r.connector.fetch(None).await.unwrap().threads.len(), 1);
+}
+
+#[tokio::test]
+async fn a_cloud_account_is_used_only_when_that_account_allows_cloud() {
+    // allowed for acc-wa only: that account reads, and the audit names how it was accepted
+    let mut cfg = config(&[("acc-wa", false)], &["chat-a"], &[]);
+    cfg.accounts[0].allow_cloud = true;
+    let r = rig(BeeperSource::Whatsapp, one_chat_world("cloud"), cfg).await;
+    assert_eq!(r.connector.fetch(None).await.unwrap().threads.len(), 1);
+    // a different account is not covered by it
+    let mut cfg = config(&[("acc-wa", false), ("acc-x", false)], &["chat-a"], &[]);
+    cfg.accounts[1].allow_cloud = true;
+    let r = rig(BeeperSource::Whatsapp, one_chat_world("cloud"), cfg).await;
+    let err = r.connector.fetch(None).await.unwrap_err();
+    assert!(format!("{err:?}").contains("allow_cloud"), "{err:?}");
+    assert_eq!(gets(&r.server, "chat-a"), 0);
 }
 
 #[tokio::test]
@@ -510,9 +527,9 @@ async fn cloud_connections_unknown_types_and_unsupported_networks_are_refused_wi
     )
     .await;
     let err = r.connector.fetch(None).await.unwrap_err();
-    assert_eq!(
-        err,
-        ConnectorError::Other("refused: cloud connection".into())
+    assert!(
+        matches!(&err, ConnectorError::Other(m) if m.starts_with("refused: cloud connection")),
+        "{err:?}"
     );
     assert_eq!(gets(&r.server, "/messages"), 0);
     assert_eq!(

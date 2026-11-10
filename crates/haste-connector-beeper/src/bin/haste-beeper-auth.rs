@@ -106,9 +106,9 @@ async fn main() -> ExitCode {
                     "  {}  {}  ({supported})  {}",
                     a.id,
                     a.network,
-                    a.connection
-                        .as_deref()
-                        .unwrap_or("connection type not reported: attest it in beeper.json")
+                    a.provider().unwrap_or_else(|| {
+                        "connection type not reported: attest it in beeper.json".to_owned()
+                    })
                 );
             }
         }
@@ -124,7 +124,7 @@ async fn main() -> ExitCode {
         Err(e) => eprintln!("could not list chats: {e:?}"),
     }
     println!(
-        "\nChoose what to read in {}: account ids, `on_device_attested` where needed, and the chat ids to allow.",
+        "\nChoose what to read in {}: account ids, `on_device_attested` (when the connection is not reported) or `allow_cloud` (accept a cloud account) where needed, and the chat ids to allow.",
         BeeperConfig::path(&home).display()
     );
     println!("Then restart hasted and release one source with `haste connector release whatsapp|messenger|imessage`.");

@@ -469,8 +469,12 @@ Read this before you turn it on:
 - **Terms of service.** These networks do not offer an official API for personal accounts, and
   Beeper itself warns that accounts can be suspended and that unofficial integrations can be
   blocked. This is for personal use, a few chats, human-paced sending. You carry that risk.
-- **On-device connections only.** A cloud-bridged account is refused. If Beeper does not say how
-  an account is connected, haste refuses it unless you attest it (`"on_device_attested": true`).
+- **Cloud accounts need your say-so, per account.** Beeper reports where each account runs
+  (`bridge.provider`). An on-device (`local`) account just works. A **cloud** account (its messages
+  pass through Beeper's servers) is refused unless you write `"allow_cloud": true` for that one
+  account in `beeper.json`. If Beeper does not say (`platform-sdk`, `self-hosted`, older versions),
+  haste refuses it unless you attest it (`"on_device_attested": true`). Attesting never overrides a
+  reported cloud connection; `allow_cloud` is the only way to accept one.
 - **Agents never send.** They propose a reply; approving it creates nothing at Beeper. Only you can
   send, from the TUI: the preview shows the chat name, the network and the remaining sends, and the send runs after a 5-second countdown you can cancel.
 
@@ -481,7 +485,7 @@ Read this before you turn it on:
 
    ```json
    {
-     "accounts": [{ "id": "<account id>", "on_device_attested": false }],
+     "accounts": [{ "id": "<account id>", "on_device_attested": false, "allow_cloud": false }],
      "chats": { "allow": ["<chat id>"], "deny": [] },
      "history_days": 30
    }

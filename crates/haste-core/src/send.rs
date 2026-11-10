@@ -22,10 +22,10 @@ pub const SEND_TIMEOUT_SECS: u64 = 30;
 /// Largest reply text accepted for a chat send, in bytes.
 pub const CHAT_MAX_SEND_BYTES: usize = 4 * 1024;
 
-/// Chat sends (WhatsApp, Messenger, iMessage together) per hour: stricter than mail, because the
-/// networks can suspend an account that sends too much.
-pub const CHAT_MAX_SENDS_PER_HOUR: u32 = 5;
-/// Chat sends per day, across all chat sources together.
+/// Chat sends per hour for each network's account (Beeper holds one account per network here, so
+/// this is per source). The networks can suspend an account that sends too much.
+pub const CHAT_MAX_SENDS_PER_HOUR: u32 = 10;
+/// Chat sends per day, across all chat sources together: a backstop over the per-account hour.
 pub const CHAT_MAX_SENDS_PER_DAY: u32 = 20;
 /// The day window the chat limit looks back over.
 pub const SEND_DAY_WINDOW_SECS: i64 = 86_400;
@@ -371,7 +371,7 @@ mod tests {
             None,
             "reminders are not sendable"
         );
-        assert!(SendScope::Chat.max_per_hour() < SendScope::Mail.max_per_hour());
+        assert_eq!(SendScope::Chat.max_per_hour(), CHAT_MAX_SENDS_PER_HOUR);
         assert_eq!(SendScope::Chat.max_per_day(), Some(CHAT_MAX_SENDS_PER_DAY));
         assert_eq!(SendScope::Mail.max_per_day(), None);
         assert!(SendScope::Chat

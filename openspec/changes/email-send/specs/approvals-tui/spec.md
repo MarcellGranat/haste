@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Human-only send action
-The approvals view SHALL offer a send action for proposals in state `approved`, separate from approve. Send SHALL require a confirmation that names every recipient, the source and the subject, and SHALL display the recipient digest the daemon will verify. The send action SHALL NOT be offered for proposals in other states, and SHALL NOT be offered for a proposal whose source has no send-capable connector.
+The approvals view SHALL offer a send action for proposals in state `approved`, separate from approve. Send SHALL show every recipient, the source and the subject, SHALL display the recipient digest the daemon will verify, and SHALL run only after a fixed 5-second delay during which any key cancels it; a stale thread, or recipients that changed after the preview, SHALL require `y` instead of the timer. The send action SHALL NOT be offered for proposals in other states, and SHALL NOT be offered for a proposal whose source has no send-capable connector.
 
 #### Scenario: Send requires approved state
 - **WHEN** the user selects a `pending` proposal
@@ -9,7 +9,7 @@ The approvals view SHALL offer a send action for proposals in state `approved`, 
 
 #### Scenario: Send confirmation lists recipients
 - **WHEN** the user invokes send on an `approved` proposal
-- **THEN** a confirmation listing every recipient, the source and the subject is shown before the daemon is asked to send, and only `y` confirms
+- **THEN** a preview listing every recipient, the source and the subject is shown with a 5-second countdown before the daemon is asked to send, and any key cancels it
 
 #### Scenario: Recipients changed
 - **WHEN** the daemon answers `recipients_changed` to a confirmed send

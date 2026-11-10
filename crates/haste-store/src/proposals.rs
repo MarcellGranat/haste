@@ -121,10 +121,16 @@ pub(crate) fn refresh_stale(conn: &Connection, p: &Proposal) -> StoreResult<bool
     Ok(stale)
 }
 
-/// The limits a proposal's send falls under, from its source thread (mail when it has none).
-fn scope_of(conn: &Connection, p: &Proposal) -> StoreResult<SendScope> {
+/// The limits a proposal's send falls under, from its source thread (mail when it has none), and
+/// the sources its HOURLY count looks at: all mail together, but only this network's own sends for
+/// a chat (the hourly cap is per account; the daily cap still counts the whole scope).
+fn scope_of(conn: &Connection, p: &Proposal) -> StoreResult<(SendScope, Vec<String>)> {
     let Some(thread_id) = &p.source_thread_id else {
-        return Ok(SendScope::Mail);
+        let scope = SendScope::Mail;
+        return Ok((
+            scope,
+            scope.sources().iter().map(|s| (*s).to_owned()).collect(),
+        ));
     };
     let name: Option<String> = conn
         .query_row(
@@ -133,21 +139,35 @@ fn scope_of(conn: &Connection, p: &Proposal) -> StoreResult<SendScope> {
             |r| r.get(0),
         )
         .optional()?;
-    let source = Source::from(name.unwrap_or_default());
-    SendScope::of(&source)
-        .ok_or_else(|| StoreError::IllegalTransition("this source cannot be sent to".into()))
+    let name = name.unwrap_or_default();
+    let source = Source::from(name.clone());
+    let scope = SendScope::of(&source)
+        .ok_or_else(|| StoreError::IllegalTransition("this source cannot be sent to".into()))?;
+    let hourly = match scope {
+        SendScope::Mail => scope.sources().iter().map(|s| (*s).to_owned()).collect(),
+        SendScope::Chat => vec![name],
+    };
+    Ok((scope, hourly))
 }
 
-/// `(sends in the last hour, sends in the last day)` for a scope. Sends that began (`executing`
-/// included) count, so a crash cannot reset the limit; sources of the same scope count together.
-fn counts(conn: &Connection, scope: SendScope, now: i64) -> StoreResult<(u32, u32)> {
-    let names = scope
-        .sources()
-        .iter()
-        .map(|n| format!("'{n}'"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let count = |window: i64| -> StoreResult<u32> {
+/// `(sends in the last hour among `hourly`, sends in the last day across the scope)`. Sends that
+/// began (`executing` included) count, so a crash cannot reset the limit. The source names are
+/// quoted for SQL here and come only from a known source (never from a request).
+fn counts(
+    conn: &Connection,
+    scope: SendScope,
+    hourly: &[String],
+    now: i64,
+) -> StoreResult<(u32, u32)> {
+    let quote = |names: &[String]| {
+        names
+            .iter()
+            .map(|n| format!("'{}'", n.replace('\'', "")))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let day_names: Vec<String> = scope.sources().iter().map(|s| (*s).to_owned()).collect();
+    let count = |window: i64, names: &str| -> StoreResult<u32> {
         let n: i64 = conn.query_row(
             &format!(
                 "SELECT COUNT(*) FROM proposals p LEFT JOIN threads t ON t.id = p.source_thread_id \
@@ -160,7 +180,10 @@ fn counts(conn: &Connection, scope: SendScope, now: i64) -> StoreResult<(u32, u3
         )?;
         Ok(u32::try_from(n).unwrap_or(u32::MAX))
     };
-    Ok((count(SEND_WINDOW_SECS)?, count(SEND_DAY_WINDOW_SECS)?))
+    Ok((
+        count(SEND_WINDOW_SECS, &quote(hourly))?,
+        count(SEND_DAY_WINDOW_SECS, &quote(&day_names))?,
+    ))
 }
 
 impl Store {
@@ -436,8 +459,8 @@ impl Store {
                 tx.commit()?;
                 return Err(StoreError::StaleNeedsAcknowledgement);
             }
-            let scope = scope_of(&tx, &p)?;
-            let (hour, day) = counts(&tx, scope, now)?;
+            let (scope, hourly) = scope_of(&tx, &p)?;
+            let (hour, day) = counts(&tx, scope, &hourly, now)?;
             if hour >= scope.max_per_hour() || scope.max_per_day().is_some_and(|max| day >= max) {
                 return Err(StoreError::Validation("rate_limited".into()));
             }
@@ -460,8 +483,8 @@ impl Store {
         let id = id.to_owned();
         self.read(move |conn| {
             let p = load(conn, &id)?;
-            let scope = scope_of(conn, &p)?;
-            let (hour, day) = counts(conn, scope, now)?;
+            let (scope, hourly) = scope_of(conn, &p)?;
+            let (hour, day) = counts(conn, scope, &hourly, now)?;
             let left_hour = scope.max_per_hour().saturating_sub(hour);
             Ok(scope
                 .max_per_day()
@@ -873,14 +896,14 @@ mod tests {
     }
 
     #[test]
-    fn chat_sends_have_a_stricter_hourly_cap_a_daily_cap_and_count_the_three_networks_together() {
+    fn chat_sends_have_an_hourly_cap_per_network_and_a_daily_cap_across_the_three() {
         use haste_core::send::{CHAT_MAX_SENDS_PER_DAY, CHAT_MAX_SENDS_PER_HOUR, SEND_WINDOW_SECS};
         let (_d, s) = test_store();
         let now = 1_000_000;
         let sources = [Source::Whatsapp, Source::Messenger, Source::Imessage];
-        // fill the hourly cap, spread across the three networks
+        // fill WhatsApp's hourly cap: the cap is per account (network)
         for i in 0..CHAT_MAX_SENDS_PER_HOUR {
-            let id = approved_on(&s, &sources[i as usize % 3], &format!("h{i}"), now);
+            let id = approved_on(&s, &Source::Whatsapp, &format!("h{i}"), now);
             s.begin_send(&id, false, now + i64::from(i), &["chat".into()])
                 .unwrap();
         }
@@ -890,6 +913,12 @@ mod tests {
             Err(StoreError::Validation(m)) if m == "rate_limited"
         ));
         assert_eq!(s.sends_remaining(&over, now + 100).unwrap(), 0);
+        // another network's account still has its own hour (limited here only by the day)
+        let other = approved_on(&s, &Source::Messenger, "other", now);
+        assert_eq!(
+            s.sends_remaining(&other, now + 100).unwrap(),
+            CHAT_MAX_SENDS_PER_HOUR.min(CHAT_MAX_SENDS_PER_DAY - CHAT_MAX_SENDS_PER_HOUR)
+        );
         // mail is a separate budget: a Gmail send is still allowed
         let mail = approved_on(&s, &Source::Gmail, "mail", now);
         assert_eq!(s.sends_remaining(&mail, now + 100).unwrap(), 10);

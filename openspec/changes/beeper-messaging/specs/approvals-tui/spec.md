@@ -1,11 +1,11 @@
 ## ADDED Requirements
 
 ### Requirement: Chat send confirmation names the chat and the text
-For a Beeper proposal, the send confirmation SHALL show the chat name, the network, the full text as it will be sent and the digest, and SHALL require `y` before the daemon is asked to send. The confirmation SHALL NOT be shown for a proposal whose chat is not selected.
+For a Beeper proposal, the send confirmation SHALL show the chat name, the network, the full text as it will be sent and the digest, and SHALL then wait a fixed 5-second delay, during which any key cancels the send, before the daemon is asked to send. A send whose thread is stale, or whose recipients changed after the preview was shown, SHALL require `y` instead of the timer. The confirmation SHALL NOT be shown for a proposal whose chat is not selected.
 
 #### Scenario: Confirmation content
 - **WHEN** the user invokes send on an approved WhatsApp proposal
-- **THEN** the confirmation shows the chat name, the network `whatsapp`, the text and the digest, and nothing is sent until `y`
+- **THEN** the confirmation shows the chat name, the network `whatsapp`, the text and the digest, and the send runs only after the 5-second delay has passed without a key press (any key cancels, and a stale thread asks for `y`)
 
 #### Scenario: Recipients changed
 - **WHEN** the daemon answers `recipients_changed`

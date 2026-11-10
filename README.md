@@ -2,7 +2,7 @@
 
 A personal inbox hub (mail, chats, reminders, notes) driven from a vi-style TUI and
 operated by agents through a CLI. **Agents can read, propose and append to a few notes.
-They can never send; only you can, from the TUI, after a confirmation.** Everything an agent asks for passes a policy gate in a local daemon.
+They can never send; only you can, from the TUI: press `s`, and the send runs after a 5-second countdown you can cancel with any key.** Everything an agent asks for passes a policy gate in a local daemon.
 
 This repository contains the core (`core-policy-gate`: daemon, store, policy gate, proposals,
 approvals TUI, audit log, connector framework) and the first real connector (`gmail-connector`).
@@ -75,7 +75,7 @@ connector cannot archive, label or delete. It only asks Google for the `gmail.re
 
 Select an approved draft in Approvals and press `s`. haste first shows a **preview**: who it
 goes to, the subject, how many sends you have left this hour, and whether the thread changed.
-Only after `y` does it send, and it refuses (`recipients_changed`) if the recipient it now
+It then counts down 5 seconds (any key cancels, nothing is sent if you do) and sends once. A stale thread, or recipients that changed after you looked, still ask for `y` instead. It refuses (`recipients_changed`) if the recipient it now
 resolves differs from the one you were shown. The recipient is the draft's `to`, otherwise the last
 person in the thread who is not you; there is exactly one recipient (no Cc, no Bcc, no reply-all).
 
@@ -201,7 +201,7 @@ one cycle, then waits for the next one, and never trips the breaker.
 
 ### Sending from iCloud (human only)
 
-The same flow as Gmail (preview, confirmation, one recipient, at most once, NEEDS CHECK when the
+The same flow as Gmail (preview, 5-second cancellable countdown, one recipient, at most once, NEEDS CHECK when the
 outcome is unknown), over SMTP: `smtp.mail.me.com:587` with STARTTLS and certificate verification,
 logging in with the same app-specific password from the Keychain. The message is plain text with
 `From` set to your iCloud address. After the server accepts it, haste files one copy in your Sent
@@ -472,7 +472,7 @@ Read this before you turn it on:
 - **On-device connections only.** A cloud-bridged account is refused. If Beeper does not say how
   an account is connected, haste refuses it unless you attest it (`"on_device_attested": true`).
 - **Agents never send.** They propose a reply; approving it creates nothing at Beeper. Only you can
-  send, from the TUI, after a confirmation that shows the chat name, the network and the text.
+  send, from the TUI: the preview shows the chat name, the network and the remaining sends, and the send runs after a 5-second countdown you can cancel.
 
 ### Setup
 
@@ -496,9 +496,9 @@ Read this before you turn it on:
 
 ### Sending (human only)
 
-The same flow as email (preview, confirmation, at most once, NEEDS CHECK when the outcome is
-unknown) with chat limits: one chat per message, at most 4 KiB of text, **5 per hour and 20 per
-day counted across all three networks**. The confirmation is bound to a digest of the chat id, the
+The same flow as email (preview, 5-second cancellable countdown, at most once, NEEDS CHECK when the outcome is
+unknown) with chat limits: one chat per message, at most 4 KiB of text, **10 per hour for each
+network's account and 20 per day across all three**. The confirmation is bound to a digest of the chat id, the
 chat name and the text, so a changed chat is refused. A refused or failed send returns the
 proposal to approved; a send whose outcome is unknown stays `executing` and is never repeated.
 `haste` records only counts and fixed labels in the audit log, never a chat name or text.
@@ -521,7 +521,7 @@ Tasks 11.x of the change walk through it: one throwaway chat, one account, one s
 | read | auto |
 | draft, archive, snooze, reminder.create | pending: a proposal is created, nothing happens until a human approves |
 | note.append | auto inside `people/**` and `tasks/**` only; daemon-performed, append-only, attributed |
-| send, send preview, approve, reject, manage | denied: human only; sending exists only in the TUI (the CLI has no `send` verb); a Beeper send is one chat, 5/hour and 20/day across networks |
+| send, send preview, approve, reject, manage | denied: human only; sending exists only in the TUI (the CLI has no `send` verb); a Beeper send is one chat, 10/hour per account and 20/day across networks |
 
 Proposals return a pending id immediately. They expire after **7 days**, are superseded by a
 newer proposal for the same thread and action, and carry a stale flag when the thread changed.

@@ -99,8 +99,8 @@ The `ambiguous` tag reuses the `SendOutcome` enum from `email-send`. A 2xx witho
 ### D9. Limits (named constants)
 In `haste-connector-beeper::consts` (and not shared with mail):
 - `BEEPER_MAX_SEND_BYTES: usize = 4 * 1024` (checked before `begin_send`)
-- `BEEPER_MAX_SENDS_PER_HOUR: u32 = 5`
-- `BEEPER_MAX_SENDS_PER_DAY: u32 = 20`
+- `BEEPER_MAX_SENDS_PER_HOUR: u32 = 10` (per account, that is per network; relaxed from 5 by the human on 2026-11-10)
+- `BEEPER_MAX_SENDS_PER_DAY: u32 = 20` (across the three networks)
 - `BEEPER_SEND_WINDOW_HOUR_SECS: i64 = 3600`, `BEEPER_SEND_WINDOW_DAY_SECS: i64 = 86_400`
 - `BEEPER_REQUEST_TIMEOUT: Duration = 30 s`
 - Read limits listed in D7.
@@ -152,7 +152,7 @@ The README states that Beeper's own docs warn of account suspension for sending 
 - **Q6. RESOLVED.** Sort key: Whether message sort keys are strings or numbers, sortable, and stable across edits. (Spike S5.)
 - **Q7. History window.** Default 30 days; is that the right bound for a personal inbox?
 - **Q8. Digest content.** Whether the digest should also include the participants of the chat, given that group chats have many members. Recommendation: no, the chat id, displayed name and body hash are enough, and participants are not shown in the confirmation.
-- **Q9. Caps.** Confirm `BEEPER_MAX_SENDS_PER_HOUR = 5` and `BEEPER_MAX_SENDS_PER_DAY = 20`, and whether they should count sends across all three sources together. Recommendation: together, since one account suspension covers the user's whole network identity.
+- **Q9. RESOLVED 2026-11-10: 10 per hour per account, 20 per day across all.** Caps: Confirm `BEEPER_MAX_SENDS_PER_HOUR = 5` and `BEEPER_MAX_SENDS_PER_DAY = 20`, and whether they should count sends across all three sources together. Recommendation: together, since one account suspension covers the user's whole network identity.
 - **Q10. Account restriction response.** Which response body or status Beeper returns when a network restricts an account; the spike cannot trigger it without sending, so the mapping stays a best guess until a real restriction is seen. Until then any unexpected 403 that is not an auth failure is `Other`, and the human must watch the audit log.
 - **Q11. WebSocket.** Whether to add it after the poll path is proven. Not in v1.
 

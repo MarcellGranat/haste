@@ -422,15 +422,13 @@ async fn an_engaged_kill_switch_refuses_preview_and_send() {
 }
 
 #[tokio::test]
-async fn chat_sends_are_capped_per_hour_across_networks() {
+async fn chat_sends_are_capped_per_hour_per_account_and_the_other_network_is_unaffected() {
     let h = boot().await;
     let wa = synced(&h, Source::Whatsapp).await;
     let ms = synced(&h, Source::Messenger).await;
     let agent = register(&h, "agent-a", PrincipalKind::Agent).await;
     for i in 0..CHAT_MAX_SENDS_PER_HOUR {
-        // alternate networks: the budget is shared
-        let thread = if i % 2 == 0 { &wa } else { &ms };
-        let id = approved_draft(&h, &agent, thread, &format!("k{i}")).await;
+        let id = approved_draft(&h, &agent, &wa, &format!("k{i}")).await;
         let digest = preview_digest(&h, &id).await;
         let r = human(&h, send_body(&id, &digest)).await;
         assert!(
@@ -443,6 +441,14 @@ async fn chat_sends_are_capped_per_hour_across_networks() {
     let r = human(&h, send_body(&id, &digest)).await;
     assert_eq!(code(&r), Some(ErrorCode::Validation));
     assert_eq!(posts(&h) as u32, CHAT_MAX_SENDS_PER_HOUR);
+    // Messenger's account has its own hour
+    let other = approved_draft(&h, &agent, &ms, "other").await;
+    let other_digest = preview_digest(&h, &other).await;
+    let r = human(&h, send_body(&other, &other_digest)).await;
+    assert!(
+        matches!(&r, Response::Proposal { proposal } if proposal.state == ProposalState::Sent),
+        "{r:?}"
+    );
     assert_eq!(
         h.daemon.state.store.get_proposal(&id).unwrap().state,
         ProposalState::Approved

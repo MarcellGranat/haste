@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Human-only send action
-Sending an approved mail proposal SHALL be executable only by a human principal through the TUI or the human shell. Agent and machine principals SHALL be denied every send request, including `SendPreview`, regardless of payload, and the attempt SHALL be audited. No code path SHALL send mail without an explicit human confirmation.
+Sending an approved mail proposal SHALL be executable only by a human principal through the TUI or the human shell. Agent and machine principals SHALL be denied every send request, including `SendPreview`, regardless of payload, and the attempt SHALL be audited. No code path SHALL send mail without an explicit human action: pressing the send key, followed by a delay during which the human can cancel.
 
 #### Scenario: Agent send denied
 - **WHEN** an agent token submits a send or send-preview request for a proposal
@@ -23,7 +23,7 @@ A send SHALL start only from a proposal in state `approved` and SHALL move it to
 - **THEN** the send is refused until the human acknowledges the stale flag, and no connector call is made
 
 ### Requirement: Recipient confirmation
-Before a send, the TUI SHALL show every recipient, the source and the subject, and SHALL send only after the human confirms. The confirmation SHALL carry a digest of the displayed recipient list. The daemon SHALL recompute the recipient list and SHALL refuse with `recipients_changed` if the digest differs, changing nothing.
+Before a send, the TUI SHALL show every recipient, the source and the subject, and SHALL send only after the human has pressed send and not cancelled within the 5-second delay. The confirmation SHALL carry a digest of the displayed recipient list. The daemon SHALL recompute the recipient list and SHALL refuse with `recipients_changed` if the digest differs, changing nothing.
 
 #### Scenario: Confirmed recipients match
 - **WHEN** the human confirms a send and the recomputed recipient list has the same digest

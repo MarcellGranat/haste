@@ -127,10 +127,10 @@ A reply SHALL be sent only by the human, through the `Send` request of the send 
 - **THEN** the send is refused with a validation error and no request is made
 
 ### Requirement: Send limits as named constants
-Each send SHALL respect `BEEPER_MAX_SEND_BYTES`, `BEEPER_MAX_SENDS_PER_HOUR` and `BEEPER_MAX_SENDS_PER_DAY`, counted over the Beeper sends whose start time falls within the last hour and the last day. Sends in `executing` SHALL count. The limits SHALL be compile-time constants and SHALL NOT be read from any file.
+Each send SHALL respect `BEEPER_MAX_SEND_BYTES`, `BEEPER_MAX_SENDS_PER_HOUR` and `BEEPER_MAX_SENDS_PER_DAY`, counted over the Beeper sends whose start time falls within the last hour (for the same network's account) and the last day (across WhatsApp, Messenger and iMessage together). Sends in `executing` SHALL count. The limits SHALL be compile-time constants and SHALL NOT be read from any file.
 
 #### Scenario: Hourly cap reached
-- **WHEN** the number of Beeper sends started in the last hour equals `BEEPER_MAX_SENDS_PER_HOUR`
+- **WHEN** the number of sends started in the last hour for this network's account equals `BEEPER_MAX_SENDS_PER_HOUR`
 - **THEN** the next send is refused with "hourly limit reached" before any request
 
 #### Scenario: Crash does not reset the count

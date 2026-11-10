@@ -1,5 +1,5 @@
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEventKind};
 use haste_core::proposal::ProposalState;
@@ -199,7 +199,7 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                             proposal_id: id.clone(),
                         })
                     {
-                        app.show_send_preview(&id, preview);
+                        app.show_confirmed_send_preview(&id, preview);
                     }
                     "the recipients changed; nothing was sent, check the new list".into()
                 }
@@ -235,6 +235,11 @@ fn main() -> io::Result<()> {
                             }
                         }
                     }
+                }
+            }
+            if let Some(effect) = app.tick(Instant::now()) {
+                if run_effect(&mut app, &client, effect) {
+                    return Ok(());
                 }
             }
             let mut dirty = false;

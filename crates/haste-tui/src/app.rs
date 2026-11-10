@@ -1,6 +1,7 @@
 //! Pure TUI state and key handling. No terminal access, so everything here is unit-testable.
 
 use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
 
 use haste_core::herdr::{AgentStatus, AgentStatusRecord, MachineState};
 use haste_core::model::Source;
@@ -38,6 +39,9 @@ pub enum GroupBy {
 
 /// Group name for proposals that carry no project.
 pub const NO_PROJECT: &str = "no project";
+
+/// How long a send waits after `s` before it runs, during which any key cancels it.
+pub const SEND_DELAY: Duration = Duration::from_secs(5);
 
 /// Something the key handler wants the daemon to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +98,20 @@ pub enum Mode {
     ConfirmBatch(Vec<String>),
     ConfirmStaleApprove(String),
     ConfirmRelease(String),
+    /// A normal send is not confirmed with a key: it runs after [`SEND_DELAY`] unless the human
+    /// cancels with any key. The recipients shown are the ones the daemon resolved and the digest
+    /// binds the send to them.
+    SendCountdown {
+        id: String,
+        recipients: Vec<String>,
+        subject: String,
+        source: String,
+        remaining: u32,
+        recipients_digest: String,
+        deadline: Instant,
+    },
+    /// A send that still needs an explicit `y`: the thread changed since the draft was written
+    /// (stale), or the recipients changed after the human last looked.
     ConfirmSend {
         id: String,
         /// Every recipient, as the daemon resolved them.
@@ -160,6 +178,8 @@ pub struct App {
     pub marked: BTreeSet<String>,
     pub notices: Vec<String>,
     pub status: String,
+    /// The loop's clock, set by [`App::tick`]; the countdown is measured against it.
+    pub now: Instant,
 }
 
 impl Default for App {
@@ -238,6 +258,7 @@ impl App {
             marked: BTreeSet::new(),
             notices: Vec::new(),
             status: String::new(),
+            now: Instant::now(),
         }
     }
 
@@ -546,6 +567,12 @@ impl App {
                     acknowledge_stale: true,
                 },
             ),
+            Mode::SendCountdown { .. } => {
+                // any key cancels; nothing was sent
+                self.mode = Mode::Normal;
+                self.status = "send cancelled".into();
+                None
+            }
             Mode::ConfirmSend {
                 id,
                 stale,
@@ -791,7 +818,27 @@ impl App {
     }
 
     /// The daemon's answer to [`Effect::PreviewSend`]: show the confirmation.
+    ///
+    /// A current (not stale) send starts the [`SEND_DELAY`] countdown; a stale one still asks `y`.
     pub fn show_send_preview(&mut self, id: &str, preview: SendPreviewView) {
+        if preview.stale {
+            self.show_confirmed_send_preview(id, preview);
+            return;
+        }
+        self.mode = Mode::SendCountdown {
+            id: id.to_owned(),
+            recipients: preview.recipients,
+            subject: preview.subject,
+            source: preview.source,
+            remaining: preview.sends_remaining,
+            recipients_digest: preview.recipients_digest,
+            deadline: self.now + SEND_DELAY,
+        };
+    }
+
+    /// Show a send that must be confirmed with `y` (no countdown): used when the recipients changed
+    /// after the human last looked, so a changed list is never sent on a timer.
+    pub fn show_confirmed_send_preview(&mut self, id: &str, preview: SendPreviewView) {
         self.mode = Mode::ConfirmSend {
             id: id.to_owned(),
             recipients: preview.recipients,
@@ -801,6 +848,31 @@ impl App {
             remaining: preview.sends_remaining,
             recipients_digest: preview.recipients_digest,
         };
+    }
+
+    /// Advance the clock. When a send countdown has run out, the send is returned for the caller to
+    /// run (once: the mode returns to normal first).
+    pub fn tick(&mut self, now: Instant) -> Option<Effect> {
+        self.now = now;
+        let Mode::SendCountdown {
+            deadline,
+            id,
+            recipients_digest,
+            ..
+        } = &self.mode
+        else {
+            return None;
+        };
+        if now < *deadline {
+            return None;
+        }
+        let effect = Effect::Send {
+            id: id.clone(),
+            acknowledge_stale: false,
+            recipients_digest: recipients_digest.clone(),
+        };
+        self.mode = Mode::Normal;
+        Some(effect)
     }
 
     /// `s` on a reminder or calendar proposal: run it after one confirmation.
@@ -845,6 +917,28 @@ impl App {
             )),
             Mode::ConfirmStaleApprove(id) => {
                 Some(format!("Thread changed. Approve {id} anyway? [y/N]"))
+            }
+            Mode::SendCountdown {
+                recipients,
+                subject,
+                source,
+                remaining,
+                deadline,
+                ..
+            } => {
+                let secs = deadline
+                    .saturating_duration_since(self.now)
+                    .as_millis()
+                    .div_ceil(1000);
+                Some(format!(
+                    "SENDING to {} via {source}{} in {secs}s ({remaining} left): any key cancels",
+                    recipients.join(", "),
+                    if subject.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", subject '{subject}'")
+                    }
+                ))
             }
             Mode::ConfirmSend {
                 recipients,
@@ -1143,24 +1237,55 @@ mod tests {
                 recipients_digest: "digest-1".into(),
             },
         );
+        // a normal send is a countdown, not a y prompt
         let prompt = app.confirm_prompt().unwrap();
-        for part in ["SEND to ana@x.org", "gmail", "Re: plan", "7 left"] {
+        for part in [
+            "SENDING to ana@x.org",
+            "gmail",
+            "Re: plan",
+            "7 left",
+            "in 5s",
+            "any key cancels",
+        ] {
             assert!(prompt.contains(part), "{prompt}");
         }
-        // anything but y cancels; y sends with the digest that was displayed
+        let start = app.now;
+        // nothing is sent before the delay has run out
+        assert_eq!(app.tick(start + Duration::from_secs(4)), None);
+        assert!(app.confirm_prompt().unwrap().contains("in 1s"));
+        // any key cancels, and nothing is sent afterwards
         assert!(press(&mut app, "n").is_empty());
         assert_eq!(app.mode, Mode::Normal);
-        app.show_send_preview(
-            "p2",
-            SendPreviewView {
-                source: "gmail".into(),
-                recipients: vec!["ana@x.org".into()],
-                subject: "Re: plan".into(),
-                body_bytes: 10,
-                stale: true,
-                sends_remaining: 7,
-                recipients_digest: "digest-1".into(),
-            },
+        assert!(app.status.contains("cancelled"));
+        assert_eq!(app.tick(start + SEND_DELAY + Duration::from_secs(1)), None);
+        // let it run: after the delay the send goes out once, with the displayed digest
+        app.show_send_preview("p2", preview(false));
+        let start = app.now;
+        assert_eq!(
+            app.tick(start + SEND_DELAY - Duration::from_millis(1)),
+            None
+        );
+        assert_eq!(
+            app.tick(start + SEND_DELAY),
+            Some(Effect::Send {
+                id: "p2".into(),
+                acknowledge_stale: false,
+                recipients_digest: "digest-1".into()
+            })
+        );
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(
+            app.tick(start + SEND_DELAY * 2),
+            None,
+            "the send is returned once"
+        );
+        // a stale thread still asks for an explicit y, and acknowledges the staleness
+        app.show_send_preview("p2", preview(true));
+        assert!(app.confirm_prompt().unwrap().contains("SEND to ana@x.org"));
+        assert_eq!(
+            app.tick(app.now + SEND_DELAY * 3),
+            None,
+            "no timer on a stale send"
         );
         assert_eq!(
             app.handle_key(Key::Char('y')),
@@ -1170,6 +1295,32 @@ mod tests {
                 recipients_digest: "digest-1".into()
             })
         );
+    }
+
+    #[test]
+    fn a_send_whose_recipients_changed_is_never_sent_on_a_timer() {
+        let mut app = app_with(vec![proposal(
+            "p2",
+            "agent-a",
+            ProposalState::Approved,
+            false,
+        )]);
+        app.show_confirmed_send_preview("p2", preview(false));
+        assert!(app.confirm_prompt().unwrap().contains("[y/N]"));
+        assert_eq!(app.tick(app.now + SEND_DELAY * 3), None);
+        assert!(matches!(app.mode, Mode::ConfirmSend { .. }));
+    }
+
+    fn preview(stale: bool) -> SendPreviewView {
+        SendPreviewView {
+            source: "gmail".into(),
+            recipients: vec!["ana@x.org".into()],
+            subject: "Re: plan".into(),
+            body_bytes: 10,
+            stale,
+            sends_remaining: 7,
+            recipients_digest: "digest-1".into(),
+        }
     }
 
     #[test]
@@ -1195,7 +1346,7 @@ mod tests {
         );
         let prompt = app.confirm_prompt().unwrap();
         assert!(
-            prompt.contains("SEND to Family chat via whatsapp"),
+            prompt.contains("SENDING to Family chat via whatsapp"),
             "{prompt}"
         );
         assert!(!prompt.contains("subject"), "{prompt}");

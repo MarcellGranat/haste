@@ -311,7 +311,22 @@ impl BeeperConnector {
         if !accounts.iter().any(|(a, _)| a.id == chat.account_id) {
             return Err(refused("account not selected or on another network"));
         }
-        let id = self.client.send_message(chat_id, &draft.body).await?;
+        let id = match self.client.send_message(chat_id, &draft.body).await {
+            Ok(id) => id,
+            Err(e) => {
+                // a fixed cause label, never the error text: why the outcome is unknown or refused
+                let label = match &e {
+                    ConnectorError::Ambiguous(m) if m.starts_with("http ") => "http_5xx",
+                    ConnectorError::Ambiguous(m) if m.contains("no message id") => "no_message_id",
+                    ConnectorError::Ambiguous(_) => "transport_or_timeout",
+                    ConnectorError::Authorization(_) => "token_or_not_running",
+                    ConnectorError::Checkpoint(_) => "rate_limited",
+                    _ => "refused",
+                };
+                (self.audit)("send_failed", label);
+                return Err(e);
+            }
+        };
         Ok(SendReceipt {
             external_id: format!("beeper:{id}"),
         })

@@ -56,7 +56,14 @@ fn probe_from_args() -> Option<String> {
 }
 
 async fn probe_chat(client: &BeeperClient, chat_id: &str) {
-    match client.messages(chat_id, 20, None).await {
+    match client
+        .messages(
+            chat_id,
+            haste_connector_beeper::consts::BEEPER_PAGE_SIZE,
+            None,
+        )
+        .await
+    {
         Err(e) => eprintln!("probe: could not read messages: {e:?}"),
         Ok((items, more, cursor)) => {
             let now = haste_core::time::now_secs();

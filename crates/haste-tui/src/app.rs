@@ -1,5 +1,6 @@
 //! Pure TUI state and key handling. No terminal access, so everything here is unit-testable.
 
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
@@ -57,8 +58,18 @@ pub enum TriageChange {
     SnoozeUntil(i64),
 }
 
+/// How often the local time zone offset is read again.
+const TZ_REFRESH: Duration = Duration::from_secs(600);
+
 /// Priority a thread gets when `p` marks it.
 pub const PRIORITY_ON: i32 = 1;
+
+/// Which pane of the Today tab has the cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TodayFocus {
+    Inbox,
+    Todo,
+}
 
 /// How the Approvals view groups proposals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,11 +187,12 @@ pub enum Mode {
         thread_id: String,
         input: String,
     },
-    /// Typing a due date for a reminder about a thread.
+    /// Choosing when to be reminded about a thread: one key for a quick pick, or `c` to type a
+    /// date (`custom` holds the text being typed).
     Remind {
         thread_id: String,
         title: String,
-        input: String,
+        custom: Option<String>,
     },
     /// A mail thread with several people: reply to the sender or to everyone.
     ReplyChoice {
@@ -223,6 +235,15 @@ pub struct App {
     pub filter_error: Option<String>,
     pub filter_index: usize,
     pub today_selected: usize,
+    pub today_focus: TodayFocus,
+    pub todo_selected: usize,
+    /// Offset of the machine's local time from UTC (seconds), refreshed by the loop.
+    pub tz_offset: i64,
+    tz_checked: Option<Instant>,
+    /// First visible rows of the scrolling lists (set while drawing).
+    pub inbox_offset: Cell<usize>,
+    pub todo_offset: Cell<usize>,
+    pub channel_offset: Cell<usize>,
     pub channels_selected: usize,
     /// Inside a channel's thread list (Channels tab).
     pub channel_inner: bool,
@@ -318,6 +339,13 @@ impl App {
             filter_error: None,
             filter_index: 0,
             today_selected: 0,
+            today_focus: TodayFocus::Inbox,
+            todo_selected: 0,
+            tz_offset: 0,
+            tz_checked: None,
+            inbox_offset: Cell::new(0),
+            todo_offset: Cell::new(0),
+            channel_offset: Cell::new(0),
             channels_selected: 0,
             channel_inner: false,
             channel_thread_selected: 0,
@@ -357,6 +385,16 @@ impl App {
     pub fn set_machines(&mut self, machines: Vec<MachineView>) {
         self.machines = machines;
         self.clamp();
+    }
+
+    /// Re-read the machine's offset from UTC at most every ten minutes (a daylight-saving switch
+    /// changes it), so a "tomorrow morning" is in the time the human lives in.
+    pub fn refresh_tz(&mut self) {
+        let stale = self.tz_checked.is_none_or(|t| t.elapsed() > TZ_REFRESH);
+        if stale {
+            self.tz_offset = haste_core::time::local_offset_secs();
+            self.tz_checked = Some(Instant::now());
+        }
     }
 
     pub fn set_events(&mut self, events: Vec<EventView>) {
@@ -536,7 +574,7 @@ impl App {
     /// TODOs for today: open reminders due by the end of today (overdue included) or undated.
     #[must_use]
     pub fn todos(&self) -> Vec<&ReminderView> {
-        let end = inbox::day_start(haste_core::time::now_secs()) + 86_400;
+        let end = inbox::day_start(haste_core::time::now_secs(), self.tz_offset) + 86_400;
         let mut out: Vec<&ReminderView> = self
             .reminder_list
             .iter()
@@ -544,12 +582,6 @@ impl App {
             .collect();
         out.sort_by_key(|r| r.reminder.due_at.unwrap_or(i64::MAX));
         out
-    }
-
-    /// Selectable rows of the Today tab: threads, then TODOs.
-    #[must_use]
-    pub fn today_len(&self) -> usize {
-        self.today_threads().len() + self.todos().len()
     }
 
     /// Threads of channel `i` under the active filter (set-aside ones included, marked).
@@ -568,7 +600,9 @@ impl App {
     #[must_use]
     pub fn selected_thread(&self) -> Option<&ThreadView> {
         match self.view {
-            View::Today => self.today_threads().get(self.today_selected).copied(),
+            View::Today if self.today_focus == TodayFocus::Inbox => {
+                self.today_threads().get(self.today_selected).copied()
+            }
             View::Channels if self.channel_inner => self
                 .channel_threads(self.channels_selected)
                 .get(self.channel_thread_selected)
@@ -581,7 +615,7 @@ impl App {
     #[must_use]
     pub fn agenda(&self) -> Vec<&EventView> {
         let now = haste_core::time::now_secs();
-        let until = inbox::day_start(now) + inbox::AGENDA_DAYS * 86_400;
+        let until = inbox::day_start(now, self.tz_offset) + inbox::AGENDA_DAYS * 86_400;
         let mut out: Vec<&EventView> = self
             .events
             .iter()
@@ -596,7 +630,10 @@ impl App {
     fn clamp(&mut self) {
         let rows = self.rows().len();
         self.approvals_selected = self.approvals_selected.min(rows.saturating_sub(1));
-        self.today_selected = self.today_selected.min(self.today_len().saturating_sub(1));
+        self.today_selected = self
+            .today_selected
+            .min(self.today_threads().len().saturating_sub(1));
+        self.todo_selected = self.todo_selected.min(self.todos().len().saturating_sub(1));
         self.channels_selected = self.channels_selected.min(inbox::CHANNELS.len() - 1);
         self.channel_thread_selected = self.channel_thread_selected.min(
             self.channel_threads(self.channels_selected)
@@ -623,7 +660,8 @@ impl App {
 
     fn selection_len(&self) -> usize {
         match self.view {
-            View::Today => self.today_len(),
+            View::Today if self.today_focus == TodayFocus::Todo => self.todos().len(),
+            View::Today => self.today_threads().len(),
             View::Channels if self.channel_inner => {
                 self.channel_threads(self.channels_selected).len()
             }
@@ -637,6 +675,7 @@ impl App {
 
     fn selection_mut(&mut self) -> &mut usize {
         match self.view {
+            View::Today if self.today_focus == TodayFocus::Todo => &mut self.todo_selected,
             View::Today => &mut self.today_selected,
             View::Channels if self.channel_inner => &mut self.channel_thread_selected,
             View::Channels => &mut self.channels_selected,
@@ -722,8 +761,8 @@ impl App {
             Mode::Remind {
                 thread_id,
                 title,
-                input,
-            } => self.key_remind(key, thread_id, title, input),
+                custom,
+            } => self.key_remind(key, thread_id, title, custom),
             Mode::ReplyChoice { thread_id } => self.key_reply_choice(key, thread_id),
             Mode::Detail(_) => {
                 if matches!(key, Key::Esc | Key::Char('q') | Key::Enter) {
@@ -806,8 +845,8 @@ impl App {
     }
 
     fn key_normal(&mut self, key: Key) -> Option<Effect> {
-        let thread_view =
-            matches!(self.view, View::Today) || (self.view == View::Channels && self.channel_inner);
+        let thread_view = (self.view == View::Today && self.today_focus == TodayFocus::Inbox)
+            || (self.view == View::Channels && self.channel_inner);
         match key {
             Key::Char('q') => return Some(Effect::Quit),
             Key::Tab => {
@@ -830,6 +869,8 @@ impl App {
                 self.channel_inner = true;
                 self.channel_thread_selected = 0;
             }
+            Key::Char('J') if self.view == View::Today => self.today_focus = TodayFocus::Todo,
+            Key::Char('K') if self.view == View::Today => self.today_focus = TodayFocus::Inbox,
             Key::Char('f') if matches!(self.view, View::Today | View::Channels) => {
                 self.cycle_filter();
             }
@@ -1146,13 +1187,17 @@ impl App {
 
     fn start_remind(&mut self) {
         if let Some((thread_id, title)) = self.thread_under_cursor() {
-            let input = inbox::default_due(&title);
             self.mode = Mode::Remind {
                 thread_id,
                 title,
-                input,
+                custom: None,
             };
         }
+    }
+
+    /// The due time `Enter` accepts in the reminder prompt, from the thread's subject.
+    fn suggested_due(&self, title: &str) -> i64 {
+        inbox::suggest_due(title, haste_core::time::now_secs(), self.tz_offset)
     }
 
     /// `r`: reply. A mail thread with several people asks first whether to reply to the sender
@@ -1204,38 +1249,69 @@ impl App {
         key: Key,
         thread_id: String,
         title: String,
-        mut input: String,
+        custom: Option<String>,
     ) -> Option<Effect> {
-        match key {
-            Key::Esc => self.mode = Mode::Normal,
-            Key::Enter => match inbox::parse_due(&input, haste_core::time::now_secs()) {
-                Ok(due) => {
-                    self.mode = Mode::Normal;
-                    return Some(Effect::ToReminder {
+        let now = haste_core::time::now_secs();
+        let off = self.tz_offset;
+        let done = |me: &mut Self, due: Option<i64>| {
+            me.mode = Mode::Normal;
+            Some(Effect::ToReminder {
+                thread_id: thread_id.clone(),
+                title: title.clone(),
+                due,
+            })
+        };
+        match (key, custom) {
+            (Key::Esc, _) => self.mode = Mode::Normal,
+            // quick picks
+            (Key::Enter, None) => return done(self, Some(self.suggested_due(&title))),
+            (Key::Char('m'), None) => return done(self, Some(inbox::tomorrow_morning(now, off))),
+            (Key::Char('w'), None) => return done(self, Some(inbox::next_week(now, off))),
+            (Key::Char('l'), None) => return done(self, Some(inbox::later(now))),
+            (Key::Char('n'), None) => return done(self, None),
+            (Key::Char('c'), None) => {
+                let text = inbox::stamp(self.suggested_due(&title), off);
+                self.mode = Mode::Remind {
+                    thread_id,
+                    title,
+                    custom: Some(text),
+                };
+            }
+            // typing a date
+            (Key::Enter, Some(input)) => match inbox::parse_due(&input, now, off) {
+                Ok(due) => return done(self, due),
+                Err(e) => {
+                    self.status = e;
+                    self.mode = Mode::Remind {
                         thread_id,
                         title,
-                        due,
-                    });
+                        custom: Some(input),
+                    };
                 }
-                Err(e) => self.status = e,
             },
-            Key::Backspace => {
+            (Key::Backspace, Some(mut input)) => {
                 input.pop();
                 self.mode = Mode::Remind {
                     thread_id,
                     title,
-                    input,
+                    custom: Some(input),
                 };
             }
-            Key::Char(c) => {
+            (Key::Char(c), Some(mut input)) => {
                 input.push(c);
                 self.mode = Mode::Remind {
                     thread_id,
                     title,
-                    input,
+                    custom: Some(input),
                 };
             }
-            _ => {}
+            (_, custom) => {
+                self.mode = Mode::Remind {
+                    thread_id,
+                    title,
+                    custom,
+                };
+            }
         }
         None
     }
@@ -1271,8 +1347,19 @@ impl App {
             Mode::Snooze { input, .. } => Some(format!(
                 "Snooze for (whole hours or days, e.g. 3h or 2d; Enter to set, Esc to cancel): {input}"
             )),
-            Mode::Remind { input, .. } => Some(format!(
-                "Reminder due (UTC; Enter accepts, empty = no date, Esc cancels): {input}"
+            Mode::Remind {
+                title,
+                custom: None,
+                ..
+            } => Some(format!(
+                "Remind me: Enter {} · m tomorrow morning · w next week · l later (+3h) · n no date · c type a date · Esc",
+                inbox::describe(self.suggested_due(title), self.tz_offset)
+            )),
+            Mode::Remind {
+                custom: Some(input),
+                ..
+            } => Some(format!(
+                "Reminder due (local time; Enter sets, empty = no date, Esc cancels): {input}"
             )),
             Mode::ReplyChoice { .. } => {
                 Some("Several people on this thread: r reply to sender · a reply to all · Esc".into())
@@ -1529,18 +1616,86 @@ mod tests {
         assert_eq!(app.mode, Mode::Normal);
     }
 
+    fn remind_effect(app: &mut App, keys: &[Key]) -> Vec<Effect> {
+        keys.iter().filter_map(|k| app.handle_key(*k)).collect()
+    }
+
     #[test]
-    fn t_asks_for_a_due_date_prefilled_and_empty_means_undated() {
-        let mut app = inbox_app();
+    fn t_offers_quick_picks_and_the_suggestion_is_the_default() {
+        let now = haste_core::time::now_secs();
+        let mut app = inbox_app(); // cursor on t2, "Team lunch": no date in the subject
         press(&mut app, "t");
-        let Mode::Remind { input, .. } = &app.mode else {
+        assert!(matches!(app.mode, Mode::Remind { custom: None, .. }));
+        let prompt = app.confirm_prompt().unwrap();
+        for hint in [
+            "Enter",
+            "m tomorrow",
+            "w next week",
+            "l later",
+            "n no date",
+            "c type",
+        ] {
+            assert!(prompt.contains(hint), "{hint}: {prompt}");
+        }
+        let Some(Effect::ToReminder { due: Some(due), .. }) = app.handle_key(Key::Enter) else {
+            panic!("Enter accepts the suggestion")
+        };
+        let tomorrow = inbox::tomorrow_morning(now, app.tz_offset);
+        assert!((due - tomorrow).abs() <= 1, "default is tomorrow morning");
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn each_quick_pick_key_sets_its_time() {
+        let now = haste_core::time::now_secs();
+        let pick = |key: char| {
+            let mut app = inbox_app();
+            press(&mut app, "t");
+            let effects = remind_effect(&mut app, &[Key::Char(key)]);
+            let Some(Effect::ToReminder { due, .. }) = effects.into_iter().next() else {
+                panic!("{key}")
+            };
+            due
+        };
+        let morning = pick('m').unwrap();
+        assert!((morning - inbox::tomorrow_morning(now, 0)).abs() <= 1);
+        let week = pick('w').unwrap();
+        assert!((week - inbox::next_week(now, 0)).abs() <= 1);
+        let later = pick('l').unwrap();
+        assert!((later - (now + 3 * 3600)).abs() <= 1);
+        assert_eq!(pick('n'), None, "no date");
+    }
+
+    #[test]
+    fn the_suggestion_uses_a_date_from_the_subject() {
+        let mut app = App::new();
+        app.set_threads(vec![mail_thread(
+            "t9",
+            "Contract due 2099-03-04",
+            &["a@x.com"],
+            1,
+        )]);
+        press(&mut app, "t");
+        let Some(Effect::ToReminder { due: Some(due), .. }) = app.handle_key(Key::Enter) else {
+            panic!()
+        };
+        assert_eq!(due, haste_core::time::from_civil(2099, 3, 4, 9, 0));
+    }
+
+    #[test]
+    fn c_types_a_custom_date_and_empty_means_undated() {
+        let mut app = inbox_app();
+        press(&mut app, "tc");
+        let Mode::Remind {
+            custom: Some(text), ..
+        } = app.mode.clone()
+        else {
             panic!("{:?}", app.mode)
         };
-        assert_eq!(input, "tomorrow 09:00");
-        for _ in 0..input.len() {
+        for _ in 0..text.len() {
             app.handle_key(Key::Backspace);
         }
-        let effects: Vec<Effect> = app.handle_key(Key::Enter).into_iter().collect();
+        let effects = remind_effect(&mut app, &[Key::Enter]);
         assert_eq!(
             effects,
             vec![Effect::ToReminder {
@@ -1549,6 +1704,45 @@ mod tests {
                 due: None
             }]
         );
+        // a bad date keeps the prompt open
+        press(&mut app, "tc");
+        for _ in 0..40 {
+            app.handle_key(Key::Backspace);
+        }
+        press(&mut app, "soon");
+        assert!(remind_effect(&mut app, &[Key::Enter]).is_empty());
+        assert!(matches!(app.mode, Mode::Remind { .. }));
+        app.handle_key(Key::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn capital_j_and_k_move_between_the_incoming_and_todo_panes() {
+        let mut app = inbox_app();
+        assert_eq!(app.today_focus, TodayFocus::Inbox);
+        press(&mut app, "J");
+        assert_eq!(app.today_focus, TodayFocus::Todo);
+        // thread keys do nothing while the TODO pane has the cursor
+        for keys in ["e", "g", "p", "s", "t", "r"] {
+            assert!(press(&mut app, keys).is_empty(), "{keys}");
+        }
+        assert_eq!(app.mode, Mode::Normal);
+        press(&mut app, "K");
+        assert_eq!(app.today_focus, TodayFocus::Inbox);
+        assert_eq!(press(&mut app, "e").len(), 1);
+    }
+
+    #[test]
+    fn the_incoming_list_scrolls_past_ten_rows() {
+        let mut app = App::new();
+        app.set_threads(
+            (0..25)
+                .map(|i| mail_thread(&format!("t{i}"), "s", &["a@x.com"], i))
+                .collect(),
+        );
+        assert_eq!(app.today_threads().len(), 25);
+        press(&mut app, "G");
+        assert_eq!(app.today_selected, 24);
     }
 
     #[test]

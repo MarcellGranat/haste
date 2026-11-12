@@ -24,6 +24,7 @@ fn map_key(code: KeyCode) -> Option<Key> {
 }
 
 fn refresh(app: &mut App, client: &Client) {
+    app.refresh_tz();
     match client.call(RequestBody::ProposalList {
         states: vec![
             ProposalState::Pending,

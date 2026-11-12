@@ -20,6 +20,35 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// The machine's current offset from UTC in seconds (`+0100` is 3600), read from `date +%z`;
+/// 0 when it cannot be read. Changes at a daylight-saving switch, so callers refresh it now
+/// and then.
+#[must_use]
+pub fn local_offset_secs() -> i64 {
+    let out = std::process::Command::new("date").arg("+%z").output();
+    let text = out
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .unwrap_or_default();
+    parse_utc_offset(&text).unwrap_or(0)
+}
+
+/// `+0100` or `-0530` as seconds.
+#[must_use]
+pub fn parse_utc_offset(s: &str) -> Option<i64> {
+    let (sign, rest) = match s.as_bytes().first()? {
+        b'+' => (1, &s[1..]),
+        b'-' => (-1, &s[1..]),
+        _ => return None,
+    };
+    if rest.len() != 4 || !rest.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let (h, m): (i64, i64) = (rest[..2].parse().ok()?, rest[2..].parse().ok()?);
+    (h < 24 && m < 60).then_some(sign * (h * 3600 + m * 60))
+}
+
 /// Unix seconds for a UTC calendar time.
 #[must_use]
 pub fn from_civil(y: i64, m: i64, d: i64, h: i64, mi: i64) -> i64 {
@@ -82,6 +111,15 @@ pub fn parse_rfc3339(s: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn utc_offsets_parse() {
+        assert_eq!(super::parse_utc_offset("+0100"), Some(3600));
+        assert_eq!(super::parse_utc_offset("-0530"), Some(-19_800));
+        for bad in ["", "0100", "+01", "+0160", "+2500", "CET"] {
+            assert_eq!(super::parse_utc_offset(bad), None, "{bad}");
+        }
+    }
+
     #[test]
     fn civil_round_trips() {
         let t = super::from_civil(2026, 11, 12, 9, 30);

@@ -465,9 +465,9 @@ and has three main tabs, plus three secondary screens:
 
 | Key | Screen |
 |---|---|
-| `1` Today | Inbox of every channel under the active filter (priority first, then newest), and below it the TODOs: open Apple Reminders due today (overdue included) or with no date |
+| `1` Today | Two panes. **Incoming** (top): every channel under the active filter, priority first, then newest; ten rows at a time, `j`/`k` scrolls through the rest. **TODO** (below): open Apple Reminders due today (overdue included) or with no date. `J` moves the cursor to the TODO pane, `K` back to Incoming |
 | `2` Channels | The same inbox by channel (gmail, icloud, whatsapp, messenger, imessage) with counts; `Enter` opens a channel, `Esc` goes back |
-| `3` Calendar | The next 7 days of your calendar, grouped by day (read-only, UTC) |
+| `3` Calendar | The next 7 days of your calendar, grouped by day (read-only, your local time) |
 | `4` `5` `6` | Approvals, Connectors, Agents (`Esc` returns to Today); the header shows the pending-approvals count |
 
 On a thread (Today, or inside a channel), only you can use these keys:
@@ -479,9 +479,9 @@ On a thread (Today, or inside a channel), only you can use these keys:
 | `g` | put aside / bring back (aside threads leave Today and show with `◌` in Channels) |
 | `p` | toggle priority (marked `★`, sorted first) |
 | `s` | snooze, whole hours or days only: `3h`, `2d` |
-| `t` | propose a reminder about the thread; asks for a due date (UTC), prefilled from a `YYYY-MM-DD` in the subject or `tomorrow 09:00`; empty means no date; approve it in Approvals |
+| `t` | turn the thread into a TODO. One key picks when: `Enter` the suggestion (a `YYYY-MM-DD` date in the subject at 09:00, otherwise tomorrow morning), `m` tomorrow morning (09:00), `w` next week (Monday 09:00), `l` later (three hours from now), `n` no date, `c` type a date (`2026-11-20 14:30`, `tomorrow`, `+3d`). Times are your local time. The reminder is proposed; approve it in Approvals |
 | `f` | next preset filter |
-| `j` `k` `G` `0` | move, bottom, top |
+| `j` `k` `G` `0` | move, bottom, top (`J`/`K` switch pane on Today) |
 
 **Preset filters** are `filters.json` in the data folder (the daemon validates it; a typo is shown in
 the footer and the previous filters stay active; with no file there is one filter, `all`):

@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{summary, AgentRow, App, Mode, Row, View};
+use crate::app::{summary, AgentRow, App, Mode, Row, TodayFocus, View};
 use crate::inbox::{self, CHANNELS};
 use crate::theme;
 use haste_core::herdr::{AgentStatus, MachineState};
@@ -94,7 +94,14 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         ("f", "filter"),
     ];
     match app.view {
-        View::Today => thread_keys,
+        View::Today if app.today_focus == TodayFocus::Todo => {
+            vec![("K", "back to incoming"), ("j/k", "move")]
+        }
+        View::Today => {
+            let mut h = thread_keys;
+            h.push(("J", "to TODOs"));
+            h
+        }
         View::Channels if app.channel_inner => {
             let mut h = thread_keys;
             h.push(("Esc", "back"));
@@ -201,15 +208,6 @@ fn thread_line(t: &ThreadView, now: i64) -> ListItem<'static> {
     ]))
 }
 
-fn section(title: &str, count: usize) -> ListItem<'static> {
-    ListItem::new(Line::from(Span::styled(
-        format!("{title} ({count})"),
-        Style::new()
-            .fg(theme::LAVENDER)
-            .add_modifier(Modifier::BOLD),
-    )))
-}
-
 fn filter_title(app: &App, what: &str) -> String {
     format!(
         " {what} · filter: {} ({}/{}) ",
@@ -219,48 +217,116 @@ fn filter_title(app: &App, what: &str) -> String {
     )
 }
 
-fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let now = haste_core::time::now_secs();
-    let threads = app.today_threads();
-    let todos = app.todos();
-    let mut items = vec![section("Inbox", threads.len())];
-    items.extend(threads.iter().map(|t| thread_line(t, now)));
-    let todo_header = items.len();
-    items.push(section("TODO today and undated", todos.len()));
-    items.extend(todos.iter().map(|r| {
-        let due = r
-            .reminder
-            .due_at
-            .map_or_else(|| "no date".to_owned(), inbox::stamp);
-        let overdue = r.reminder.due_at.is_some_and(|d| d < now);
-        ListItem::new(Line::from(vec![
-            Span::styled("☐ ", Style::new().fg(theme::GREEN)),
-            Span::styled(r.reminder.title.clone(), Style::new().fg(theme::TEXT)),
-            Span::styled(
-                format!("  {due}"),
-                Style::new().fg(if overdue { theme::DANGER } else { theme::MUTED }),
-            ),
-        ]))
-    }));
-    // The cursor counts threads then TODOs; headers are not selectable.
-    let selected = app.today_selected;
-    let position = if selected < threads.len() {
-        selected + 1
+fn pane_border(active: bool) -> Style {
+    Style::new().fg(if active {
+        theme::BORDER_ACTIVE
     } else {
-        selected + 2
-    };
-    let _ = todo_header;
-    let mut state = ListState::default().with_selected((app.today_len() > 0).then_some(position));
+        theme::BORDER
+    })
+}
+
+/// A scrolling list: the window start is remembered in `offset` so the list moves only when the
+/// cursor leaves the visible rows.
+fn draw_scrolling(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    block: Block<'_>,
+    items: Vec<ListItem<'_>>,
+    selected: Option<usize>,
+    offset: &std::cell::Cell<usize>,
+) {
+    let rows = usize::from(area.height.saturating_sub(2));
+    let start = inbox::window_start(offset.get(), selected.unwrap_or(0), rows);
+    offset.set(start);
+    let mut state = ListState::default()
+        .with_offset(start)
+        .with_selected(selected);
     frame.render_stateful_widget(
         List::new(items)
-            .block(
-                theme::panel(&filter_title(app, "Today"))
-                    .border_style(Style::new().fg(theme::BORDER_ACTIVE)),
-            )
+            .block(block)
             .highlight_style(theme::selected())
             .highlight_symbol("▌ "),
         area,
         &mut state,
+    );
+}
+
+fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let now = haste_core::time::now_secs();
+    let off = app.tz_offset;
+    let [top, bottom] = Layout::vertical([
+        Constraint::Length(u16::try_from(inbox::INBOX_ROWS + 2).unwrap_or(12)),
+        Constraint::Min(4),
+    ])
+    .areas(area);
+    let inbox_focus = app.today_focus == TodayFocus::Inbox;
+
+    // incoming messages: ten rows, scrollable
+    let threads = app.today_threads();
+    let shown = if threads.len() > inbox::INBOX_ROWS {
+        format!(
+            "showing {} of {}, j/k scrolls",
+            inbox::INBOX_ROWS,
+            threads.len()
+        )
+    } else {
+        format!("{}", threads.len())
+    };
+    let title = format!(
+        " Incoming · {shown} · filter: {} ({}/{}) ",
+        app.active_filter().name,
+        app.filter_index + 1,
+        app.filters.len()
+    );
+    let items: Vec<ListItem<'_>> = threads.iter().map(|t| thread_line(t, now)).collect();
+    draw_scrolling(
+        frame,
+        top,
+        theme::panel(&title).border_style(pane_border(inbox_focus)),
+        items,
+        (inbox_focus && !threads.is_empty()).then_some(app.today_selected),
+        &app.inbox_offset,
+    );
+
+    // TODOs for today and without a date
+    let todos = app.todos();
+    let items: Vec<ListItem<'_>> = todos
+        .iter()
+        .map(|r| {
+            let due = r
+                .reminder
+                .due_at
+                .map_or_else(|| "no date".to_owned(), |d| inbox::stamp(d, off));
+            let overdue = r.reminder.due_at.is_some_and(|d| d < now);
+            ListItem::new(Line::from(vec![
+                Span::styled("☐ ", Style::new().fg(theme::GREEN)),
+                Span::styled(r.reminder.title.clone(), Style::new().fg(theme::TEXT)),
+                Span::styled(
+                    format!("  {due}"),
+                    Style::new().fg(if overdue { theme::DANGER } else { theme::MUTED }),
+                ),
+            ]))
+        })
+        .collect();
+    let items = if items.is_empty() {
+        vec![ListItem::new(Span::styled(
+            "nothing due today, nothing without a date",
+            theme::muted(),
+        ))]
+    } else {
+        items
+    };
+    let todo_title = format!(
+        " TODO · today and no date · {} · J/K switch pane ",
+        todos.len()
+    );
+    draw_scrolling(
+        frame,
+        bottom,
+        theme::panel(&todo_title).border_style(pane_border(!inbox_focus)),
+        items,
+        (!inbox_focus && !todos.is_empty()).then_some(app.todo_selected),
+        &app.todo_offset,
     );
 }
 
@@ -289,13 +355,8 @@ fn draw_channels(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_stateful_widget(
         List::new(channel_items)
             .block(
-                theme::panel(&filter_title(app, "Channels")).border_style(Style::new().fg(
-                    if app.channel_inner {
-                        theme::BORDER
-                    } else {
-                        theme::BORDER_ACTIVE
-                    },
-                )),
+                theme::panel(&filter_title(app, "Channels"))
+                    .border_style(pane_border(!app.channel_inner)),
             )
             .highlight_style(theme::selected())
             .highlight_symbol("▌ "),
@@ -305,38 +366,36 @@ fn draw_channels(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let threads = app.channel_threads(app.channels_selected);
     let items: Vec<ListItem<'_>> = threads.iter().map(|t| thread_line(t, now)).collect();
     let title = CHANNELS.get(app.channels_selected).copied().unwrap_or("");
-    let mut ts = ListState::default().with_selected(
-        (app.channel_inner && !threads.is_empty()).then_some(app.channel_thread_selected),
-    );
-    frame.render_stateful_widget(
-        List::new(items)
-            .block(
-                theme::panel(&format!(" {title} ")).border_style(Style::new().fg(
-                    if app.channel_inner {
-                        theme::BORDER_ACTIVE
-                    } else {
-                        theme::BORDER
-                    },
-                )),
-            )
-            .highlight_style(theme::selected())
-            .highlight_symbol("▌ "),
+    draw_scrolling(
+        frame,
         right,
-        &mut ts,
+        theme::panel(&format!(" {title} ")).border_style(pane_border(app.channel_inner)),
+        items,
+        (app.channel_inner && !threads.is_empty()).then_some(app.channel_thread_selected),
+        &app.channel_offset,
     );
 }
 
 fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let off = app.tz_offset;
     let events = app.agenda();
     let mut items: Vec<ListItem<'_>> = Vec::new();
     let mut position = None;
     let mut last_day = i64::MIN;
     for (i, e) in events.iter().enumerate() {
-        let day = inbox::day_start(e.event.start_at);
+        // all-day events are dates (midnight UTC), not moments: never shift them by the offset
+        let (day, label) = if e.event.all_day {
+            (e.event.start_at, inbox::day_label(e.event.start_at, 0))
+        } else {
+            (
+                inbox::day_start(e.event.start_at, off),
+                inbox::day_label(e.event.start_at, off),
+            )
+        };
         if day != last_day {
             last_day = day;
             items.push(ListItem::new(Line::from(Span::styled(
-                inbox::day_label(day),
+                label,
                 Style::new()
                     .fg(theme::LAVENDER)
                     .add_modifier(Modifier::BOLD),
@@ -348,7 +407,7 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         let when = if e.event.all_day {
             "all day".to_owned()
         } else {
-            inbox::stamp(e.event.start_at)[11..].to_owned()
+            inbox::stamp(e.event.start_at, off)[11..].to_owned()
         };
         let tags = if e.tags.is_empty() {
             String::new()
@@ -371,7 +430,7 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_stateful_widget(
         List::new(items)
             .block(
-                theme::panel(" Calendar · next 7 days (UTC) · read-only ")
+                theme::panel(" Calendar · next 7 days · local time · read-only ")
                     .border_style(Style::new().fg(theme::BORDER_ACTIVE)),
             )
             .highlight_style(theme::selected())
@@ -605,5 +664,46 @@ mod tests {
             assert!(!body.contains("Color::Rgb"), "{name}");
             assert!(!body.contains("Color::Yellow"), "{name}");
         }
+    }
+
+    #[test]
+    fn today_has_a_ten_row_incoming_pane_above_the_todo_pane() {
+        let mut app = App::new();
+        app.set_threads(
+            (0..25)
+                .map(|i| {
+                    let mut t = haste_core::model::Thread {
+                        id: format!("t{i}"),
+                        source: haste_core::model::Source::Gmail,
+                        external_id: format!("g{i}"),
+                        subject: format!("subject-{i:02}"),
+                        participants: vec![],
+                        last_activity_at: 1_000 + i64::from(i),
+                        version: 1,
+                    };
+                    t.version = 1;
+                    haste_proto::ThreadView {
+                        triage: haste_core::model::Triage::new(
+                            &t.id,
+                            haste_core::model::ObjectKind::Thread,
+                        ),
+                        thread: t,
+                        tags: vec![],
+                    }
+                })
+                .collect(),
+        );
+        let text = render(&app);
+        assert!(text.contains("showing 10 of 25"), "{text}");
+        assert!(text.contains("TODO"));
+        // newest first: subject-24 is visible, the oldest are scrolled out
+        assert!(text.contains("subject-24") && text.contains("subject-15"));
+        assert!(!text.contains("subject-14"), "only ten rows are shown");
+        // scrolling down to the 20th item brings it into view
+        for _ in 0..19 {
+            app.handle_key(Key::Char('j'));
+        }
+        let text = render(&app);
+        assert!(text.contains("subject-05"), "scrolled to the cursor");
     }
 }

@@ -33,7 +33,11 @@ fn refresh(app: &mut App, client: &Client) {
         ],
     }) {
         Ok(Response::Proposals { proposals }) => app.set_proposals(proposals),
-        Ok(other) => app.status = format!("unexpected reply: {other:?}"),
+        Ok(other) => {
+            app.status = describe(Ok(other))
+                .err()
+                .unwrap_or_else(|| "unexpected reply".into());
+        }
         Err(e) => app.status = e,
     }
     match client.call(RequestBody::AgentList) {
@@ -127,6 +131,9 @@ fn complete_all(app: &mut App, client: &Client, ids: Vec<String>) {
 fn describe(response: Result<Response, String>) -> Result<(), String> {
     match response {
         Ok(Response::Error { error }) => Err(match error.code {
+            ErrorCode::UnsupportedVersion => {
+                "hasted is a different version from this TUI: restart hasted".to_owned()
+            }
             ErrorCode::StaleNeedsAcknowledgement => {
                 "thread changed; acknowledge to continue".to_owned()
             }

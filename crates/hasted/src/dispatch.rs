@@ -88,6 +88,8 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::EventTagAdd { .. }
         | RequestBody::EventTagRemove { .. }
         | RequestBody::RemindersStatus
+        | RequestBody::TriageSet { .. }
+        | RequestBody::FilterList
         | RequestBody::ResolveExecuting { .. }
         | RequestBody::Subscribe { .. } => Action::Manage,
     }
@@ -121,6 +123,8 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::ReminderTagRemove { .. } => "reminder_tag_remove",
         RequestBody::RemindersStatus => "reminders_status",
         RequestBody::ResolveExecuting { .. } => "resolve_executing",
+        RequestBody::TriageSet { .. } => "triage_set",
+        RequestBody::FilterList => "filter_list",
         _ => "request",
     }
 }
@@ -593,6 +597,28 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             change_event_tag(state, principal, &event_id, &tag, false)
         }
         RequestBody::RemindersStatus => reminders_status(state),
+        RequestBody::FilterList => {
+            let (filters, error) = crate::filters::load(&state.config.data_dir);
+            Response::Filters { filters, error }
+        }
+        RequestBody::TriageSet {
+            thread_id,
+            priority,
+            set_aside,
+            snoozed_until,
+            archived,
+        } => triage_set(
+            state,
+            principal,
+            &thread_id,
+            &haste_store::TriageUpdate {
+                priority,
+                snoozed_until,
+                set_aside,
+                archived,
+            },
+            now,
+        ),
         RequestBody::Execute {
             proposal_id,
             acknowledge_stale,
@@ -1068,6 +1094,62 @@ fn resolve_hints(state: &State, hints: Option<&Hints>) -> (Option<String>, Optio
 }
 
 /// Human-only: add or remove a project tag. Every outcome is audited with a reason code.
+/// Human-only triage write. Local state only: no connector is called, thread content is not
+/// touched, and the audit row names the fields changed (labels), never the thread's text.
+fn triage_set(
+    state: &State,
+    actor: &Principal,
+    thread_id: &str,
+    update: &haste_store::TriageUpdate,
+    now: i64,
+) -> Response {
+    match state.store.get_thread(thread_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => return err(ErrorCode::NotFound, "thread not found"),
+        Err(e) => return map_store(&e),
+    }
+    if let Some(p) = update.priority {
+        if !(0..=MAX_TRIAGE_PRIORITY).contains(&p) {
+            return err(ErrorCode::Validation, "priority out of range");
+        }
+    }
+    if let Err(e) = state.store.set_triage(
+        thread_id,
+        haste_core::model::ObjectKind::Thread,
+        update,
+        now,
+    ) {
+        return map_store(&e);
+    }
+    let mut fields = Vec::new();
+    if update.priority.is_some() {
+        fields.push("priority");
+    }
+    if update.set_aside.is_some() {
+        fields.push("set_aside");
+    }
+    if update.snoozed_until.is_some() {
+        fields.push("snooze");
+    }
+    if update.archived.is_some() {
+        fields.push("archive");
+    }
+    state.audit(
+        &actor.id,
+        "triage.set",
+        "applied",
+        Some(thread_id),
+        Some(&format!("fields={}", fields.join(","))),
+    );
+    state.publish(Event::ThreadChanged {
+        thread_id: thread_id.to_owned(),
+    });
+    Response::Done
+}
+
+/// Highest priority a human can set from the TUI.
+const MAX_TRIAGE_PRIORITY: i32 = 9;
+
 fn change_tag(state: &State, actor: &Principal, thread_id: &str, tag: &str, add: bool) -> Response {
     let result = if add {
         state.store.add_thread_tag(thread_id, tag)

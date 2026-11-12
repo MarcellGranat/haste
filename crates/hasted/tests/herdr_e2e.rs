@@ -919,6 +919,8 @@ fn kind(body: &RequestBody) -> Kind {
         | RequestBody::EventTagAdd { .. }
         | RequestBody::EventTagRemove { .. }
         | RequestBody::RemindersStatus
+        | RequestBody::TriageSet { .. }
+        | RequestBody::FilterList
         | RequestBody::Execute { .. }
         | RequestBody::ResolveExecuting { .. }
         | RequestBody::Subscribe { .. } => Kind::NotARead,
@@ -1195,5 +1197,87 @@ async fn only_the_human_can_tag_a_reminder_and_unknown_tags_are_refused() {
         .reminder_tags(&id)
         .unwrap()
         .is_empty());
+    rig.daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn triage_writes_are_human_only_local_and_leave_content_alone() {
+    let rig = boot("working").await;
+    let (t_haste, _, _) = seed_threads(&rig);
+    let list = |all: bool| RequestBody::ThreadList {
+        sources: vec![],
+        include_archived: all,
+        include_snoozed: all,
+    };
+    let Response::Threads { threads: before } = human(&rig, list(true)).await else {
+        panic!()
+    };
+    let subject = before
+        .iter()
+        .find(|t| t.thread.id == t_haste)
+        .unwrap()
+        .thread
+        .subject
+        .clone();
+
+    let agent = register(&rig, "agent-t", PrincipalKind::Agent).await;
+    let denied = call(
+        &rig,
+        &agent,
+        RequestBody::TriageSet {
+            thread_id: t_haste.clone(),
+            priority: None,
+            set_aside: None,
+            snoozed_until: None,
+            archived: Some(true),
+        },
+    )
+    .await;
+    assert_eq!(code(&denied), Some(ErrorCode::Denied));
+    assert!(rig.audit().contains("human_only_action:triage_set"));
+
+    let done = human(
+        &rig,
+        RequestBody::TriageSet {
+            thread_id: t_haste.clone(),
+            priority: Some(2),
+            set_aside: Some(true),
+            snoozed_until: None,
+            archived: Some(true),
+        },
+    )
+    .await;
+    assert!(matches!(done, Response::Done));
+    let Response::Threads { threads: visible } = human(&rig, list(false)).await else {
+        panic!()
+    };
+    assert!(
+        visible.iter().all(|t| t.thread.id != t_haste),
+        "archived is hidden"
+    );
+    let Response::Threads { threads: all } = human(&rig, list(true)).await else {
+        panic!()
+    };
+    let t = all.iter().find(|t| t.thread.id == t_haste).unwrap();
+    assert_eq!(t.thread.subject, subject, "content is untouched");
+    assert_eq!((t.triage.priority, t.triage.set_aside), (2, true));
+    assert!(rig.audit().contains("fields=priority,set_aside,archive"));
+
+    let bad = human(
+        &rig,
+        RequestBody::TriageSet {
+            thread_id: t_haste,
+            priority: Some(99),
+            set_aside: None,
+            snoozed_until: None,
+            archived: None,
+        },
+    )
+    .await;
+    assert_eq!(code(&bad), Some(ErrorCode::Validation));
+    let Response::Filters { filters, error } = human(&rig, RequestBody::FilterList).await else {
+        panic!()
+    };
+    assert_eq!((filters.len(), error), (1, None));
     rig.daemon.shutdown().await;
 }

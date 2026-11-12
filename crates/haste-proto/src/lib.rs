@@ -10,7 +10,7 @@ use haste_core::policy::PrincipalKind;
 use haste_core::proposal::{Payload, Proposal, ProposalState};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 /// Largest frame either side accepts.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
@@ -221,6 +221,23 @@ pub enum RequestBody {
         event_id: String,
         tag: String,
     },
+    /// Human-only: change the triage state of a thread directly (archive, set aside, priority,
+    /// snooze). Only local state changes; nothing is written to a mailbox or chat network, and
+    /// thread content is never touched. `None` leaves a field alone.
+    TriageSet {
+        thread_id: String,
+        #[serde(default)]
+        priority: Option<i32>,
+        #[serde(default)]
+        set_aside: Option<bool>,
+        /// `Some(None)` clears the snooze, `Some(Some(t))` snoozes until unix second `t`.
+        #[serde(default)]
+        snoozed_until: Option<Option<i64>>,
+        #[serde(default)]
+        archived: Option<bool>,
+    },
+    /// Human-only: the preset inbox filters from `filters.json` (or the built-in default).
+    FilterList,
     /// Human-only: run an approved reminder proposal (`approved -> executing -> sent`).
     Execute {
         proposal_id: String,
@@ -281,6 +298,25 @@ pub struct MachineView {
     pub machine: String,
     pub state: MachineState,
     pub agents: Vec<AgentStatusRecord>,
+}
+
+/// A preset inbox filter. A thread matches when every present key matches; within one key any
+/// value may match.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FilterView {
+    pub name: String,
+    /// Case-insensitive substrings of a participant address.
+    #[serde(default)]
+    pub sender: Vec<String>,
+    /// Case-insensitive substrings of the subject.
+    #[serde(default)]
+    pub subject: Vec<String>,
+    /// Source names (`gmail`, `whatsapp`, ...).
+    #[serde(default)]
+    pub source: Vec<String>,
+    /// Lowest priority shown.
+    #[serde(default)]
+    pub min_priority: Option<i32>,
 }
 
 /// A reminder with its project tags.
@@ -406,6 +442,13 @@ pub enum Response {
     },
     Tags {
         tags: Vec<String>,
+    },
+    Filters {
+        filters: Vec<FilterView>,
+        /// Set when `filters.json` was rejected (names the filter and key; no thread data). The
+        /// previous valid set stays active in the client.
+        #[serde(default)]
+        error: Option<String>,
     },
     Reminders {
         reminders: Vec<ReminderView>,

@@ -1,6 +1,7 @@
 //! The haste daemon: owns the store, policy gate, audit log and connector access.
 
 pub mod dispatch;
+pub mod filters;
 pub mod herdr;
 pub mod notes;
 pub mod notifier;

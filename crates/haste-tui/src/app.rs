@@ -1,11 +1,12 @@
 //! Pure TUI state and key handling. No terminal access, so everything here is unit-testable.
 
 use std::cell::Cell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use crate::inbox;
 use haste_core::herdr::{AgentStatus, AgentStatusRecord, MachineState};
+use haste_core::ignore::IgnoreList;
 use haste_core::proposal::{Payload, Proposal, ProposalState};
 use haste_proto::{
     ConnectorView, Event, EventView, FilterView, MachineView, ReminderView, RemindersStatusView,
@@ -57,6 +58,10 @@ pub enum TriageChange {
     /// Snooze until this unix second.
     SnoozeUntil(i64),
 }
+
+/// How long a task marked done stays in the list (struck through, undoable) before it is
+/// completed in Reminders and removed.
+pub const DONE_GRACE: Duration = Duration::from_secs(30);
 
 /// How often the local time zone offset is read again.
 const TZ_REFRESH: Duration = Duration::from_secs(600);
@@ -126,6 +131,14 @@ pub enum Effect {
     Triage {
         thread_id: String,
         change: TriageChange,
+    },
+    /// Hide a thread's sender from the TUI (the local `.haste_ignore` list).
+    Mute {
+        thread_id: String,
+    },
+    /// Complete these reminders in Reminders (propose, approve and run, as the human).
+    CompleteReminders {
+        ids: Vec<String>,
     },
     /// Open the editor for a reply to a thread; the text becomes a draft proposal (never sent).
     Reply {
@@ -235,6 +248,15 @@ pub struct App {
     pub filter_error: Option<String>,
     pub filter_index: usize,
     pub today_selected: usize,
+    /// Muted senders (`.haste_ignore`), applied to the Today and Channels lists only.
+    pub ignore: IgnoreList,
+    pub ignore_errors: Vec<String>,
+    /// Tasks selected with Space in the TODO pane.
+    pub todo_marked: BTreeSet<String>,
+    /// Tasks marked done: shown struck through until this moment, then completed and removed.
+    pub pending_done: BTreeMap<String, Instant>,
+    /// Tasks being completed right now: hidden until the next list arrives.
+    completing: BTreeSet<String>,
     pub today_focus: TodayFocus,
     pub todo_selected: usize,
     /// Offset of the machine's local time from UTC (seconds), refreshed by the loop.
@@ -339,6 +361,11 @@ impl App {
             filter_error: None,
             filter_index: 0,
             today_selected: 0,
+            ignore: IgnoreList::default(),
+            ignore_errors: Vec::new(),
+            todo_marked: BTreeSet::new(),
+            pending_done: BTreeMap::new(),
+            completing: BTreeSet::new(),
             today_focus: TodayFocus::Inbox,
             todo_selected: 0,
             tz_offset: 0,
@@ -404,7 +431,31 @@ impl App {
 
     pub fn set_reminder_list(&mut self, reminders: Vec<ReminderView>) {
         self.reminder_list = reminders;
+        // the fresh list is the truth: finished completions are gone, and marks or timers of
+        // tasks that no longer exist are dropped
+        self.completing.clear();
+        let live: BTreeSet<&str> = self
+            .reminder_list
+            .iter()
+            .filter(|r| !r.reminder.completed)
+            .map(|r| r.reminder.id.as_str())
+            .collect();
+        self.todo_marked.retain(|id| live.contains(id.as_str()));
+        self.pending_done.retain(|id, _| live.contains(id.as_str()));
         self.clamp();
+    }
+
+    pub fn set_ignore(&mut self, patterns: &[String], errors: Vec<String>) {
+        self.ignore = IgnoreList::from_patterns(patterns);
+        self.ignore_errors = errors;
+        self.clamp();
+    }
+
+    /// Every task marked done and not yet completed, cleared; used to finish them on quit.
+    pub fn take_pending_done(&mut self) -> Vec<String> {
+        let ids: Vec<String> = std::mem::take(&mut self.pending_done).into_keys().collect();
+        self.completing.extend(ids.iter().cloned());
+        ids
     }
 
     pub fn set_threads(&mut self, threads: Vec<ThreadView>) {
@@ -552,6 +603,7 @@ impl App {
             .iter()
             .filter(|t| !t.triage.archived && (include_aside || !t.triage.set_aside))
             .filter(|t| inbox::matches(filter, t))
+            .filter(|t| !self.ignore.is_muted(&inbox::senders(t)))
             .collect();
         out.sort_by(|a, b| {
             (b.triage.priority, b.thread.last_activity_at)
@@ -578,7 +630,11 @@ impl App {
         let mut out: Vec<&ReminderView> = self
             .reminder_list
             .iter()
-            .filter(|r| !r.reminder.completed && r.reminder.due_at.is_none_or(|d| d < end))
+            .filter(|r| {
+                !r.reminder.completed
+                    && !self.completing.contains(&r.reminder.id)
+                    && r.reminder.due_at.is_none_or(|d| d < end)
+            })
             .collect();
         out.sort_by_key(|r| r.reminder.due_at.unwrap_or(i64::MAX));
         out
@@ -849,6 +905,12 @@ impl App {
             || (self.view == View::Channels && self.channel_inner);
         match key {
             Key::Char('q') => return Some(Effect::Quit),
+            Key::Tab if self.view == View::Today => {
+                self.today_focus = match self.today_focus {
+                    TodayFocus::Inbox => TodayFocus::Todo,
+                    TodayFocus::Todo => TodayFocus::Inbox,
+                };
+            }
             Key::Tab => {
                 self.view = match View::TABS.iter().position(|v| *v == self.view) {
                     Some(i) => View::TABS[(i + 1) % View::TABS.len()],
@@ -875,6 +937,9 @@ impl App {
                 self.cycle_filter();
             }
             Key::Char('e') if thread_view => return self.triage_archive(),
+            Key::Char('x') if thread_view => return self.mute_selected(),
+            Key::Char(' ') if self.on_todos() => self.toggle_todo_mark(),
+            Key::Char('e') if self.on_todos() => self.mark_done(),
             Key::Char('g') if thread_view => return self.triage_aside(),
             Key::Char('p') if thread_view => return self.triage_priority(),
             Key::Char('s') if thread_view => self.start_snooze(),
@@ -1096,6 +1161,19 @@ impl App {
     /// run (once: the mode returns to normal first).
     pub fn tick(&mut self, now: Instant) -> Option<Effect> {
         self.now = now;
+        let due: Vec<String> = self
+            .pending_done
+            .iter()
+            .filter(|(_, deadline)| now >= **deadline)
+            .map(|(id, _)| id.clone())
+            .collect();
+        if !due.is_empty() {
+            for id in &due {
+                self.pending_done.remove(id);
+                self.completing.insert(id.clone());
+            }
+            return Some(Effect::CompleteReminders { ids: due });
+        }
         let Mode::SendCountdown {
             deadline,
             id,
@@ -1144,6 +1222,56 @@ impl App {
                 self.status = "put the cursor on a thread first".into();
                 None
             }
+        }
+    }
+
+    fn on_todos(&self) -> bool {
+        self.view == View::Today && self.today_focus == TodayFocus::Todo
+    }
+
+    fn mute_selected(&mut self) -> Option<Effect> {
+        let (thread_id, _) = self.thread_under_cursor()?;
+        Some(Effect::Mute { thread_id })
+    }
+
+    fn toggle_todo_mark(&mut self) {
+        let Some(id) = self
+            .todos()
+            .get(self.todo_selected)
+            .map(|r| r.reminder.id.clone())
+        else {
+            return;
+        };
+        if !self.todo_marked.remove(&id) {
+            self.todo_marked.insert(id);
+        }
+    }
+
+    /// `e` on the TODO pane: mark the selected tasks (or the one under the cursor) done. They stay
+    /// listed, struck through, for [`DONE_GRACE`] and are then completed; `e` on one of them
+    /// within that time takes it back.
+    fn mark_done(&mut self) {
+        let under_cursor = self
+            .todos()
+            .get(self.todo_selected)
+            .map(|r| r.reminder.id.clone());
+        if self.todo_marked.is_empty() {
+            let Some(id) = under_cursor else {
+                return;
+            };
+            if self.pending_done.remove(&id).is_some() {
+                self.status = "not done after all".into();
+            } else {
+                self.pending_done.insert(id, self.now + DONE_GRACE);
+                self.status = "marked done; it is completed in 30 s (e again to undo)".into();
+            }
+        } else {
+            let ids: Vec<String> = std::mem::take(&mut self.todo_marked).into_iter().collect();
+            let n = ids.len();
+            for id in ids {
+                self.pending_done.insert(id, self.now + DONE_GRACE);
+            }
+            self.status = format!("{n} marked done; they are completed in 30 s");
         }
     }
 
@@ -1743,6 +1871,126 @@ mod tests {
         assert_eq!(app.today_threads().len(), 25);
         press(&mut app, "G");
         assert_eq!(app.today_selected, 24);
+    }
+
+    #[test]
+    fn x_mutes_and_a_muted_sender_disappears_from_today_and_channels() {
+        let mut app = inbox_app();
+        assert_eq!(
+            press(&mut app, "x"),
+            vec![Effect::Mute {
+                thread_id: "t2".into()
+            }]
+        );
+        // the daemon answers with the pattern; the next refresh delivers the list
+        app.set_ignore(&["^b@x\\.com$".to_owned()], vec![]);
+        let ids: Vec<&str> = app
+            .today_threads()
+            .iter()
+            .map(|t| t.thread.id.as_str())
+            .collect();
+        assert_eq!(ids, ["t1"], "t2 has b@x.com among its senders");
+        press(&mut app, "2");
+        assert_eq!(app.channel_threads(0).len(), 1);
+        // an invalid line is reported and the rest still applies
+        app.set_ignore(
+            &["^b@x\\.com$".to_owned()],
+            vec!["line 3: not a valid regular expression".into()],
+        );
+        assert_eq!(app.ignore_errors.len(), 1);
+    }
+
+    fn reminder_view(id: &str, due: Option<i64>) -> ReminderView {
+        ReminderView {
+            reminder: haste_core::model::Reminder {
+                id: id.into(),
+                external_id: id.into(),
+                title: format!("task {id}"),
+                notes_snippet: String::new(),
+                due_at: due,
+                completed: false,
+                list_name: "L".into(),
+                remote_modified_at: 0,
+                missing_since: None,
+                version: 1,
+            },
+            tags: vec![],
+        }
+    }
+
+    fn todo_app() -> App {
+        let mut app = App::new();
+        app.set_reminder_list(vec![
+            reminder_view("a", None),
+            reminder_view("b", None),
+            reminder_view("c", None),
+        ]);
+        app.handle_key(Key::Tab); // to the TODO pane
+        assert_eq!(app.today_focus, TodayFocus::Todo);
+        app
+    }
+
+    #[test]
+    fn e_marks_a_task_done_for_30_seconds_then_it_is_completed_and_removed() {
+        let mut app = todo_app();
+        let t0 = Instant::now();
+        app.tick(t0);
+        assert!(press(&mut app, "e").is_empty());
+        assert_eq!(app.pending_done.len(), 1);
+        assert_eq!(app.todos().len(), 3, "still listed, struck through");
+        assert!(app.tick(t0 + Duration::from_secs(29)).is_none(), "not yet");
+        let effect = app.tick(t0 + DONE_GRACE + Duration::from_secs(1));
+        assert_eq!(
+            effect,
+            Some(Effect::CompleteReminders {
+                ids: vec!["a".into()]
+            })
+        );
+        assert_eq!(app.todos().len(), 2, "removed from the list at once");
+        assert!(
+            app.tick(t0 + Duration::from_secs(60)).is_none(),
+            "only once"
+        );
+    }
+
+    #[test]
+    fn e_again_within_the_time_takes_it_back() {
+        let mut app = todo_app();
+        press(&mut app, "e");
+        press(&mut app, "e");
+        assert!(app.pending_done.is_empty());
+        assert!(app
+            .tick(Instant::now() + Duration::from_secs(120))
+            .is_none());
+    }
+
+    #[test]
+    fn space_selects_several_tasks_and_e_marks_them_all() {
+        let mut app = todo_app();
+        press(&mut app, " jj "); // a and c selected, cursor on c
+        assert_eq!(app.todo_marked.len(), 2);
+        press(&mut app, "e");
+        assert_eq!(app.pending_done.len(), 2);
+        assert!(app.todo_marked.is_empty());
+        assert!(app.pending_done.contains_key("a") && app.pending_done.contains_key("c"));
+    }
+
+    #[test]
+    fn quitting_hands_over_the_tasks_still_waiting() {
+        let mut app = todo_app();
+        press(&mut app, "e");
+        let ids = app.take_pending_done();
+        assert_eq!(ids, vec!["a".to_owned()]);
+        assert!(app.pending_done.is_empty());
+        assert_eq!(app.todos().len(), 2);
+    }
+
+    #[test]
+    fn a_fresh_list_forgets_marks_of_tasks_that_are_gone() {
+        let mut app = todo_app();
+        press(&mut app, " e");
+        app.set_reminder_list(vec![reminder_view("b", None)]);
+        assert!(app.pending_done.is_empty() && app.todo_marked.is_empty());
     }
 
     #[test]
@@ -2549,7 +2797,17 @@ mod tests {
         assert_eq!(app.mode, Mode::Normal);
         app.handle_key(Key::Esc);
         assert_eq!(app.view, View::Today);
-        for expected in [View::Channels, View::Calendar, View::Today] {
+        // on Today, Tab switches between the Incoming and TODO panes
+        app.handle_key(Key::Tab);
+        assert_eq!((app.view, app.today_focus), (View::Today, TodayFocus::Todo));
+        app.handle_key(Key::Tab);
+        assert_eq!(
+            (app.view, app.today_focus),
+            (View::Today, TodayFocus::Inbox)
+        );
+        // on the other tabs it cycles the tabs
+        press(&mut app, "2");
+        for expected in [View::Calendar, View::Today] {
             app.handle_key(Key::Tab);
             assert_eq!(app.view, expected);
         }

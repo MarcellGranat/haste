@@ -90,6 +90,8 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::RemindersStatus
         | RequestBody::TriageSet { .. }
         | RequestBody::FilterList
+        | RequestBody::IgnoreList
+        | RequestBody::IgnoreMute { .. }
         | RequestBody::ResolveExecuting { .. }
         | RequestBody::Subscribe { .. } => Action::Manage,
     }
@@ -125,6 +127,8 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::ResolveExecuting { .. } => "resolve_executing",
         RequestBody::TriageSet { .. } => "triage_set",
         RequestBody::FilterList => "filter_list",
+        RequestBody::IgnoreList => "ignore_list",
+        RequestBody::IgnoreMute { .. } => "ignore_mute",
         _ => "request",
     }
 }
@@ -597,6 +601,14 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             change_event_tag(state, principal, &event_id, &tag, false)
         }
         RequestBody::RemindersStatus => reminders_status(state),
+        RequestBody::IgnoreList => {
+            let (list, errors) = read_ignore(&state.config.data_dir);
+            Response::Ignore {
+                patterns: list.patterns(),
+                errors,
+            }
+        }
+        RequestBody::IgnoreMute { thread_id } => ignore_mute(state, principal, &thread_id),
         RequestBody::FilterList => {
             let (filters, error) = crate::filters::load(&state.config.data_dir);
             Response::Filters { filters, error }
@@ -1145,6 +1157,74 @@ fn triage_set(
         thread_id: thread_id.to_owned(),
     });
     Response::Done
+}
+
+fn read_ignore(data_dir: &std::path::Path) -> (haste_core::ignore::IgnoreList, Vec<String>) {
+    let text =
+        std::fs::read_to_string(data_dir.join(haste_core::ignore::IGNORE_FILE)).unwrap_or_default();
+    haste_core::ignore::IgnoreList::parse(&text)
+}
+
+/// Who to mute for a thread. Mail: the latest sender that is not the human's own address (the
+/// human is never muted). Chats: the chat name, since a chat has no single sender.
+fn mute_pattern(state: &State, thread_id: &str) -> Result<String, &'static str> {
+    let (thread, _) = state
+        .store
+        .get_thread(thread_id)
+        .ok()
+        .flatten()
+        .ok_or("thread not found")?;
+    if !matches!(thread.source, Source::Gmail | Source::Icloud) {
+        return if thread.subject.trim().is_empty() {
+            Err("this chat has no name to mute")
+        } else {
+            Ok(haste_core::ignore::pattern_for(&thread.subject))
+        };
+    }
+    let own = state
+        .connector_for(&thread.source)
+        .and_then(|c| c.own_address())
+        .map(|a| a.to_lowercase())
+        .ok_or("your own address is not known yet, so nobody can be muted safely")?;
+    let messages = state
+        .store
+        .messages_for_thread(thread_id)
+        .map_err(|_| "could not read the thread")?;
+    messages
+        .iter()
+        .rev()
+        .filter_map(|m| m.sender_identifier.as_deref())
+        .find(|s| s.to_lowercase() != own)
+        .map(haste_core::ignore::pattern_for)
+        .ok_or("no sender other than you")
+}
+
+fn ignore_mute(state: &State, actor: &Principal, thread_id: &str) -> Response {
+    let pattern = match mute_pattern(state, thread_id) {
+        Ok(p) => p,
+        Err(why) => return err(ErrorCode::Validation, why),
+    };
+    let path = state.config.data_dir.join(haste_core::ignore::IGNORE_FILE);
+    let (existing, _) = read_ignore(&state.config.data_dir);
+    if !existing.patterns().contains(&pattern) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let written = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&path)
+            .and_then(|mut f| writeln!(f, "{pattern}"));
+        if written.is_err() {
+            return err(ErrorCode::Internal, "could not write the mute list");
+        }
+        // The pattern holds an address or chat name: the audit records only that it happened.
+        state.audit(&actor.id, "ignore.add", "added", Some(thread_id), None);
+    }
+    state.publish(Event::ThreadChanged {
+        thread_id: thread_id.to_owned(),
+    });
+    Response::Muted { pattern }
 }
 
 /// Highest priority a human can set from the TUI.

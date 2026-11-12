@@ -921,6 +921,8 @@ fn kind(body: &RequestBody) -> Kind {
         | RequestBody::RemindersStatus
         | RequestBody::TriageSet { .. }
         | RequestBody::FilterList
+        | RequestBody::IgnoreList
+        | RequestBody::IgnoreMute { .. }
         | RequestBody::Execute { .. }
         | RequestBody::ResolveExecuting { .. }
         | RequestBody::Subscribe { .. } => Kind::NotARead,
@@ -1279,5 +1281,69 @@ async fn triage_writes_are_human_only_local_and_leave_content_alone() {
         panic!()
     };
     assert_eq!((filters.len(), error), (1, None));
+    rig.daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn muting_is_human_only_local_and_never_mutes_the_human() {
+    use std::os::unix::fs::PermissionsExt;
+    let rig = boot("working").await;
+    // a chat is muted by its name
+    let chat = rig
+        .daemon
+        .state
+        .store
+        .upsert_thread(
+            &haste_core::model::Source::Whatsapp,
+            "chat-1",
+            "Noisy Group (v2)",
+            &[],
+            1,
+        )
+        .unwrap()
+        .id;
+    // mail: the daemon does not know the human's own address here, so it refuses to guess
+    let (mail, _, _) = seed_threads(&rig);
+
+    let agent = register(&rig, "agent-m", PrincipalKind::Agent).await;
+    let denied = call(
+        &rig,
+        &agent,
+        RequestBody::IgnoreMute {
+            thread_id: chat.clone(),
+        },
+    )
+    .await;
+    assert_eq!(code(&denied), Some(ErrorCode::Denied));
+    assert!(rig.audit().contains("human_only_action:ignore_mute"));
+
+    let refused = human(&rig, RequestBody::IgnoreMute { thread_id: mail }).await;
+    assert_eq!(code(&refused), Some(ErrorCode::Validation));
+
+    let Response::Muted { pattern } = human(
+        &rig,
+        RequestBody::IgnoreMute {
+            thread_id: chat.clone(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert_eq!(pattern, "^Noisy Group \\(v2\\)$", "escaped, exact");
+    // again: no duplicate line
+    human(&rig, RequestBody::IgnoreMute { thread_id: chat }).await;
+    let Response::Ignore { patterns, errors } = human(&rig, RequestBody::IgnoreList).await else {
+        panic!()
+    };
+    assert_eq!((patterns, errors), (vec![pattern], vec![]));
+    let file = rig.daemon.state.config.data_dir.join(".haste_ignore");
+    assert_eq!(
+        fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // the audit says that it happened, never who or what was muted
+    assert!(rig.audit().contains("ignore.add"));
+    assert!(!rig.audit().contains("Noisy"));
     rig.daemon.shutdown().await;
 }

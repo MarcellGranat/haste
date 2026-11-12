@@ -49,6 +49,9 @@ fn refresh(app: &mut App, client: &Client) {
     if let Ok(Response::RemindersStatus { status }) = client.call(RequestBody::RemindersStatus) {
         app.set_reminders(status);
     }
+    if let Ok(Response::Ignore { patterns, errors }) = client.call(RequestBody::IgnoreList) {
+        app.set_ignore(&patterns, errors);
+    }
     if let Ok(Response::Filters { filters, error }) = client.call(RequestBody::FilterList) {
         app.set_filters(filters, error);
     }
@@ -73,6 +76,54 @@ fn refresh(app: &mut App, client: &Client) {
     }
 }
 
+/// Complete one reminder as the human: propose, approve and run, through the same audited steps
+/// an approval in the Approvals view would take.
+fn complete_reminder(client: &Client, id: &str) -> Result<(), String> {
+    let proposal = match client.call(RequestBody::Propose {
+        payload: haste_core::proposal::Payload::ReminderComplete {
+            reminder_id: id.to_owned(),
+            project: None,
+            reminder_version: None,
+        },
+        thread_id: None,
+        idempotency_key: format!("tui-done-{id}"),
+        hints: None,
+    }) {
+        Ok(Response::Proposal { proposal }) => proposal,
+        other => {
+            return Err(describe(other)
+                .err()
+                .unwrap_or_else(|| "no proposal".into()))
+        }
+    };
+    // a retry returns the same proposal, which may already be approved: only the run counts
+    let _ = client.call(RequestBody::Approve {
+        proposal_id: proposal.id.clone(),
+        acknowledge_stale: false,
+    });
+    describe(client.call(RequestBody::Execute {
+        proposal_id: proposal.id,
+        acknowledge_stale: false,
+    }))
+}
+
+fn complete_all(app: &mut App, client: &Client, ids: Vec<String>) {
+    let total = ids.len();
+    let failed: Vec<String> = ids
+        .iter()
+        .filter_map(|id| complete_reminder(client, id).err())
+        .collect();
+    app.status = if failed.is_empty() {
+        format!("{total} task(s) completed in Reminders")
+    } else {
+        format!(
+            "{} of {total} completed, failed: {}",
+            total - failed.len(),
+            failed.join("; ")
+        )
+    };
+}
+
 fn describe(response: Result<Response, String>) -> Result<(), String> {
     match response {
         Ok(Response::Error { error }) => Err(match error.code {
@@ -89,7 +140,23 @@ fn describe(response: Result<Response, String>) -> Result<(), String> {
 /// Returns `true` when the app should quit.
 fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
     match effect {
-        Effect::Quit => return true,
+        Effect::Quit => {
+            // tasks marked done are finished, not dropped, when the TUI closes
+            let ids = app.take_pending_done();
+            if !ids.is_empty() {
+                complete_all(app, client, ids);
+            }
+            return true;
+        }
+        Effect::CompleteReminders { ids } => complete_all(app, client, ids),
+        Effect::Mute { thread_id } => {
+            app.status = match client.call(RequestBody::IgnoreMute { thread_id }) {
+                Ok(Response::Muted { pattern }) => {
+                    format!("muted {pattern} (to undo, delete that line in .haste_ignore)")
+                }
+                other => describe(other).err().unwrap_or_else(|| "not muted".into()),
+            };
+        }
         Effect::Refresh => {}
         Effect::Approve {
             ids,

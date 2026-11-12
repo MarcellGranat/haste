@@ -10,7 +10,7 @@ use haste_core::policy::PrincipalKind;
 use haste_core::proposal::{Payload, Proposal, ProposalState};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 /// Largest frame either side accepts.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
@@ -236,6 +236,13 @@ pub enum RequestBody {
         #[serde(default)]
         archived: Option<bool>,
     },
+    /// Human-only: the patterns of the local mute list (`.haste_ignore`), and any bad lines.
+    IgnoreList,
+    /// Human-only: add the sender of a thread to the mute list (local only: nothing changes in
+    /// any mailbox or chat app). The daemon picks the sender and never mutes the human.
+    IgnoreMute {
+        thread_id: String,
+    },
     /// Human-only: the preset inbox filters from `filters.json` (or the built-in default).
     FilterList,
     /// Human-only: run an approved reminder proposal (`approved -> executing -> sent`).
@@ -442,6 +449,15 @@ pub enum Response {
     },
     Tags {
         tags: Vec<String>,
+    },
+    Ignore {
+        patterns: Vec<String>,
+        /// Line numbers and reasons only, never the patterns.
+        #[serde(default)]
+        errors: Vec<String>,
+    },
+    Muted {
+        pattern: String,
     },
     Filters {
         filters: Vec<FilterView>,

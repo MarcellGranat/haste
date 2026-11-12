@@ -91,15 +91,21 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         ("p", "priority"),
         ("s", "snooze"),
         ("t", "remind"),
+        ("x", "mute"),
         ("f", "filter"),
     ];
     match app.view {
         View::Today if app.today_focus == TodayFocus::Todo => {
-            vec![("K", "back to incoming"), ("j/k", "move")]
+            vec![
+                ("Space", "select"),
+                ("e", "done (30 s to undo)"),
+                ("Tab", "to incoming"),
+                ("j/k", "move"),
+            ]
         }
         View::Today => {
             let mut h = thread_keys;
-            h.push(("J", "to TODOs"));
+            h.push(("Tab", "to TODOs"));
             h
         }
         View::Channels if app.channel_inner => {
@@ -255,8 +261,8 @@ fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let now = haste_core::time::now_secs();
     let off = app.tz_offset;
     let [top, bottom] = Layout::vertical([
-        Constraint::Length(u16::try_from(inbox::INBOX_ROWS + 2).unwrap_or(12)),
-        Constraint::Min(4),
+        Constraint::Max(u16::try_from(inbox::INBOX_ROWS + 2).unwrap_or(27)),
+        Constraint::Min(6),
     ])
     .areas(area);
     let inbox_focus = app.today_focus == TodayFocus::Inbox;
@@ -298,8 +304,28 @@ fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 .due_at
                 .map_or_else(|| "no date".to_owned(), |d| inbox::stamp(d, off));
             let overdue = r.reminder.due_at.is_some_and(|d| d < now);
+            if let Some(deadline) = app.pending_done.get(&r.reminder.id) {
+                let left = deadline.saturating_duration_since(app.now).as_secs();
+                return ListItem::new(Line::from(vec![
+                    Span::styled("✓ ", Style::new().fg(theme::GREEN)),
+                    Span::styled(
+                        r.reminder.title.clone(),
+                        Style::new()
+                            .fg(theme::MUTED)
+                            .add_modifier(Modifier::CROSSED_OUT),
+                    ),
+                    Span::styled(
+                        format!("  done in {left}s · e undoes"),
+                        Style::new().fg(theme::GREEN),
+                    ),
+                ]));
+            }
+            let marked = app.todo_marked.contains(&r.reminder.id);
             ListItem::new(Line::from(vec![
-                Span::styled("☐ ", Style::new().fg(theme::GREEN)),
+                Span::styled(
+                    if marked { "▣ " } else { "☐ " },
+                    Style::new().fg(if marked { theme::PEACH } else { theme::GREEN }),
+                ),
                 Span::styled(r.reminder.title.clone(), Style::new().fg(theme::TEXT)),
                 Span::styled(
                     format!("  {due}"),
@@ -317,7 +343,7 @@ fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
         items
     };
     let todo_title = format!(
-        " TODO · today and no date · {} · J/K switch pane ",
+        " TODO · today and no date · {} · Tab switches pane ",
         todos.len()
     );
     draw_scrolling(
@@ -632,7 +658,7 @@ mod tests {
     use ratatui::Terminal;
 
     fn render(app: &App) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         terminal.draw(|f| draw(f, app)).unwrap();
         terminal
             .backend()
@@ -667,10 +693,10 @@ mod tests {
     }
 
     #[test]
-    fn today_has_a_ten_row_incoming_pane_above_the_todo_pane() {
+    fn today_has_a_25_row_incoming_pane_above_the_todo_pane() {
         let mut app = App::new();
         app.set_threads(
-            (0..25)
+            (0..40)
                 .map(|i| {
                     let mut t = haste_core::model::Thread {
                         id: format!("t{i}"),
@@ -694,16 +720,16 @@ mod tests {
                 .collect(),
         );
         let text = render(&app);
-        assert!(text.contains("showing 10 of 25"), "{text}");
+        assert!(text.contains("showing 25 of 40"), "{text}");
         assert!(text.contains("TODO"));
-        // newest first: subject-24 is visible, the oldest are scrolled out
-        assert!(text.contains("subject-24") && text.contains("subject-15"));
-        assert!(!text.contains("subject-14"), "only ten rows are shown");
-        // scrolling down to the 20th item brings it into view
-        for _ in 0..19 {
+        // newest first: subject-39 is visible, the oldest are scrolled out
+        assert!(text.contains("subject-39") && text.contains("subject-15"));
+        assert!(!text.contains("subject-14"), "only 25 rows are shown");
+        // scrolling down to the 30th item brings it into view
+        for _ in 0..29 {
             app.handle_key(Key::Char('j'));
         }
         let text = render(&app);
-        assert!(text.contains("subject-05"), "scrolled to the cursor");
+        assert!(text.contains("subject-10"), "scrolled to the cursor");
     }
 }

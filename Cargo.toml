@@ -20,6 +20,7 @@ getrandom = "0.2"
 ulid = "1"
 hex = "0.4"
 libc = "0.2"
+regex = "1"
 tempfile = "3"
 haste-proto = { path = "crates/haste-proto" }
 haste-core = { path = "crates/haste-core" }

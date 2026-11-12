@@ -465,7 +465,7 @@ and has three main tabs, plus three secondary screens:
 
 | Key | Screen |
 |---|---|
-| `1` Today | Two panes. **Incoming** (top): every channel under the active filter, priority first, then newest; ten rows at a time, `j`/`k` scrolls through the rest. **TODO** (below): open Apple Reminders due today (overdue included) or with no date. `J` moves the cursor to the TODO pane, `K` back to Incoming |
+| `1` Today | Two panes. **Incoming** (top): every channel under the active filter, priority first, then newest; 25 rows at a time, `j`/`k` scrolls through the rest. **TODO** (below): open Apple Reminders due today (overdue included) or with no date. `Tab` switches the cursor between the two panes |
 | `2` Channels | The same inbox by channel (gmail, icloud, whatsapp, messenger, imessage) with counts; `Enter` opens a channel, `Esc` goes back |
 | `3` Calendar | The next 7 days of your calendar, grouped by day (read-only, your local time) |
 | `4` `5` `6` | Approvals, Connectors, Agents (`Esc` returns to Today); the header shows the pending-approvals count |
@@ -480,8 +480,22 @@ On a thread (Today, or inside a channel), only you can use these keys:
 | `p` | toggle priority (marked `★`, sorted first) |
 | `s` | snooze, whole hours or days only: `3h`, `2d` |
 | `t` | turn the thread into a TODO. One key picks when: `Enter` the suggestion (a `YYYY-MM-DD` date in the subject at 09:00, otherwise tomorrow morning), `m` tomorrow morning (09:00), `w` next week (Monday 09:00), `l` later (three hours from now), `n` no date, `c` type a date (`2026-11-20 14:30`, `tomorrow`, `+3d`). Times are your local time. The reminder is proposed; approve it in Approvals |
+| `x` | mute: the sender goes into `.haste_ignore` and the thread leaves Today and Channels (see below) |
 | `f` | next preset filter |
-| `j` `k` `G` `0` | move, bottom, top (`J`/`K` switch pane on Today) |
+| `j` `k` `G` `0` | move, bottom, top |
+
+In the TODO pane: `Space` selects a task (several if you like), `e` marks the selected tasks, or the
+one under the cursor, as done. They stay listed, struck through, for **30 seconds** (`e` on one again
+takes it back); then haste completes them in Reminders and removes them. Closing the TUI finishes
+the ones still waiting instead of dropping them. Completing runs through the same audited steps as
+an approval (propose, approve, run).
+
+**Muting** is local: `.haste_ignore` in the data folder holds one regular expression per line
+(`#` starts a comment), matched case-insensitively against a thread's senders (for a chat, also its
+name). `x` appends an exact pattern for the sender of the latest message that is not you (for a chat,
+its name), and never your own address. Edit the file to undo or to write wider patterns such as
+`@newsletter\.example$`; a bad line is skipped and reported by line number. Nothing changes in your
+mailbox or chat apps, and agents are not affected. The audit log records that a mute happened, not who.
 
 **Preset filters** are `filters.json` in the data folder (the daemon validates it; a typo is shown in
 the footer and the previous filters stay active; with no file there is one filter, `all`):

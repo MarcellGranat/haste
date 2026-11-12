@@ -12,7 +12,7 @@ pub const MAX_SNOOZE_DAYS: i64 = 365;
 /// Hour of day (local time) used for "morning" and for a reminder given only a date.
 pub const DEFAULT_REMINDER_HOUR: i64 = 9;
 /// Rows of the inbox pane on the Today tab; longer lists scroll.
-pub const INBOX_ROWS: usize = 10;
+pub const INBOX_ROWS: usize = 25;
 /// How far ahead "later" is.
 pub const LATER_SECS: i64 = 3 * HOUR;
 const DAY: i64 = 86_400;
@@ -22,6 +22,16 @@ const HOUR: i64 = 3_600;
 #[must_use]
 pub fn is_mail(source: &str) -> bool {
     matches!(source, "gmail" | "icloud")
+}
+
+/// What the mute list is matched against: the thread's senders, and for a chat also its name.
+#[must_use]
+pub fn senders(t: &ThreadView) -> Vec<&str> {
+    let mut out: Vec<&str> = t.thread.participants.iter().map(String::as_str).collect();
+    if !is_mail(&t.thread.source.as_name()) {
+        out.push(t.thread.subject.as_str());
+    }
+    out
 }
 
 #[must_use]

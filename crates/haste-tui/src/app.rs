@@ -7,7 +7,8 @@ use haste_core::herdr::{AgentStatus, AgentStatusRecord, MachineState};
 use haste_core::model::Source;
 use haste_core::proposal::{Payload, Proposal, ProposalState};
 use haste_proto::{
-    ConnectorView, Event, MachineView, RemindersStatusView, SendPreviewView, ThreadView,
+    ConnectorView, Event, EventView, MachineView, ReminderView, RemindersStatusView,
+    SendPreviewView, ThreadView,
 };
 
 /// Terminal-independent key.
@@ -28,6 +29,8 @@ pub enum View {
     Approvals,
     Connectors,
     Agents,
+    Calendar,
+    Reminders,
 }
 
 /// How the Approvals view groups proposals.
@@ -171,6 +174,12 @@ pub struct App {
     pub connectors_selected: usize,
     pub machines: Vec<MachineView>,
     pub agents_selected: usize,
+    /// Upcoming calendar events, soonest first (read-only).
+    pub events: Vec<EventView>,
+    pub calendar_selected: usize,
+    /// Open reminders (read-only; add or change them through proposals).
+    pub reminder_list: Vec<ReminderView>,
+    pub reminders_selected: usize,
     pub group_by: GroupBy,
     pub blocked_collapsed: bool,
     pub filter: String,
@@ -251,6 +260,10 @@ impl App {
             connectors_selected: 0,
             machines: Vec::new(),
             agents_selected: 0,
+            events: Vec::new(),
+            calendar_selected: 0,
+            reminder_list: Vec::new(),
+            reminders_selected: 0,
             group_by: GroupBy::Agent,
             blocked_collapsed: false,
             filter: String::new(),
@@ -277,6 +290,16 @@ impl App {
 
     pub fn set_machines(&mut self, machines: Vec<MachineView>) {
         self.machines = machines;
+        self.clamp();
+    }
+
+    pub fn set_events(&mut self, events: Vec<EventView>) {
+        self.events = events;
+        self.clamp();
+    }
+
+    pub fn set_reminder_list(&mut self, reminders: Vec<ReminderView>) {
+        self.reminder_list = reminders;
         self.clamp();
     }
 
@@ -448,6 +471,12 @@ impl App {
         self.agents_selected = self
             .agents_selected
             .min(self.agent_rows().len().saturating_sub(1));
+        self.calendar_selected = self
+            .calendar_selected
+            .min(self.events.len().saturating_sub(1));
+        self.reminders_selected = self
+            .reminders_selected
+            .min(self.reminder_list.len().saturating_sub(1));
     }
 
     fn selected_proposal(&self) -> Option<&Proposal> {
@@ -463,12 +492,16 @@ impl App {
             View::Inbox => self.inbox_len(),
             View::Connectors => self.connectors.len(),
             View::Agents => self.agent_rows().len(),
+            View::Calendar => self.events.len(),
+            View::Reminders => self.reminder_list.len(),
         };
         let sel = match self.view {
             View::Approvals => &mut self.approvals_selected,
             View::Inbox => &mut self.inbox_selected,
             View::Connectors => &mut self.connectors_selected,
             View::Agents => &mut self.agents_selected,
+            View::Calendar => &mut self.calendar_selected,
+            View::Reminders => &mut self.reminders_selected,
         };
         *sel = if len == 0 {
             0
@@ -483,6 +516,8 @@ impl App {
             View::Inbox => self.inbox_len(),
             View::Connectors => self.connectors.len(),
             View::Agents => self.agent_rows().len(),
+            View::Calendar => self.events.len(),
+            View::Reminders => self.reminder_list.len(),
         };
         let target = if last { len.saturating_sub(1) } else { 0 };
         match self.view {
@@ -490,6 +525,8 @@ impl App {
             View::Inbox => self.inbox_selected = target,
             View::Connectors => self.connectors_selected = target,
             View::Agents => self.agents_selected = target,
+            View::Calendar => self.calendar_selected = target,
+            View::Reminders => self.reminders_selected = target,
         }
     }
 
@@ -634,7 +671,9 @@ impl App {
                     View::Inbox => View::Approvals,
                     View::Approvals => View::Connectors,
                     View::Connectors => View::Agents,
-                    View::Agents => View::Inbox,
+                    View::Agents => View::Calendar,
+                    View::Calendar => View::Reminders,
+                    View::Reminders => View::Inbox,
                 };
             }
             Key::Char('P') if self.view == View::Approvals => self.toggle_group_by(),
@@ -1759,6 +1798,10 @@ mod tests {
             assert!(press(&mut app, keys).is_empty(), "{keys:?}");
         }
         assert_eq!(app.mode, Mode::Normal);
+        app.handle_key(Key::Tab);
+        assert_eq!(app.view, View::Calendar);
+        app.handle_key(Key::Tab);
+        assert_eq!(app.view, View::Reminders);
         app.handle_key(Key::Tab);
         assert_eq!(app.view, View::Inbox);
     }

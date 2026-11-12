@@ -48,6 +48,16 @@ fn refresh(app: &mut App, client: &Client) {
     if let Ok(Response::RemindersStatus { status }) = client.call(RequestBody::RemindersStatus) {
         app.set_reminders(status);
     }
+    if let Ok(Response::Events { events }) = client.call(RequestBody::EventsList {
+        from: haste_core::time::now_secs() - 3600,
+    }) {
+        app.set_events(events);
+    }
+    if let Ok(Response::Reminders { reminders }) = client.call(RequestBody::RemindersList {
+        include_completed: false,
+    }) {
+        app.set_reminder_list(reminders);
+    }
     match client.call(RequestBody::ThreadList {
         sources: vec![],
         include_archived: false,

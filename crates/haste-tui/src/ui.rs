@@ -41,6 +41,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
                 &format!("Agents ({})", app.blocked().len()),
                 app.view == View::Agents,
             ),
+            tab(
+                &format!("Calendar ({})", app.events.len()),
+                app.view == View::Calendar,
+            ),
+            tab(
+                &format!("Reminders ({})", app.reminder_list.len()),
+                app.view == View::Reminders,
+            ),
             Span::raw("  Tab switch · j/k g/G move · q quit"),
         ]),
         header,
@@ -51,6 +59,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         View::Approvals => draw_approvals(frame, app, body),
         View::Connectors => draw_connectors(frame, app, body),
         View::Agents => draw_agents(frame, app, body),
+        View::Calendar => draw_calendar(frame, app, body),
+        View::Reminders => draw_reminders(frame, app, body),
     }
     if let Mode::Detail(id) = &app.mode {
         draw_detail(frame, app, id, body);
@@ -216,6 +226,92 @@ fn draw_connectors(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect
     );
 }
 
+/// `YYYY-MM-DD HH:MM` (UTC) for unix seconds.
+fn stamp(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}",
+        rem / 3600,
+        rem % 3600 / 60
+    )
+}
+
+fn tag_suffix(tags: &[String]) -> String {
+    if tags.is_empty() {
+        String::new()
+    } else {
+        format!("  #{}", tags.join(" #"))
+    }
+}
+
+fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
+    let items: Vec<ListItem<'_>> = app
+        .events
+        .iter()
+        .map(|e| {
+            let when = if e.event.all_day {
+                format!("{} all day", &stamp(e.event.start_at)[..10])
+            } else {
+                stamp(e.event.start_at)
+            };
+            ListItem::new(format!("{when}  {}{}", e.event.title, tag_suffix(&e.tags)))
+        })
+        .collect();
+    let mut state = ListState::default().with_selected(Some(app.calendar_selected));
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(
+                Block::new()
+                    .borders(Borders::ALL)
+                    .title("Calendar · upcoming (UTC) · read-only"),
+            )
+            .highlight_symbol("> "),
+        area,
+        &mut state,
+    );
+}
+
+fn draw_reminders(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
+    let items: Vec<ListItem<'_>> = app
+        .reminder_list
+        .iter()
+        .map(|r| {
+            let due = r
+                .reminder
+                .due_at
+                .map_or_else(|| "no date".to_owned(), stamp);
+            ListItem::new(format!(
+                "{due}  [{}] {}{}",
+                r.reminder.list_name,
+                r.reminder.title,
+                tag_suffix(&r.tags)
+            ))
+        })
+        .collect();
+    let mut state = ListState::default().with_selected(Some(app.reminders_selected));
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(
+                Block::new()
+                    .borders(Borders::ALL)
+                    .title("Reminders · open (UTC) · read-only; T in Inbox proposes one"),
+            )
+            .highlight_symbol("> "),
+        area,
+        &mut state,
+    );
+}
+
 fn draw_agents(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
     let now = haste_core::time::now_secs();
     let items: Vec<ListItem<'_>> = app
@@ -299,4 +395,15 @@ fn draw_detail(frame: &mut Frame<'_>, app: &App, id: &str, area: ratatui::layout
         ),
         area,
     );
+}
+
+#[cfg(test)]
+mod stamp_tests {
+    use super::stamp;
+
+    #[test]
+    fn stamps_are_utc_dates() {
+        assert_eq!(stamp(0), "1970-01-01 00:00");
+        assert_eq!(stamp(1_794_000_000), "2026-11-06 21:20");
+    }
 }

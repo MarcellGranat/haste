@@ -110,6 +110,7 @@ async fn boot() -> Harness {
             },
         ],
         chats: ChatSelection {
+            allow_all: false,
             allow: vec!["chat-a".into(), "chat-m".into()],
             deny: vec![],
         },

@@ -158,23 +158,23 @@ pub fn parse_due(input: &str, now: i64, off: i64) -> Result<Option<i64>, String>
 /// still ahead), otherwise tomorrow morning.
 #[must_use]
 pub fn suggest_due(subject: &str, now: i64, off: i64) -> i64 {
-    let b = subject.as_bytes();
-    for i in 0..b.len().saturating_sub(9) {
-        let w = &subject[i..];
-        if w.len() >= 10 && w.is_char_boundary(10) {
-            let c = &w[..10];
-            let ok = c.bytes().enumerate().all(|(k, x)| {
-                if k == 4 || k == 7 {
-                    x == b'-'
-                } else {
-                    x.is_ascii_digit()
-                }
-            });
-            if ok {
-                if let Ok(Some(t)) = parse_due(c, now, off) {
-                    if t > now {
-                        return t;
-                    }
+    // `get` returns None where a window would cut a multi-byte character (a subject with an
+    // accent in it), so no position can panic
+    for i in 0..subject.len().saturating_sub(9) {
+        let Some(c) = subject.get(i..i + 10) else {
+            continue;
+        };
+        let ok = c.bytes().enumerate().all(|(k, x)| {
+            if k == 4 || k == 7 {
+                x == b'-'
+            } else {
+                x.is_ascii_digit()
+            }
+        });
+        if ok {
+            if let Ok(Some(t)) = parse_due(c, now, off) {
+                if t > now {
+                    return t;
                 }
             }
         }
@@ -336,6 +336,20 @@ mod tests {
         assert_eq!(
             suggest_due("Odd 2026-99-99", now, off),
             tomorrow_morning(now, off)
+        );
+        // accents and other multi-byte characters anywhere in the subject must not panic
+        for subject in [
+            "Granát",
+            "é",
+            "Re: Köszönöm 2099-03-04 ✓",
+            "日本語のメール",
+            "✓✓✓✓✓✓✓✓✓✓✓",
+        ] {
+            let _ = suggest_due(subject, now, off);
+        }
+        assert_eq!(
+            suggest_due("Találkozó 2099-03-04", now, off),
+            from_civil(2099, 3, 4, 9, 0)
         );
     }
 

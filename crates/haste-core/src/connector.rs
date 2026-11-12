@@ -244,6 +244,37 @@ pub enum CallError {
     Connector(ConnectorError),
 }
 
+/// A fixed class for an error, for the operational log (never the error text).
+#[must_use]
+pub fn error_class(e: &ConnectorError) -> &'static str {
+    match e {
+        ConnectorError::Authorization(_) => "authorization",
+        ConnectorError::Transient(_) => "transient",
+        ConnectorError::Challenge(_) => "challenge",
+        ConnectorError::Checkpoint(_) => "checkpoint",
+        ConnectorError::Ambiguous(_) => "ambiguous",
+        ConnectorError::Unsupported(_) => "unsupported",
+        ConnectorError::Other(_) => "other",
+    }
+}
+
+fn log_call(source: &Source, call: &'static str, outcome: &'static str, ms: i64, class: &str) {
+    let level = match outcome {
+        "ok" => crate::log::Level::Info,
+        _ => crate::log::Level::Warn,
+    };
+    let mut fields = vec![
+        crate::log::id("source", &source.as_name()),
+        crate::log::l("call", call),
+        crate::log::l("outcome", outcome),
+        crate::log::n("ms", ms),
+    ];
+    if !class.is_empty() {
+        fields.push(crate::log::id("error_class", class));
+    }
+    crate::log::event(level, "connector", "call", &fields);
+}
+
 /// Wraps a connector so every call is gated, audited and bounded.
 pub struct Guarded<'a> {
     pub connector: &'a dyn Connector,
@@ -255,10 +286,12 @@ impl Guarded<'_> {
         let source = self.connector.source();
         if self.hooks.kill_switch_engaged(&source) {
             self.hooks.audit(name, &source, "refused_kill_switch");
+            log_call(&source, name, "refused_kill_switch", 0, "");
             return Err(CallError::KillSwitchEngaged);
         }
         if !flag {
             self.hooks.audit(name, &source, "refused_capability");
+            log_call(&source, name, "refused_capability", 0, "");
             return Err(CallError::CapabilityMissing(name));
         }
         Ok(())
@@ -268,6 +301,16 @@ impl Guarded<'_> {
         let source = self.connector.source();
         self.hooks.set_kill_switch(&source, true);
         self.hooks.audit(name, &source, "breaker_opened");
+        crate::log::event(
+            crate::log::Level::Error,
+            "connector",
+            "breaker_opened",
+            &[
+                crate::log::id("source", &source.as_name()),
+                crate::log::id("call", name),
+                crate::log::id("error_class", error_class(&error)),
+            ],
+        );
         self.hooks.notify(&format!(
             "connector {} stopped by circuit breaker; release the kill switch after checking the account",
             source.as_name()
@@ -283,10 +326,22 @@ impl Guarded<'_> {
         self.precheck(self.connector.capabilities().read, "fetch")?;
         let source = self.connector.source();
         let mut last = ConnectorError::Other("no attempt made".into());
-        for _ in 0..TRANSIENT_ATTEMPTS_PER_CYCLE {
+        for attempt in 0..TRANSIENT_ATTEMPTS_PER_CYCLE {
+            let timer = crate::log::Timer::start();
             match self.connector.fetch(cursor.clone()).await {
                 Ok(batch) => {
                     self.hooks.audit("fetch", &source, "ok");
+                    crate::log::info(
+                        "connector",
+                        "fetch_ok",
+                        &[
+                            crate::log::id("source", &source.as_name()),
+                            crate::log::n("ms", timer.ms()),
+                            crate::log::n("attempt", attempt + 1),
+                            crate::log::n("threads", batch.threads.len()),
+                            crate::log::n("messages", batch.messages.len()),
+                        ],
+                    );
                     return Ok(batch);
                 }
                 Err(e @ (ConnectorError::Challenge(_) | ConnectorError::Checkpoint(_))) => {
@@ -294,15 +349,24 @@ impl Guarded<'_> {
                 }
                 Err(e @ ConnectorError::Transient(_)) => {
                     self.hooks.audit("fetch", &source, "transient_error");
+                    log_call(&source, "fetch", "transient_error", timer.ms(), "transient");
                     last = e;
                 }
                 // Waiting on a human: no retry, no breaker.
                 Err(e @ ConnectorError::Authorization(_)) => {
                     self.hooks.audit("fetch", &source, "permission_needed");
+                    log_call(
+                        &source,
+                        "fetch",
+                        "permission_needed",
+                        timer.ms(),
+                        "authorization",
+                    );
                     return Err(CallError::Connector(e));
                 }
                 Err(e) => {
                     self.hooks.audit("fetch", &source, "error");
+                    log_call(&source, "fetch", "error", timer.ms(), error_class(&e));
                     return Err(CallError::Connector(e));
                 }
             }
@@ -449,9 +513,11 @@ impl Guarded<'_> {
     pub async fn send(&self, draft: &DraftToSend) -> Result<SendReceipt, CallError> {
         self.precheck(self.connector.capabilities().send, "send")?;
         let source = self.connector.source();
+        let timer = crate::log::Timer::start();
         match self.connector.send(draft).await {
             Ok(receipt) => {
                 self.hooks.audit("send", &source, "ok");
+                log_call(&source, "send", "ok", timer.ms(), "");
                 Ok(receipt)
             }
             Err(e @ (ConnectorError::Challenge(_) | ConnectorError::Checkpoint(_))) => {
@@ -460,10 +526,12 @@ impl Guarded<'_> {
             // The message may have left: record it distinctly, make no further call, no breaker.
             Err(e @ ConnectorError::Ambiguous(_)) => {
                 self.hooks.audit("send", &source, "ambiguous");
+                log_call(&source, "send", "ambiguous", timer.ms(), "ambiguous");
                 Err(CallError::Connector(e))
             }
             Err(e) => {
                 self.hooks.audit("send", &source, "error");
+                log_call(&source, "send", "error", timer.ms(), error_class(&e));
                 Err(CallError::Connector(e))
             }
         }

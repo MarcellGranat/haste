@@ -183,12 +183,30 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
             acknowledge_stale,
             recipients_digest,
         } => {
+            haste_core::log::info(
+                "tui",
+                "send_requested",
+                &[haste_core::log::id("proposal", &id)],
+            );
             let reply = client.call(RequestBody::Send {
                 proposal_id: id.clone(),
                 acknowledge_stale,
                 recipients_digest,
             });
             let changed = matches!(&reply, Ok(Response::Error { error }) if error.message == "recipients_changed");
+            let outcome = match &reply {
+                Ok(Response::Error { .. }) => "refused",
+                Ok(_) => "accepted",
+                Err(_) => "no_answer",
+            };
+            haste_core::log::info(
+                "tui",
+                "send_answered",
+                &[
+                    haste_core::log::id("proposal", &id),
+                    haste_core::log::l("outcome", outcome),
+                ],
+            );
             app.status = match describe(reply) {
                 Ok(()) => "sent".into(),
                 Err(_) if changed => {
@@ -212,6 +230,18 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
 }
 
 fn main() -> io::Result<()> {
+    let _ = haste_core::log::init(
+        &base_dir(),
+        "haste-tui",
+        haste_core::log::level_from_env(haste_core::log::Level::Info),
+        None, // the screen is the terminal: never print log lines over it
+    );
+    haste_core::log::install_panic_hook();
+    haste_core::log::info(
+        "tui",
+        "starting",
+        &[haste_core::log::id("version", env!("CARGO_PKG_VERSION"))],
+    );
     let client = Client::from_base(&base_dir()).map_err(|e| {
         io::Error::new(
             e.kind(),

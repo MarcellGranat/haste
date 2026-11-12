@@ -458,6 +458,40 @@ Appends are safe for several agents at once on a local disk. If the folder is sy
 Obsidian Sync) a conflict copy can appear when the sync service touches the same file. On this setup
 the folder is not synced; if you move it into a synced location, test it first.
 
+## Logging and diagnosing problems
+
+Two logs, with different jobs:
+
+- **Audit log** (`audit.jsonl`): the hash-chained record of decisions (who asked for what, allowed
+  or denied). Unchanged.
+- **Operational log** (`logs/hasted.log`, `logs/haste-tui.log` in the data directory): one JSON line
+  per event, for working out *why* something happened. Directory 0700, files 0600, rotated at 4 MB
+  with 4 older files kept.
+
+The operational log can never hold message text, chat or contact names, addresses or tokens: its
+fields are numbers, fixed labels and identifiers restricted to `[A-Za-z0-9_.:-]`, so free text
+cannot be passed to it (see `crates/haste-core/src/log.rs`). Chat ids are not logged (routes show
+`v1/chats/:id`), nor are note paths or error messages; errors are logged as a class
+(`authorization`, `transient`, `ambiguous`, ...).
+
+What is recorded: daemon start and stop (version, whether `HASTE_HOME` is custom, which connectors
+started), every audit record, every request that fails (all requests at `HASTE_LOG=debug`), every
+connector fetch and send with duration and error class, Beeper calls (route, HTTP status,
+duration), the Keychain read result, why a chat read came back empty (messages returned, new,
+skipped), why a send was refused or why its outcome is unknown (connect, timeout, HTTP status,
+answer without an id), circuit-breaker trips, panics (file and line only) and the TUI losing the
+daemon.
+
+```
+haste logs                                   # last 100 lines at info and above
+haste logs --level warn --since 2h           # what went wrong in the last two hours
+haste logs --component beeper --level debug  # every Beeper call
+haste logs --process haste-tui               # the TUI's log
+haste logs --json                            # raw lines
+```
+
+`HASTE_LOG=debug` (set before starting `hasted`) records successful requests too. Times are UTC.
+
 ## Beeper (WhatsApp, Messenger, iMessage)
 
 WhatsApp, Messenger and iMessage come in through **Beeper Desktop's local API** (a loopback server

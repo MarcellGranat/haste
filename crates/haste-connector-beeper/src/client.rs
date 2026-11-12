@@ -48,7 +48,25 @@ impl BeeperClient {
         if let Some(t) = self.cached.lock().ok().and_then(|c| c.clone()) {
             return Ok(t);
         }
-        match self.store.get(TOKEN_ACCOUNT) {
+        let result = self.store.get(TOKEN_ACCOUNT);
+        haste_core::log::event(
+            if matches!(&result, Ok(Some(t)) if !t.is_empty()) {
+                haste_core::log::Level::Debug
+            } else {
+                haste_core::log::Level::Error
+            },
+            "beeper",
+            "keychain_read",
+            &[haste_core::log::l(
+                "result",
+                match &result {
+                    Ok(Some(t)) if !t.is_empty() => "ok",
+                    Ok(_) => "absent",
+                    Err(_) => "error",
+                },
+            )],
+        );
+        match result {
             Ok(Some(t)) if !t.is_empty() => {
                 if let Ok(mut c) = self.cached.lock() {
                     *c = Some(t.clone());
@@ -88,40 +106,88 @@ impl BeeperClient {
         }
     }
 
+    /// A GET, logged with a route template (ids replaced by `:id`), the HTTP status, the error
+    /// class and the duration. Never the URL, the query, the token or the body.
     async fn get<T: DeserializeOwned>(
         &self,
         segments: &[&str],
         query: &[(&str, String)],
     ) -> Result<T, ConnectorError> {
-        let token = self.token()?;
-        let response = self
+        let timer = haste_core::log::Timer::start();
+        let (status, result) = self.get_inner(segments, query).await;
+        let route = route_of(segments);
+        let (level, class) = match &result {
+            Ok(_) => (haste_core::log::Level::Debug, ""),
+            Err(e) => (
+                haste_core::log::Level::Warn,
+                haste_core::connector::error_class(e),
+            ),
+        };
+        let mut fields = vec![
+            haste_core::log::id("route", &route),
+            haste_core::log::n("status", status),
+            haste_core::log::n("ms", timer.ms()),
+        ];
+        if !class.is_empty() {
+            fields.push(haste_core::log::id("error_class", class));
+        }
+        haste_core::log::event(level, "beeper", "http_get", &fields);
+        result
+    }
+
+    async fn get_inner<T: DeserializeOwned>(
+        &self,
+        segments: &[&str],
+        query: &[(&str, String)],
+    ) -> (i64, Result<T, ConnectorError>) {
+        let token = match self.token() {
+            Ok(t) => t,
+            Err(e) => return (0, Err(e)),
+        };
+        let response = match self
             .http
             .get(self.url(segments))
             .query(query)
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| Self::reach_error(&e))?;
+        {
+            Ok(r) => r,
+            Err(e) => return (0, Err(Self::reach_error(&e))),
+        };
         let status = response.status();
+        let code = i64::from(status.as_u16());
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             self.forget();
-            return Err(ConnectorError::Authorization(TOKEN_REJECTED.into()));
+            return (
+                code,
+                Err(ConnectorError::Authorization(TOKEN_REJECTED.into())),
+            );
         }
         if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-            return Err(ConnectorError::Transient(format!(
-                "beeper http {}",
-                status.as_u16()
-            )));
+            return (
+                code,
+                Err(ConnectorError::Transient(format!(
+                    "beeper http {}",
+                    status.as_u16()
+                ))),
+            );
         }
         if !status.is_success() {
-            return Err(ConnectorError::Other(format!(
-                "beeper http {}",
-                status.as_u16()
-            )));
+            return (
+                code,
+                Err(ConnectorError::Other(format!(
+                    "beeper http {}",
+                    status.as_u16()
+                ))),
+            );
         }
         let text = response.text().await.unwrap_or_default();
-        serde_json::from_str(&text)
-            .map_err(|_| ConnectorError::Other("malformed beeper response".into()))
+        (
+            code,
+            serde_json::from_str(&text)
+                .map_err(|_| ConnectorError::Other("malformed beeper response".into())),
+        )
     }
 
     /// The cheapest authenticated call: proves the token and that Beeper Desktop is running.
@@ -210,6 +276,7 @@ impl BeeperClient {
     /// Classified [`ConnectorError`].
     pub async fn send_message(&self, chat_id: &str, text: &str) -> Result<String, ConnectorError> {
         let token = self.token()?;
+        let timer = haste_core::log::Timer::start();
         let response = self
             .http
             .post(self.url(&["v1", "chats", chat_id, "messages"]))
@@ -218,6 +285,28 @@ impl BeeperClient {
             .send()
             .await
             .map_err(|e| {
+                // which kind of transport failure it was, and how long it took: this is what tells
+                // "never reached Beeper" from "Beeper took too long"
+                let kind = if e.is_connect() {
+                    "connect"
+                } else if e.is_timeout() {
+                    "timeout"
+                } else if e.is_request() {
+                    "request"
+                } else if e.is_body() {
+                    "body"
+                } else {
+                    "other"
+                };
+                haste_core::log::error(
+                    "beeper",
+                    "send_transport_error",
+                    &[
+                        haste_core::log::l("kind", kind),
+                        haste_core::log::n("ms", timer.ms()),
+                        haste_core::log::n("body_bytes", text.len()),
+                    ],
+                );
                 if e.is_connect() {
                     ConnectorError::Authorization(NOT_RUNNING.into())
                 } else {
@@ -225,6 +314,15 @@ impl BeeperClient {
                 }
             })?;
         let status = response.status();
+        haste_core::log::info(
+            "beeper",
+            "send_response",
+            &[
+                haste_core::log::n("status", status.as_u16()),
+                haste_core::log::n("ms", timer.ms()),
+                haste_core::log::n("body_bytes", text.len()),
+            ],
+        );
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             self.forget();
             return Err(ConnectorError::Authorization(TOKEN_REJECTED.into()));
@@ -253,6 +351,16 @@ impl BeeperClient {
             .filter(|id| !id.is_empty())
             .ok_or_else(|| ConnectorError::Ambiguous("send answer had no message id".into()))
     }
+}
+
+/// `v1/chats/:id/messages` from `["v1", "chats", <id>, "messages"]`: the chat id is never logged.
+fn route_of(segments: &[&str]) -> String {
+    segments
+        .iter()
+        .enumerate()
+        .map(|(i, s)| if i == 2 && *s != "search" { ":id" } else { *s })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Percent-encode a path segment (chat ids contain characters like `!`, `:` and `@`).

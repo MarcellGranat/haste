@@ -132,8 +132,52 @@ fn is_human_only(action: Action) -> bool {
     )
 }
 
-/// Handle one request. Synchronous; callers run it on a blocking thread.
+fn code_label(code: ErrorCode) -> &'static str {
+    match code {
+        ErrorCode::UnsupportedVersion => "unsupported_version",
+        ErrorCode::Unauthenticated => "unauthenticated",
+        ErrorCode::Unauthorized => "unauthorized",
+        ErrorCode::Denied => "denied",
+        ErrorCode::NotFound => "not_found",
+        ErrorCode::Validation => "validation",
+        ErrorCode::IllegalTransition => "illegal_transition",
+        ErrorCode::StaleNeedsAcknowledgement => "stale_needs_acknowledgement",
+        ErrorCode::Internal => "internal",
+    }
+}
+
+/// Handle one request and log it: failures at `warn` (internal errors at `error`), successes at
+/// `debug` (set `HASTE_LOG=debug` to see them). Only the fixed request name, the outcome class and
+/// the duration are logged, never request data.
 pub fn dispatch(state: &State, request: Request) -> Response {
+    let name = request_name(&request.body);
+    let timer = haste_core::log::Timer::start();
+    let response = dispatch_inner(state, request);
+    let (level, outcome) = match &response {
+        Response::Error { error } => (
+            if error.code == ErrorCode::Internal {
+                haste_core::log::Level::Error
+            } else {
+                haste_core::log::Level::Warn
+            },
+            code_label(error.code),
+        ),
+        _ => (haste_core::log::Level::Debug, "ok"),
+    };
+    haste_core::log::event(
+        level,
+        "daemon",
+        "request",
+        &[
+            haste_core::log::id("request", name),
+            haste_core::log::l("outcome", outcome),
+            haste_core::log::n("ms", timer.ms()),
+        ],
+    );
+    response
+}
+
+fn dispatch_inner(state: &State, request: Request) -> Response {
     if request.version != PROTOCOL_VERSION {
         return err(
             ErrorCode::UnsupportedVersion,

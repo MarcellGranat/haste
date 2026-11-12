@@ -133,7 +133,31 @@ impl BeeperConnector {
                     return Err(ConnectorError::Other("refused: unsupported network".into()));
                 }
             }
-            let how = self.check_on_device(&account)?;
+            let how = match self.check_on_device(&account) {
+                Ok(h) => h,
+                Err(e) => {
+                    haste_core::log::warn(
+                        "beeper",
+                        "account_refused",
+                        &[
+                            haste_core::log::id("network", self.which.name()),
+                            haste_core::log::id(
+                                "provider",
+                                &account.provider().unwrap_or_else(|| "unreported".into()),
+                            ),
+                        ],
+                    );
+                    return Err(e);
+                }
+            };
+            haste_core::log::debug(
+                "beeper",
+                "account_accepted",
+                &[
+                    haste_core::log::id("network", self.which.name()),
+                    haste_core::log::id("how", how),
+                ],
+            );
             out.push((account, how));
         }
         Ok(out)
@@ -151,12 +175,17 @@ impl BeeperConnector {
         let mut found: Vec<Mapped> = Vec::new();
         let mut skipped = 0;
         let mut cursor: Option<String> = None;
+        let timer = haste_core::log::Timer::start();
+        let mut pages = 0_usize;
+        let mut seen = 0_usize;
         for _ in 0..BEEPER_MAX_PAGES_PER_CHAT {
+            pages += 1;
             let (items, more, next) = self
                 .client
                 .messages(chat_id, BEEPER_PAGE_SIZE, cursor.as_deref())
                 .await?;
             let mut any_new = false;
+            seen += items.len();
             for wire in &items {
                 let Some(mapped) = map_message(chat_id, &self.which.source(), wire) else {
                     skipped += 1;
@@ -180,6 +209,21 @@ impl BeeperConnector {
             found.sort_by_key(|m| std::cmp::Reverse(m.timestamp));
             found.truncate(BEEPER_BACKFILL_PER_CHAT);
         }
+        // why a chat read came back empty is the usual question: how many the API returned, how
+        // many were new, how many skipped as not conversation text
+        haste_core::log::info(
+            "beeper",
+            "chat_read",
+            &[
+                haste_core::log::id("network", self.which.name()),
+                haste_core::log::l("first_read", if after.is_none() { "yes" } else { "no" }),
+                haste_core::log::n("pages", pages),
+                haste_core::log::n("returned", seen),
+                haste_core::log::n("new", found.len()),
+                haste_core::log::n("skipped", skipped),
+                haste_core::log::n("ms", timer.ms()),
+            ],
+        );
         Ok((found, skipped))
     }
 
@@ -295,7 +339,18 @@ impl BeeperConnector {
     /// A human send into an existing, selected chat of an on-device account of this source. The
     /// checks run before any message request; then exactly one `POST`, never retried.
     async fn send_text(&self, draft: &DraftToSend) -> Result<SendReceipt, ConnectorError> {
-        let refused = |why: &str| ConnectorError::Other(format!("send refused: {why}"));
+        let network = self.which.name();
+        let refused = move |why: &'static str| {
+            haste_core::log::warn(
+                "beeper",
+                "send_refused",
+                &[
+                    haste_core::log::id("network", network),
+                    haste_core::log::l("reason", why),
+                ],
+            );
+            ConnectorError::Other(format!("send refused: {why}"))
+        };
         let chat_id = draft
             .thread_id
             .as_deref()
@@ -311,6 +366,14 @@ impl BeeperConnector {
         if !accounts.iter().any(|(a, _)| a.id == chat.account_id) {
             return Err(refused("account not selected or on another network"));
         }
+        haste_core::log::info(
+            "beeper",
+            "send_start",
+            &[
+                haste_core::log::id("network", network),
+                haste_core::log::n("body_bytes", draft.body.len()),
+            ],
+        );
         let id = match self.client.send_message(chat_id, &draft.body).await {
             Ok(id) => id,
             Err(e) => {

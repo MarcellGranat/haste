@@ -2,6 +2,7 @@
 
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver};
 use std::thread;
 use std::time::Duration;
@@ -26,6 +27,9 @@ pub struct Client {
     token: String,
 }
 
+/// Whether the last connection attempt failed, so an outage is logged once.
+static DAEMON_DOWN: AtomicBool = AtomicBool::new(false);
+
 impl Client {
     /// Read the human token and remember the socket location.
     ///
@@ -46,8 +50,25 @@ impl Client {
     /// # Errors
     /// Connection or framing errors, as text.
     pub fn call(&self, body: RequestBody) -> Result<Response, String> {
-        let mut stream =
-            UnixStream::connect(&self.socket).map_err(|e| format!("daemon unreachable: {e}"))?;
+        let mut stream = match UnixStream::connect(&self.socket) {
+            Ok(s) => {
+                if DAEMON_DOWN.swap(false, Ordering::Relaxed) {
+                    haste_core::log::info("tui", "daemon_reachable_again", &[]);
+                }
+                s
+            }
+            Err(e) => {
+                // once per outage, not once per refresh
+                if !DAEMON_DOWN.swap(true, Ordering::Relaxed) {
+                    haste_core::log::error(
+                        "tui",
+                        "daemon_unreachable",
+                        &[haste_core::log::id("kind", &format!("{:?}", e.kind()))],
+                    );
+                }
+                return Err(format!("daemon unreachable: {e}"));
+            }
+        };
         write_frame(&mut stream, &Request::new(&self.token, body)).map_err(|e| format!("{e:?}"))?;
         read_frame(&mut stream).map_err(|e| format!("{e:?}"))
     }

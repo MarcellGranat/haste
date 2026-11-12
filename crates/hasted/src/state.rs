@@ -171,7 +171,32 @@ impl State {
             Ok(mut w) => w.append(&entry).map(|_| ()),
             Err(_) => Err(std::io::Error::other("audit lock poisoned")),
         };
+        // The same record goes to the operational log (same counts-and-labels rule), with a level
+        // that makes refusals and failures easy to find.
+        let level = match outcome {
+            "ok" | "auto" | "sent" | "released" | "engaged" | "approved" | "created" => {
+                haste_core::log::Level::Info
+            }
+            "ambiguous" | "needs_check" | "breaker_opened" | "error" | "failed" => {
+                haste_core::log::Level::Error
+            }
+            _ => haste_core::log::Level::Warn,
+        };
+        let mut fields = vec![
+            haste_core::log::id("principal", principal),
+            haste_core::log::id("action", action),
+            haste_core::log::id("outcome", outcome),
+        ];
+        // note paths are left out: a file name can be a person's name
+        if let Some(o) = object.filter(|o| !o.contains('/')) {
+            fields.push(haste_core::log::id("object", o));
+        }
+        if let Some(d) = detail {
+            fields.push(haste_core::log::d("detail", d));
+        }
+        haste_core::log::event(level, "audit", "record", &fields);
         if let Err(e) = result {
+            haste_core::log::error("audit", "write_failed", &[]);
             eprintln!("hasted: audit write failed: {e}");
         }
     }

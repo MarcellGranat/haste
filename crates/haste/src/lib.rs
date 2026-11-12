@@ -43,6 +43,124 @@ pub struct Cli {
     pub command: Command,
 }
 
+/// Options of `haste logs`.
+#[cfg(feature = "human")]
+#[derive(Debug, clap::Args)]
+pub struct LogsArgs {
+    /// Which log: `hasted` (default) or `haste-tui`.
+    #[arg(long, default_value = "hasted")]
+    pub process: String,
+    /// Minimum level: debug, info, warn or error.
+    #[arg(long, default_value = "info")]
+    pub level: String,
+    /// Only one component, e.g. beeper, connector, daemon, audit, tui.
+    #[arg(long)]
+    pub component: Option<String>,
+    /// Only events from the last duration, e.g. 30m, 2h, 1d.
+    #[arg(long)]
+    pub since: Option<String>,
+    /// Show only the last N lines.
+    #[arg(long, default_value_t = 100)]
+    pub tail: usize,
+    /// Print the raw JSON lines instead of a readable form.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[cfg(feature = "human")]
+fn parse_duration_secs(s: &str) -> Option<u64> {
+    let (num, unit) = s.split_at(s.len().checked_sub(1)?);
+    let n: u64 = num.parse().ok()?;
+    match unit {
+        "s" => Some(n),
+        "m" => Some(n * 60),
+        "h" => Some(n * 3600),
+        "d" => Some(n * 86_400),
+        _ => None,
+    }
+}
+
+/// `haste logs`: read the local log files, no daemon needed.
+#[cfg(feature = "human")]
+fn run_logs(base: &Path, args: &LogsArgs) -> Result<String, CliError> {
+    let level = haste_core::log::Level::parse(&args.level)
+        .ok_or_else(|| CliError::Usage("level must be debug, info, warn or error".into()))?;
+    let since_ms = match &args.since {
+        Some(s) => {
+            let secs = parse_duration_secs(s)
+                .ok_or_else(|| CliError::Usage("since must look like 30m, 2h or 1d".into()))?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis());
+            Some(now.saturating_sub(u128::from(secs) * 1000))
+        }
+        None => None,
+    };
+    let mut lines = haste_core::log::read_lines(
+        base,
+        &args.process,
+        level,
+        args.component.as_deref(),
+        since_ms,
+    );
+    if lines.len() > args.tail {
+        lines.drain(..lines.len() - args.tail);
+    }
+    if lines.is_empty() {
+        return Ok(format!(
+            "no log lines (looked in {}/{})",
+            base.display(),
+            haste_core::log::LOG_DIR
+        ));
+    }
+    if args.json {
+        return Ok(lines.join("\n"));
+    }
+    Ok(lines
+        .iter()
+        .map(|l| pretty_log_line(l))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// `11:40:46.123 WARN  beeper http_get route=v1/chats/:id status=500 ms=12`
+#[cfg(feature = "human")]
+fn pretty_log_line(line: &str) -> String {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return line.to_owned();
+    };
+    let ms = v
+        .get("ts_ms")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let secs = i64::try_from(ms / 1000).unwrap_or(0);
+    let tod = secs.rem_euclid(86_400);
+    let level = v.get("level").and_then(|x| x.as_str()).unwrap_or("info");
+    let component = v.get("component").and_then(|x| x.as_str()).unwrap_or("?");
+    let event = v.get("event").and_then(|x| x.as_str()).unwrap_or("?");
+    let mut out = format!(
+        "{:02}:{:02}:{:02}.{:03}Z {:<5} {component} {event}",
+        tod / 3600,
+        (tod / 60) % 60,
+        tod % 60,
+        ms % 1000,
+        level.to_uppercase()
+    );
+    if let Some(map) = v.as_object() {
+        for (k, val) in map {
+            if matches!(
+                k.as_str(),
+                "ts_ms" | "level" | "proc" | "pid" | "seq" | "component" | "event"
+            ) {
+                continue;
+            }
+            let shown = val.as_str().map_or_else(|| val.to_string(), str::to_owned);
+            out.push_str(&format!(" {k}={shown}"));
+        }
+    }
+    out
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Read threads.
@@ -100,6 +218,10 @@ pub enum Command {
         #[command(subcommand)]
         cmd: ConnectorCmd,
     },
+    /// Show the operational log (human shell only): what the daemon and the TUI did, with fixed
+    /// labels and counts only; never message text, names or tokens.
+    #[cfg(feature = "human")]
+    Logs(LogsArgs),
     /// Project tags on threads (human shell only). Tags are herdr workspace names.
     #[cfg(feature = "human")]
     Tag {
@@ -557,6 +679,7 @@ pub fn is_human_command(command: &Command) -> bool {
         | Command::Connector { .. }
         | Command::Tag { .. }
         | Command::Email { .. }
+        | Command::Logs(_)
         | Command::Machine { .. } => true,
         #[cfg(feature = "human")]
         Command::Note {
@@ -897,6 +1020,12 @@ pub fn build_body(command: &Command) -> Result<RequestBody, CliError> {
             tag: tag.clone(),
         },
         #[cfg(feature = "human")]
+        Command::Logs(_) => {
+            return Err(CliError::Usage(
+                "logs reads local files, not a daemon request".into(),
+            ));
+        }
+        #[cfg(feature = "human")]
         Command::Connector {
             cmd: ConnectorCmd::Beeper { .. },
         } => {
@@ -1096,6 +1225,10 @@ pub fn call(base: &Path, request: &Request) -> Result<Response, CliError> {
 /// Any [`CliError`], including daemon-reported errors.
 pub fn run(cli: &Cli) -> Result<String, CliError> {
     let base = base_dir(cli.home.as_deref());
+    #[cfg(feature = "human")]
+    if let Command::Logs(args) = &cli.command {
+        return run_logs(&base, args);
+    }
     #[cfg(feature = "human")]
     if let Command::Connector {
         cmd:

@@ -5,6 +5,7 @@ pub mod audit;
 pub mod auth;
 pub mod connector;
 pub mod herdr;
+pub mod log;
 pub mod model;
 pub mod notes;
 pub mod policy;

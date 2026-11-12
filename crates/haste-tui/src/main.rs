@@ -156,6 +156,16 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
             return true;
         }
         Effect::CompleteReminders { ids } => complete_all(app, client, ids),
+        Effect::OpenThread { thread_id } => {
+            match client.call(RequestBody::ThreadShow { thread_id }) {
+                Ok(Response::Thread { view, messages }) => app.show_thread(view, messages),
+                other => {
+                    app.status = describe(other)
+                        .err()
+                        .unwrap_or_else(|| "could not open the thread".into());
+                }
+            }
+        }
         Effect::Mute { thread_id } => {
             app.status = match client.call(RequestBody::IgnoreMute { thread_id }) {
                 Ok(Response::Muted { pattern }) => {

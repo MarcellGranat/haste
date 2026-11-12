@@ -34,6 +34,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     if let Mode::Detail(id) = &app.mode {
         draw_detail(frame, app, id, body);
     }
+    if app.mode == Mode::Read {
+        draw_reader(frame, app, body);
+    }
     draw_footer(frame, app, footer);
 }
 
@@ -84,6 +87,16 @@ fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 /// `(key, what)` hints for the footer, depending on where the cursor is.
 fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
+    if app.mode == Mode::Read {
+        return vec![
+            ("j/k", "scroll"),
+            ("Space/b", "page"),
+            ("g/G", "top/end"),
+            ("r", "reply"),
+            ("e", "archive"),
+            ("Esc", "close"),
+        ];
+    }
     let thread_keys = vec![
         ("e", "archive"),
         ("r", "reply"),
@@ -466,6 +479,76 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
+/// The opened thread: every message, oldest first, wrapped to the panel and scrollable.
+fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let Some(reader) = &app.reader else {
+        return;
+    };
+    let off = app.tz_offset;
+    let thread = &reader.view.thread;
+    let title = format!(
+        " {} · {} · {} message(s) ",
+        inbox::sanitize(&thread.subject).replace('\n', " "),
+        thread.source.as_name(),
+        reader.messages.len()
+    );
+    frame.render_widget(Clear, area);
+    let block = theme::panel(&title).border_style(pane_border(true));
+    let inner = block.inner(area);
+    let width = usize::from(inner.width).saturating_sub(2).max(10);
+    let height = usize::from(inner.height);
+
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    let mut last_start = 0;
+    for m in &reader.messages {
+        last_start = lines.len();
+        let who = m.sender_identifier.as_deref().unwrap_or("unknown sender");
+        lines.push(Line::from(vec![
+            Span::styled(
+                inbox::sanitize(who).replace('\n', " "),
+                Style::new().fg(theme::MAUVE).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {}", inbox::stamp(m.sent_at, off)),
+                Style::new().fg(theme::MUTED),
+            ),
+        ]));
+        let text = if m.body_text.trim().is_empty() {
+            "(no text)".to_owned()
+        } else {
+            inbox::sanitize(&m.body_text)
+        };
+        for l in inbox::wrap(&text, width) {
+            lines.push(Line::from(Span::styled(l, Style::new().fg(theme::TEXT))));
+        }
+        lines.push(Line::from(""));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "no messages stored for this thread yet",
+            theme::muted(),
+        )));
+    }
+    let max_scroll = lines.len().saturating_sub(height);
+    if reader.to_latest.get() {
+        reader.to_latest.set(false);
+        reader.scroll.set(last_start);
+    }
+    let scroll = reader.scroll.get().min(max_scroll);
+    reader.scroll.set(scroll);
+    let more = if max_scroll > 0 {
+        format!(" {}/{} ", scroll + 1, lines.len())
+    } else {
+        String::new()
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
+            .block(block.title_bottom(more)),
+        area,
+    );
+}
+
 fn draw_approvals(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let items: Vec<ListItem<'_>> = app
         .rows()
@@ -731,5 +814,79 @@ mod tests {
         }
         let text = render(&app);
         assert!(text.contains("subject-10"), "scrolled to the cursor");
+    }
+
+    fn open_thread(app: &mut App, messages: Vec<haste_core::model::Message>) {
+        let view = haste_proto::ThreadView {
+            thread: haste_core::model::Thread {
+                id: "t1".into(),
+                source: haste_core::model::Source::Gmail,
+                external_id: "g1".into(),
+                subject: "Quarterly plan".into(),
+                participants: vec![],
+                last_activity_at: 1,
+                version: 1,
+            },
+            triage: haste_core::model::Triage::new("t1", haste_core::model::ObjectKind::Thread),
+            tags: vec![],
+        };
+        app.show_thread(view, messages);
+    }
+
+    fn msg(id: &str, text: &str, at: i64) -> haste_core::model::Message {
+        haste_core::model::Message {
+            id: id.into(),
+            thread_id: "t1".into(),
+            source: haste_core::model::Source::Gmail,
+            external_id: id.into(),
+            sender_person_id: None,
+            sender_identifier: Some("ana@x.org".into()),
+            body_text: text.into(),
+            sent_at: at,
+        }
+    }
+
+    #[test]
+    fn the_reader_shows_messages_wrapped_and_without_terminal_escapes() {
+        let mut app = App::new();
+        open_thread(
+            &mut app,
+            vec![
+                msg("m1", "hello there", 100),
+                msg(
+                    "m2",
+                    "Kedves Marcell, k\u{1b}[2Jöszönöm \u{202E}a levelet",
+                    200,
+                ),
+            ],
+        );
+        let text = render(&app);
+        assert!(text.contains("Quarterly plan") && text.contains("2 message(s)"));
+        assert!(text.contains("ana@x.org") && text.contains("Kedves Marcell"));
+        assert!(!text.contains('\u{1b}') && !text.contains('\u{202E}'));
+        assert!(text.contains("köszönöm") || text.contains("k[2Jöszönöm"));
+        assert!(text.contains("Esc") && text.contains("reply"));
+    }
+
+    #[test]
+    fn a_long_thread_opens_on_the_newest_message_and_scrolls_to_the_older_ones() {
+        let mut app = App::new();
+        let many: Vec<_> = (0..40)
+            .map(|i| {
+                msg(
+                    &format!("m{i}"),
+                    &format!("body-number-{i:02}"),
+                    100 + i64::from(i),
+                )
+            })
+            .collect();
+        open_thread(&mut app, many);
+        let text = render(&app);
+        assert!(text.contains("body-number-39"), "newest is visible");
+        assert!(!text.contains("body-number-00"), "oldest is scrolled out");
+        app.handle_key(Key::Char('g'));
+        let text = render(&app);
+        assert!(text.contains("body-number-00"), "g goes to the top");
+        assert!(!text.contains("body-number-39"));
     }
 }

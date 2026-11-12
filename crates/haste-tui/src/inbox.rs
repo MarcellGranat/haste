@@ -224,6 +224,66 @@ pub fn window_start(current: usize, selected: usize, rows: usize) -> usize {
     }
 }
 
+/// Text safe to draw: a message body comes from outside, so control characters (terminal escape
+/// sequences) and bidirectional overrides are removed; tabs become spaces, line breaks stay.
+#[must_use]
+pub fn sanitize(text: &str) -> String {
+    text.chars()
+        .filter_map(|c| match c {
+            '\n' => Some('\n'),
+            '\t' => Some(' '),
+            '\r' => None,
+            c if c.is_control() => None,
+            // left-to-right and right-to-left embeddings, overrides and isolates
+            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
+/// Break `text` into lines of at most `width` characters, at spaces where possible. Blank lines
+/// are kept; a word longer than a line is cut.
+#[must_use]
+pub fn wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    for line in text.split('\n') {
+        if line.trim().is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut cur = String::new();
+        let mut cur_len = 0_usize;
+        for word in line.split(' ') {
+            let w_len = word.chars().count();
+            if cur_len > 0 && cur_len + 1 + w_len > width {
+                out.push(std::mem::take(&mut cur));
+                cur_len = 0;
+            }
+            if w_len > width {
+                // cut a long word into full lines
+                let chars: Vec<char> = word.chars().collect();
+                for chunk in chars.chunks(width) {
+                    if cur_len > 0 {
+                        out.push(std::mem::take(&mut cur));
+                    }
+                    cur = chunk.iter().collect();
+                    cur_len = chunk.len();
+                }
+                continue;
+            }
+            if cur_len > 0 {
+                cur.push(' ');
+                cur_len += 1;
+            }
+            cur.push_str(word);
+            cur_len += w_len;
+        }
+        out.push(cur);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,6 +419,25 @@ mod tests {
         assert_eq!(window_start(0, 12, 10), 3);
         assert_eq!(window_start(3, 5, 10), 3, "no jump while inside");
         assert_eq!(window_start(3, 2, 10), 2);
+    }
+
+    #[test]
+    fn untrusted_text_loses_escape_sequences_and_bidi_overrides() {
+        let nasty = "hi\u{1b}[2J\u{1b}]0;owned\u{7}\r\nthere\u{202E}evil\ttab";
+        let clean = sanitize(nasty);
+        assert!(!clean.contains('\u{1b}') && !clean.contains('\u{7}'));
+        assert!(!clean.contains('\u{202E}') && !clean.contains('\r'));
+        assert_eq!(clean, "hi[2J]0;owned\nthereevil tab");
+        assert_eq!(sanitize("Granát é 日本"), "Granát é 日本");
+    }
+
+    #[test]
+    fn wrapping_breaks_at_spaces_keeps_blank_lines_and_cuts_long_words() {
+        assert_eq!(wrap("aaa bbb ccc", 7), vec!["aaa bbb", "ccc"]);
+        assert_eq!(wrap("one\n\ntwo", 10), vec!["one", "", "two"]);
+        assert_eq!(wrap("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        assert_eq!(wrap("é é é é", 3), vec!["é é", "é é"]);
+        assert!(wrap("", 5) == vec![String::new()]);
     }
 
     #[test]

@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crate::inbox;
 use haste_core::herdr::{AgentStatus, AgentStatusRecord, MachineState};
 use haste_core::ignore::IgnoreList;
+use haste_core::model::Message;
 use haste_core::proposal::{Payload, Proposal, ProposalState};
 use haste_proto::{
     ConnectorView, Event, EventView, FilterView, MachineView, ReminderView, RemindersStatusView,
@@ -68,6 +69,20 @@ const TZ_REFRESH: Duration = Duration::from_secs(600);
 
 /// Priority a thread gets when `p` marks it.
 pub const PRIORITY_ON: i32 = 1;
+
+/// An opened thread: its messages, oldest first, and where the reader is scrolled to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reader {
+    pub view: ThreadView,
+    pub messages: Vec<Message>,
+    /// First visible line (set while drawing, which knows the width).
+    pub scroll: Cell<usize>,
+    /// Start at the newest message; cleared once drawn.
+    pub to_latest: Cell<bool>,
+}
+
+/// Lines a page key moves in the reader.
+pub const READER_PAGE: usize = 12;
 
 /// Which pane of the Today tab has the cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +147,10 @@ pub enum Effect {
         thread_id: String,
         change: TriageChange,
     },
+    /// Fetch a thread's messages to read it.
+    OpenThread {
+        thread_id: String,
+    },
     /// Hide a thread's sender from the TUI (the local `.haste_ignore` list).
     Mute {
         thread_id: String,
@@ -195,6 +214,8 @@ pub enum Mode {
         id: String,
         done: bool,
     },
+    /// Reading a thread (see [`App::reader`]).
+    Read,
     /// Typing a snooze (`3h`, `2d`).
     Snooze {
         thread_id: String,
@@ -248,6 +269,7 @@ pub struct App {
     pub filter_error: Option<String>,
     pub filter_index: usize,
     pub today_selected: usize,
+    pub reader: Option<Reader>,
     /// Muted senders (`.haste_ignore`), applied to the Today and Channels lists only.
     pub ignore: IgnoreList,
     pub ignore_errors: Vec<String>,
@@ -361,6 +383,7 @@ impl App {
             filter_error: None,
             filter_index: 0,
             today_selected: 0,
+            reader: None,
             ignore: IgnoreList::default(),
             ignore_errors: Vec::new(),
             todo_marked: BTreeSet::new(),
@@ -813,6 +836,7 @@ impl App {
     pub fn handle_key(&mut self, key: Key) -> Option<Effect> {
         match self.mode.clone() {
             Mode::Filter => self.key_filter(key),
+            Mode::Read => self.key_read(key),
             Mode::Snooze { thread_id, input } => self.key_snooze(key, thread_id, input),
             Mode::Remind {
                 thread_id,
@@ -933,6 +957,7 @@ impl App {
             }
             Key::Char('J') if self.view == View::Today => self.today_focus = TodayFocus::Todo,
             Key::Char('K') if self.view == View::Today => self.today_focus = TodayFocus::Inbox,
+            Key::Enter if thread_view => return self.open_selected(),
             Key::Char('f') if matches!(self.view, View::Today | View::Channels) => {
                 self.cycle_filter();
             }
@@ -1223,6 +1248,62 @@ impl App {
                 None
             }
         }
+    }
+
+    fn open_selected(&mut self) -> Option<Effect> {
+        let (thread_id, _) = self.thread_under_cursor()?;
+        Some(Effect::OpenThread { thread_id })
+    }
+
+    /// The daemon's answer to [`Effect::OpenThread`]: show the thread, starting at the newest
+    /// message.
+    pub fn show_thread(&mut self, view: ThreadView, mut messages: Vec<Message>) {
+        messages.sort_by_key(|m| m.sent_at);
+        self.reader = Some(Reader {
+            view,
+            messages,
+            scroll: Cell::new(0),
+            to_latest: Cell::new(true),
+        });
+        self.mode = Mode::Read;
+    }
+
+    fn close_reader(&mut self) {
+        self.reader = None;
+        self.mode = Mode::Normal;
+    }
+
+    /// Keys while a thread is open: scroll, reply, archive, close.
+    fn key_read(&mut self, key: Key) -> Option<Effect> {
+        let Some(reader) = &self.reader else {
+            self.mode = Mode::Normal;
+            return None;
+        };
+        let thread_id = reader.view.thread.id.clone();
+        let at = reader.scroll.get();
+        let to = |v: usize| reader.scroll.set(v);
+        match key {
+            Key::Esc | Key::Enter | Key::Char('q' | 'h') => self.close_reader(),
+            Key::Char('j') | Key::Down => to(at.saturating_add(1)),
+            Key::Char('k') | Key::Up => to(at.saturating_sub(1)),
+            Key::Char(' ' | 'd') => to(at.saturating_add(READER_PAGE)),
+            Key::Char('b' | 'u') => to(at.saturating_sub(READER_PAGE)),
+            Key::Char('g' | '0') => {
+                reader.to_latest.set(false);
+                to(0);
+            }
+            Key::Char('G') => to(usize::MAX),
+            Key::Char('r') => return Some(Effect::Reply { thread_id }),
+            Key::Char('e') => {
+                self.close_reader();
+                return Some(Effect::Triage {
+                    thread_id,
+                    change: TriageChange::Archive,
+                });
+            }
+            _ => {}
+        }
+        None
     }
 
     fn on_todos(&self) -> bool {
@@ -1991,6 +2072,111 @@ mod tests {
         press(&mut app, " e");
         app.set_reminder_list(vec![reminder_view("b", None)]);
         assert!(app.pending_done.is_empty() && app.todo_marked.is_empty());
+    }
+
+    fn message(id: &str, who: &str, text: &str, at: i64) -> Message {
+        Message {
+            id: id.into(),
+            thread_id: "t2".into(),
+            source: haste_core::model::Source::Gmail,
+            external_id: id.into(),
+            sender_person_id: None,
+            sender_identifier: Some(who.into()),
+            body_text: text.into(),
+            sent_at: at,
+        }
+    }
+
+    #[test]
+    fn enter_opens_the_thread_on_today_and_inside_a_channel_but_not_on_the_todo_pane() {
+        let mut app = inbox_app(); // cursor on t2
+        assert_eq!(
+            app.handle_key(Key::Enter),
+            Some(Effect::OpenThread {
+                thread_id: "t2".into()
+            })
+        );
+        press(&mut app, "2");
+        // on the channel list Enter opens the channel, not a thread
+        assert!(app.handle_key(Key::Enter).is_none());
+        assert!(app.channel_inner);
+        assert_eq!(
+            app.handle_key(Key::Enter),
+            Some(Effect::OpenThread {
+                thread_id: "t2".into()
+            })
+        );
+        // the TODO pane has no thread to open
+        press(&mut app, "1");
+        app.handle_key(Key::Tab);
+        assert!(app.handle_key(Key::Enter).is_none());
+    }
+
+    #[test]
+    fn the_reader_sorts_scrolls_replies_archives_and_closes() {
+        let mut app = inbox_app();
+        let view = app.threads[1].clone();
+        app.show_thread(
+            view,
+            vec![
+                message("m2", "b@x.com", "second", 20),
+                message("m1", "a@x.com", "first", 10),
+            ],
+        );
+        assert_eq!(app.mode, Mode::Read);
+        let reader = app.reader.as_ref().unwrap();
+        assert_eq!(reader.messages[0].id, "m1", "oldest first");
+        assert!(reader.to_latest.get(), "opens on the newest message");
+        // scrolling
+        app.reader.as_ref().unwrap().scroll.set(5);
+        press(&mut app, "j");
+        assert_eq!(app.reader.as_ref().unwrap().scroll.get(), 6);
+        press(&mut app, "k");
+        press(&mut app, "b");
+        assert_eq!(
+            app.reader.as_ref().unwrap().scroll.get(),
+            0,
+            "never below the top"
+        );
+        press(&mut app, "G");
+        assert_eq!(
+            app.reader.as_ref().unwrap().scroll.get(),
+            usize::MAX,
+            "clamped when drawn"
+        );
+        // reply keeps the reader open
+        assert_eq!(
+            press(&mut app, "r"),
+            vec![Effect::Reply {
+                thread_id: "t2".into()
+            }]
+        );
+        assert_eq!(app.mode, Mode::Read);
+        // other thread keys do nothing in the reader
+        for keys in ["g", "p", "x", "s", "t"] {
+            assert!(press(&mut app, keys).is_empty(), "{keys}");
+        }
+        assert_eq!(app.mode, Mode::Read);
+        // archive closes it and archives
+        assert_eq!(
+            press(&mut app, "e"),
+            vec![Effect::Triage {
+                thread_id: "t2".into(),
+                change: TriageChange::Archive
+            }]
+        );
+        assert_eq!(
+            (app.mode.clone(), app.reader.is_none()),
+            (Mode::Normal, true)
+        );
+        // Esc closes without doing anything
+        let view = app.threads[0].clone();
+        app.show_thread(view, vec![]);
+        assert!(app.handle_key(Key::Esc).is_none());
+        assert_eq!(
+            (app.mode.clone(), app.reader.is_none()),
+            (Mode::Normal, true)
+        );
     }
 
     #[test]

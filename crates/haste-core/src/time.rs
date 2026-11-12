@@ -20,6 +20,29 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// Unix seconds for a UTC calendar time.
+#[must_use]
+pub fn from_civil(y: i64, m: i64, d: i64, h: i64, mi: i64) -> i64 {
+    days_from_civil(y, m, d) * 86_400 + h * 3600 + mi * 60
+}
+
+/// `(year, month, day, hour, minute)` in UTC for unix seconds.
+#[must_use]
+pub fn to_civil(secs: i64) -> (i64, i64, i64, i64, i64) {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y, m, d, rem / 3600, rem % 3600 / 60)
+}
+
 fn digits(s: &str) -> Option<i64> {
     if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -59,6 +82,12 @@ pub fn parse_rfc3339(s: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn civil_round_trips() {
+        let t = super::from_civil(2026, 11, 12, 9, 30);
+        assert_eq!(super::to_civil(t), (2026, 11, 12, 9, 30));
+    }
+
     use super::*;
 
     #[test]

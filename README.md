@@ -17,7 +17,7 @@ The other connectors are separate, later changes (see the roadmap below).
 | `haste-store` | SQLite (WAL), single writer thread, migrations |
 | `hasted` | the daemon: Unix socket server, schedulers, result delivery |
 | `haste` | agent CLI. Build with `--features human` for the human-shell verbs |
-| `haste-tui` | ratatui interface: inbox, approvals, connectors and agents |
+| `haste-tui` | ratatui interface (Catppuccin Mocha): Today, Channels, Calendar, plus approvals, connectors and agents |
 | `haste-herdr` | herdr link: local socket feed, the hub's `--machine` CLI feed, safe command builder, pinned protocol schema |
 | `haste-connector-icloud` | iCloud Mail connector (read-only IMAP), authorization helper `haste-icloud-auth`, Keychain secret store |
 | `haste-connector-reminders` | Apple Reminders connector: typed helper protocol, runner, and the Swift EventKit helper (`helper/`) |
@@ -457,6 +457,46 @@ a `---` line or a `<!-- haste:` marker. Machine principals never write notes.
 Appends are safe for several agents at once on a local disk. If the folder is synced (iCloud Drive,
 Obsidian Sync) a conflict copy can appear when the sync service touches the same file. On this setup
 the folder is not synced; if you move it into a synced location, test it first.
+
+## The TUI
+
+`haste-tui` uses the Catppuccin Mocha palette (all colours live in `crates/haste-tui/src/theme.rs`)
+and has three main tabs, plus three secondary screens:
+
+| Key | Screen |
+|---|---|
+| `1` Today | Inbox of every channel under the active filter (priority first, then newest), and below it the TODOs: open Apple Reminders due today (overdue included) or with no date |
+| `2` Channels | The same inbox by channel (gmail, icloud, whatsapp, messenger, imessage) with counts; `Enter` opens a channel, `Esc` goes back |
+| `3` Calendar | The next 7 days of your calendar, grouped by day (read-only, UTC) |
+| `4` `5` `6` | Approvals, Connectors, Agents (`Esc` returns to Today); the header shows the pending-approvals count |
+
+On a thread (Today, or inside a channel), only you can use these keys:
+
+| Key | Does |
+|---|---|
+| `e` | archive, **in haste only**: the thread leaves the inbox, nothing changes in Gmail, iCloud or the chat app |
+| `r` | write a reply in `$VISUAL`/`$EDITOR`; the text becomes a draft proposal (approve it in Approvals, then send as usual). A mail thread with several people asks first; **reply-all is not available yet** because sending addresses one recipient |
+| `g` | put aside / bring back (aside threads leave Today and show with `◌` in Channels) |
+| `p` | toggle priority (marked `★`, sorted first) |
+| `s` | snooze, whole hours or days only: `3h`, `2d` |
+| `t` | propose a reminder about the thread; asks for a due date (UTC), prefilled from a `YYYY-MM-DD` in the subject or `tomorrow 09:00`; empty means no date; approve it in Approvals |
+| `f` | next preset filter |
+| `j` `k` `G` `0` | move, bottom, top |
+
+**Preset filters** are `filters.json` in the data folder (the daemon validates it; a typo is shown in
+the footer and the previous filters stay active; with no file there is one filter, `all`):
+
+```json
+{"filters": [
+  {"name": "VIP", "sender": ["boss@corp.com"], "min_priority": 1},
+  {"name": "Chats", "source": ["whatsapp", "messenger", "imessage"]},
+  {"name": "Invoices", "subject": "invoice"}
+]}
+```
+
+A thread matches when every key present matches; within one key any value may match. Keys:
+`sender` (part of a participant address), `subject`, `source`, `min_priority`. Gmail labels and an
+unread flag are not stored yet, so they are not filter keys.
 
 ## Logging and diagnosing problems
 

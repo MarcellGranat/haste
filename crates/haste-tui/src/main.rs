@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEventKind};
 use haste_core::proposal::ProposalState;
 use haste_proto::{ErrorCode, RequestBody, Response};
-use haste_tui::app::{App, Effect, Key};
+use haste_tui::app::{App, Effect, Key, TriageChange};
 use haste_tui::client::{base_dir, Client};
 use haste_tui::ui::draw;
 
@@ -47,6 +47,9 @@ fn refresh(app: &mut App, client: &Client) {
     }
     if let Ok(Response::RemindersStatus { status }) = client.call(RequestBody::RemindersStatus) {
         app.set_reminders(status);
+    }
+    if let Ok(Response::Filters { filters, error }) = client.call(RequestBody::FilterList) {
+        app.set_filters(filters, error);
     }
     if let Ok(Response::Events { events }) = client.call(RequestBody::EventsList {
         from: haste_core::time::now_secs() - 3600,
@@ -150,12 +153,16 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 Err(e) => e,
             };
         }
-        Effect::ToReminder { thread_id, title } => {
+        Effect::ToReminder {
+            thread_id,
+            title,
+            due,
+        } => {
             let key = format!("to-reminder-{thread_id}");
             app.status = match describe(client.call(RequestBody::Propose {
                 payload: haste_core::proposal::Payload::ReminderCreate {
                     title,
-                    due: None,
+                    due,
                     list: None,
                     project: None,
                     thread_id: None,
@@ -168,6 +175,41 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 Err(e) => e,
             };
         }
+        Effect::Triage { thread_id, change } => {
+            let (priority, set_aside, snoozed_until, archived, done) = match change {
+                TriageChange::Archive => (None, None, None, Some(true), "archived (in haste only)"),
+                TriageChange::SetAside(on) => (
+                    None,
+                    Some(on),
+                    None,
+                    None,
+                    if on { "put aside" } else { "back in the inbox" },
+                ),
+                TriageChange::Priority(p) => (
+                    Some(p),
+                    None,
+                    None,
+                    None,
+                    if p > 0 {
+                        "marked priority"
+                    } else {
+                        "priority cleared"
+                    },
+                ),
+                TriageChange::SnoozeUntil(t) => (None, None, Some(Some(t)), None, "snoozed"),
+            };
+            app.status = match describe(client.call(RequestBody::TriageSet {
+                thread_id,
+                priority,
+                set_aside,
+                snoozed_until,
+                archived,
+            })) {
+                Ok(()) => done.into(),
+                Err(e) => e,
+            };
+        }
+        Effect::Reply { .. } => {} // needs the terminal; handled by `edit_reply` in the loop
         Effect::Resolve { id, done } => {
             app.status = match describe(client.call(RequestBody::ResolveExecuting {
                 proposal_id: id,
@@ -239,6 +281,65 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
     false
 }
 
+/// Open `$VISUAL`/`$EDITOR` on a private temp file, then propose the text as a draft reply.
+/// Nothing is sent: the draft still needs approval and the human send flow.
+fn edit_reply(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    client: &Client,
+    thread_id: String,
+) {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = base_dir().join("drafts");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("reply-{}.txt", std::process::id()));
+    let created = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+        .and_then(|mut f| f.write_all(b""));
+    if created.is_err() {
+        app.status = "could not create the reply file".into();
+        return;
+    }
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".into());
+    let mut parts = editor.split_whitespace();
+    let program = parts.next().unwrap_or("vi").to_owned();
+    ratatui::restore();
+    let ran = std::process::Command::new(program)
+        .args(parts)
+        .arg(&path)
+        .status();
+    *terminal = ratatui::init();
+    let _ = terminal.clear();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let _ = std::fs::remove_file(&path);
+    if !matches!(ran, Ok(s) if s.success()) {
+        app.status = "the editor did not finish; reply cancelled".into();
+        return;
+    }
+    let body = text.trim().to_owned();
+    if body.is_empty() {
+        app.status = "empty reply; nothing proposed".into();
+        return;
+    }
+    let key = format!("tui-reply-{thread_id}-{}", haste_core::time::now_secs());
+    app.status = match describe(client.call(RequestBody::Propose {
+        payload: haste_core::proposal::Payload::Draft { to: None, body },
+        thread_id: Some(thread_id),
+        idempotency_key: key,
+        hints: None,
+    })) {
+        Ok(()) => "reply drafted; approve it in Approvals (4), then send".into(),
+        Err(e) => e,
+    };
+}
+
 fn main() -> io::Result<()> {
     let _ = haste_core::log::init(
         &base_dir(),
@@ -270,7 +371,10 @@ fn main() -> io::Result<()> {
                 if let TermEvent::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
                         if let Some(effect) = map_key(key.code).and_then(|k| app.handle_key(k)) {
-                            if run_effect(&mut app, &client, effect) {
+                            if let Effect::Reply { thread_id } = effect {
+                                edit_reply(&mut terminal, &mut app, &client, thread_id);
+                                refresh(&mut app, &client);
+                            } else if run_effect(&mut app, &client, effect) {
                                 return Ok(());
                             }
                         }

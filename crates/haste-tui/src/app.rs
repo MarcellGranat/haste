@@ -3,11 +3,11 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
+use crate::inbox;
 use haste_core::herdr::{AgentStatus, AgentStatusRecord, MachineState};
-use haste_core::model::Source;
 use haste_core::proposal::{Payload, Proposal, ProposalState};
 use haste_proto::{
-    ConnectorView, Event, EventView, MachineView, ReminderView, RemindersStatusView,
+    ConnectorView, Event, EventView, FilterView, MachineView, ReminderView, RemindersStatusView,
     SendPreviewView, ThreadView,
 };
 
@@ -25,13 +25,40 @@ pub enum Key {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
-    Inbox,
+    /// Tab 1: inbox of all channels plus today's TODOs.
+    Today,
+    /// Tab 2: the inbox by channel.
+    Channels,
+    /// Tab 3: the next days of the calendar.
+    Calendar,
+    /// Secondary screens, opened with 4, 5 and 6.
     Approvals,
     Connectors,
     Agents,
-    Calendar,
-    Reminders,
 }
+
+impl View {
+    /// The three main tabs, in order.
+    pub const TABS: [Self; 3] = [Self::Today, Self::Channels, Self::Calendar];
+
+    #[must_use]
+    pub fn is_tab(self) -> bool {
+        Self::TABS.contains(&self)
+    }
+}
+
+/// A triage change made with one key on a thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriageChange {
+    Archive,
+    SetAside(bool),
+    Priority(i32),
+    /// Snooze until this unix second.
+    SnoozeUntil(i64),
+}
+
+/// Priority a thread gets when `p` marks it.
+pub const PRIORITY_ON: i32 = 1;
 
 /// How the Approvals view groups proposals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +109,16 @@ pub enum Effect {
     ToReminder {
         thread_id: String,
         title: String,
+        due: Option<i64>,
+    },
+    /// Change a thread's triage state (local to haste; no mailbox or chat network is touched).
+    Triage {
+        thread_id: String,
+        change: TriageChange,
+    },
+    /// Open the editor for a reply to a thread; the text becomes a draft proposal (never sent).
+    Reply {
+        thread_id: String,
     },
     ReleaseConnector {
         source: String,
@@ -134,6 +171,21 @@ pub enum Mode {
         id: String,
         done: bool,
     },
+    /// Typing a snooze (`3h`, `2d`).
+    Snooze {
+        thread_id: String,
+        input: String,
+    },
+    /// Typing a due date for a reminder about a thread.
+    Remind {
+        thread_id: String,
+        title: String,
+        input: String,
+    },
+    /// A mail thread with several people: reply to the sender or to everyone.
+    ReplyChoice {
+        thread_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,8 +217,16 @@ pub struct App {
     pub mode: Mode,
     pub threads: Vec<ThreadView>,
     pub proposals: Vec<Proposal>,
-    pub source_filter: Option<Source>,
-    pub inbox_selected: usize,
+    /// Preset filters from the daemon (always at least the default).
+    pub filters: Vec<FilterView>,
+    /// Why `filters.json` was rejected, if it was.
+    pub filter_error: Option<String>,
+    pub filter_index: usize,
+    pub today_selected: usize,
+    pub channels_selected: usize,
+    /// Inside a channel's thread list (Channels tab).
+    pub channel_inner: bool,
+    pub channel_thread_selected: usize,
     pub approvals_selected: usize,
     pub connectors: Vec<ConnectorView>,
     /// Reminders permission and counts (no titles); `None` until first read.
@@ -179,7 +239,6 @@ pub struct App {
     pub calendar_selected: usize,
     /// Open reminders (read-only; add or change them through proposals).
     pub reminder_list: Vec<ReminderView>,
-    pub reminders_selected: usize,
     pub group_by: GroupBy,
     pub blocked_collapsed: bool,
     pub filter: String,
@@ -248,12 +307,20 @@ impl App {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            view: View::Approvals,
+            view: View::Today,
             mode: Mode::Normal,
             threads: Vec::new(),
             proposals: Vec::new(),
-            source_filter: None,
-            inbox_selected: 0,
+            filters: vec![FilterView {
+                name: "all".into(),
+                ..FilterView::default()
+            }],
+            filter_error: None,
+            filter_index: 0,
+            today_selected: 0,
+            channels_selected: 0,
+            channel_inner: false,
+            channel_thread_selected: 0,
             approvals_selected: 0,
             connectors: Vec::new(),
             reminders: None,
@@ -263,7 +330,6 @@ impl App {
             events: Vec::new(),
             calendar_selected: 0,
             reminder_list: Vec::new(),
-            reminders_selected: 0,
             group_by: GroupBy::Agent,
             blocked_collapsed: false,
             filter: String::new(),
@@ -440,31 +506,103 @@ impl App {
         rows
     }
 
-    fn visible_threads(&self) -> Vec<&ThreadView> {
-        self.threads
+    /// Threads passing the active filter, best first: priority, then newest activity.
+    fn filtered_threads(&self, include_aside: bool) -> Vec<&ThreadView> {
+        let filter = self.active_filter();
+        let mut out: Vec<&ThreadView> = self
+            .threads
             .iter()
-            .filter(|t| {
-                self.source_filter
-                    .as_ref()
-                    .is_none_or(|s| &t.thread.source == s)
-            })
+            .filter(|t| !t.triage.archived && (include_aside || !t.triage.set_aside))
+            .filter(|t| inbox::matches(filter, t))
+            .collect();
+        out.sort_by(|a, b| {
+            (b.triage.priority, b.thread.last_activity_at)
+                .cmp(&(a.triage.priority, a.thread.last_activity_at))
+        });
+        out
+    }
+
+    #[must_use]
+    pub fn active_filter(&self) -> &FilterView {
+        &self.filters[self.filter_index.min(self.filters.len() - 1)]
+    }
+
+    /// Today's inbox: every channel under the active filter, nothing set aside.
+    #[must_use]
+    pub fn today_threads(&self) -> Vec<&ThreadView> {
+        self.filtered_threads(false)
+    }
+
+    /// TODOs for today: open reminders due by the end of today (overdue included) or undated.
+    #[must_use]
+    pub fn todos(&self) -> Vec<&ReminderView> {
+        let end = inbox::day_start(haste_core::time::now_secs()) + 86_400;
+        let mut out: Vec<&ReminderView> = self
+            .reminder_list
+            .iter()
+            .filter(|r| !r.reminder.completed && r.reminder.due_at.is_none_or(|d| d < end))
+            .collect();
+        out.sort_by_key(|r| r.reminder.due_at.unwrap_or(i64::MAX));
+        out
+    }
+
+    /// Selectable rows of the Today tab: threads, then TODOs.
+    #[must_use]
+    pub fn today_len(&self) -> usize {
+        self.today_threads().len() + self.todos().len()
+    }
+
+    /// Threads of channel `i` under the active filter (set-aside ones included, marked).
+    #[must_use]
+    pub fn channel_threads(&self, i: usize) -> Vec<&ThreadView> {
+        let Some(name) = inbox::CHANNELS.get(i) else {
+            return Vec::new();
+        };
+        self.filtered_threads(true)
+            .into_iter()
+            .filter(|t| t.thread.source.as_name() == *name)
             .collect()
     }
 
+    /// The thread the thread-keys act on, if the cursor is on one.
     #[must_use]
-    pub fn inbox_len(&self) -> usize {
-        self.visible_threads().len()
+    pub fn selected_thread(&self) -> Option<&ThreadView> {
+        match self.view {
+            View::Today => self.today_threads().get(self.today_selected).copied(),
+            View::Channels if self.channel_inner => self
+                .channel_threads(self.channels_selected)
+                .get(self.channel_thread_selected)
+                .copied(),
+            _ => None,
+        }
     }
 
+    /// Calendar rows for the next [`inbox::AGENDA_DAYS`] days, soonest first.
     #[must_use]
-    pub fn inbox_threads(&self) -> Vec<&ThreadView> {
-        self.visible_threads()
+    pub fn agenda(&self) -> Vec<&EventView> {
+        let now = haste_core::time::now_secs();
+        let until = inbox::day_start(now) + inbox::AGENDA_DAYS * 86_400;
+        let mut out: Vec<&EventView> = self
+            .events
+            .iter()
+            .filter(|e| {
+                e.event.status != "cancelled" && e.event.end_at >= now && e.event.start_at < until
+            })
+            .collect();
+        out.sort_by_key(|e| e.event.start_at);
+        out
     }
 
     fn clamp(&mut self) {
         let rows = self.rows().len();
         self.approvals_selected = self.approvals_selected.min(rows.saturating_sub(1));
-        self.inbox_selected = self.inbox_selected.min(self.inbox_len().saturating_sub(1));
+        self.today_selected = self.today_selected.min(self.today_len().saturating_sub(1));
+        self.channels_selected = self.channels_selected.min(inbox::CHANNELS.len() - 1);
+        self.channel_thread_selected = self.channel_thread_selected.min(
+            self.channel_threads(self.channels_selected)
+                .len()
+                .saturating_sub(1),
+        );
         self.connectors_selected = self
             .connectors_selected
             .min(self.connectors.len().saturating_sub(1));
@@ -473,10 +611,7 @@ impl App {
             .min(self.agent_rows().len().saturating_sub(1));
         self.calendar_selected = self
             .calendar_selected
-            .min(self.events.len().saturating_sub(1));
-        self.reminders_selected = self
-            .reminders_selected
-            .min(self.reminder_list.len().saturating_sub(1));
+            .min(self.agenda().len().saturating_sub(1));
     }
 
     fn selected_proposal(&self) -> Option<&Proposal> {
@@ -486,67 +621,67 @@ impl App {
         }
     }
 
-    fn move_selection(&mut self, delta: isize) {
-        let len = match self.view {
+    fn selection_len(&self) -> usize {
+        match self.view {
+            View::Today => self.today_len(),
+            View::Channels if self.channel_inner => {
+                self.channel_threads(self.channels_selected).len()
+            }
+            View::Channels => inbox::CHANNELS.len(),
+            View::Calendar => self.agenda().len(),
             View::Approvals => self.rows().len(),
-            View::Inbox => self.inbox_len(),
             View::Connectors => self.connectors.len(),
             View::Agents => self.agent_rows().len(),
-            View::Calendar => self.events.len(),
-            View::Reminders => self.reminder_list.len(),
-        };
-        let sel = match self.view {
+        }
+    }
+
+    fn selection_mut(&mut self) -> &mut usize {
+        match self.view {
+            View::Today => &mut self.today_selected,
+            View::Channels if self.channel_inner => &mut self.channel_thread_selected,
+            View::Channels => &mut self.channels_selected,
+            View::Calendar => &mut self.calendar_selected,
             View::Approvals => &mut self.approvals_selected,
-            View::Inbox => &mut self.inbox_selected,
             View::Connectors => &mut self.connectors_selected,
             View::Agents => &mut self.agents_selected,
-            View::Calendar => &mut self.calendar_selected,
-            View::Reminders => &mut self.reminders_selected,
-        };
+        }
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let len = self.selection_len();
+        let sel = self.selection_mut();
         *sel = if len == 0 {
             0
         } else {
             sel.saturating_add_signed(delta).min(len - 1)
         };
-    }
-
-    fn jump(&mut self, last: bool) {
-        let len = match self.view {
-            View::Approvals => self.rows().len(),
-            View::Inbox => self.inbox_len(),
-            View::Connectors => self.connectors.len(),
-            View::Agents => self.agent_rows().len(),
-            View::Calendar => self.events.len(),
-            View::Reminders => self.reminder_list.len(),
-        };
-        let target = if last { len.saturating_sub(1) } else { 0 };
-        match self.view {
-            View::Approvals => self.approvals_selected = target,
-            View::Inbox => self.inbox_selected = target,
-            View::Connectors => self.connectors_selected = target,
-            View::Agents => self.agents_selected = target,
-            View::Calendar => self.calendar_selected = target,
-            View::Reminders => self.reminders_selected = target,
+        if self.view == View::Channels && !self.channel_inner {
+            self.channel_thread_selected = 0;
         }
     }
 
-    fn cycle_source(&mut self) {
-        let mut sources: Vec<Source> = self
-            .threads
-            .iter()
-            .map(|t| t.thread.source.clone())
-            .collect();
-        sources.sort_by_key(Source::as_name);
-        sources.dedup();
-        self.source_filter = match &self.source_filter {
-            None => sources.first().cloned(),
-            Some(current) => sources
-                .iter()
-                .position(|s| s == current)
-                .and_then(|i| sources.get(i + 1))
-                .cloned(),
-        };
-        self.inbox_selected = 0;
+    fn jump(&mut self, last: bool) {
+        let len = self.selection_len();
+        *self.selection_mut() = if last { len.saturating_sub(1) } else { 0 };
+    }
+
+    /// `f`: next preset filter, wrapping to the first; never writes the file.
+    fn cycle_filter(&mut self) {
+        self.filter_index = (self.filter_index + 1) % self.filters.len();
+        self.today_selected = 0;
+        self.channel_thread_selected = 0;
+        self.status = format!("filter: {}", self.active_filter().name);
+        self.clamp();
+    }
+
+    pub fn set_filters(&mut self, filters: Vec<FilterView>, error: Option<String>) {
+        // A rejected file keeps the previous valid set active.
+        if error.is_none() && !filters.is_empty() {
+            let name = self.active_filter().name.clone();
+            self.filter_index = filters.iter().position(|f| f.name == name).unwrap_or(0);
+            self.filters = filters;
+        }
+        self.filter_error = error;
     }
 
     fn toggle_group(&mut self) {
@@ -583,6 +718,13 @@ impl App {
     pub fn handle_key(&mut self, key: Key) -> Option<Effect> {
         match self.mode.clone() {
             Mode::Filter => self.key_filter(key),
+            Mode::Snooze { thread_id, input } => self.key_snooze(key, thread_id, input),
+            Mode::Remind {
+                thread_id,
+                title,
+                input,
+            } => self.key_remind(key, thread_id, title, input),
+            Mode::ReplyChoice { thread_id } => self.key_reply_choice(key, thread_id),
             Mode::Detail(_) => {
                 if matches!(key, Key::Esc | Key::Char('q') | Key::Enter) {
                     self.mode = Mode::Normal;
@@ -664,28 +806,49 @@ impl App {
     }
 
     fn key_normal(&mut self, key: Key) -> Option<Effect> {
+        let thread_view =
+            matches!(self.view, View::Today) || (self.view == View::Channels && self.channel_inner);
         match key {
             Key::Char('q') => return Some(Effect::Quit),
             Key::Tab => {
-                self.view = match self.view {
-                    View::Inbox => View::Approvals,
-                    View::Approvals => View::Connectors,
-                    View::Connectors => View::Agents,
-                    View::Agents => View::Calendar,
-                    View::Calendar => View::Reminders,
-                    View::Reminders => View::Inbox,
+                self.view = match View::TABS.iter().position(|v| *v == self.view) {
+                    Some(i) => View::TABS[(i + 1) % View::TABS.len()],
+                    None => View::Today,
                 };
             }
+            Key::Char('1') => self.view = View::Today,
+            Key::Char('2') => self.view = View::Channels,
+            Key::Char('3') => self.view = View::Calendar,
+            Key::Char('4') => self.view = View::Approvals,
+            Key::Char('5') => self.view = View::Connectors,
+            Key::Char('6') => self.view = View::Agents,
+            Key::Esc | Key::Char('h') if self.view == View::Channels && self.channel_inner => {
+                self.channel_inner = false;
+            }
+            Key::Esc if !self.view.is_tab() => self.view = View::Today,
+            Key::Enter | Key::Char('l') if self.view == View::Channels && !self.channel_inner => {
+                self.channel_inner = true;
+                self.channel_thread_selected = 0;
+            }
+            Key::Char('f') if matches!(self.view, View::Today | View::Channels) => {
+                self.cycle_filter();
+            }
+            Key::Char('e') if thread_view => return self.triage_archive(),
+            Key::Char('g') if thread_view => return self.triage_aside(),
+            Key::Char('p') if thread_view => return self.triage_priority(),
+            Key::Char('s') if thread_view => self.start_snooze(),
+            Key::Char('t') if thread_view => self.start_remind(),
+            Key::Char('r') if thread_view => return self.start_reply(),
+            Key::Char('0') => self.jump(false),
             Key::Char('P') if self.view == View::Approvals => self.toggle_group_by(),
             Key::Char('R') if self.view == View::Connectors => self.start_release(),
             Key::Char('E') if self.view == View::Connectors => return self.engage_selected(),
             Key::Char('j') | Key::Down => self.move_selection(1),
             Key::Char('k') | Key::Up => self.move_selection(-1),
-            Key::Char('g') => self.jump(false),
+            Key::Char('g') if !thread_view => self.jump(false),
             Key::Char('G') => self.jump(true),
             Key::Char('r') if self.view == View::Approvals => return self.reject_selected(),
             Key::Char('u') => return Some(Effect::Refresh),
-            Key::Char('f') if self.view == View::Inbox => self.cycle_source(),
             Key::Char('/') if self.view == View::Approvals => {
                 self.mode = Mode::Filter;
                 self.filter.clear();
@@ -698,7 +861,6 @@ impl App {
             Key::Char('s') if self.view == View::Approvals => return self.start_send(),
             Key::Char('m') if self.view == View::Approvals => self.start_resolve(true),
             Key::Char('b') if self.view == View::Approvals => self.start_resolve(false),
-            Key::Char('T') if self.view == View::Inbox => return self.thread_to_reminder(),
             _ => {}
         }
         None
@@ -933,13 +1095,168 @@ impl App {
         }
     }
 
-    /// `T` in the inbox: propose a reminder about the selected thread, titled by its subject.
-    fn thread_to_reminder(&mut self) -> Option<Effect> {
-        let thread = self.visible_threads().get(self.inbox_selected).copied()?;
-        Some(Effect::ToReminder {
-            thread_id: thread.thread.id.clone(),
-            title: thread.thread.subject.clone(),
+    /// The id and subject of the thread under the cursor, or a status line saying why not.
+    fn thread_under_cursor(&mut self) -> Option<(String, String)> {
+        match self.selected_thread() {
+            Some(t) => Some((t.thread.id.clone(), t.thread.subject.clone())),
+            None => {
+                self.status = "put the cursor on a thread first".into();
+                None
+            }
+        }
+    }
+
+    fn triage_archive(&mut self) -> Option<Effect> {
+        let (thread_id, _) = self.thread_under_cursor()?;
+        Some(Effect::Triage {
+            thread_id,
+            change: TriageChange::Archive,
         })
+    }
+
+    fn triage_aside(&mut self) -> Option<Effect> {
+        let t = self.selected_thread()?;
+        Some(Effect::Triage {
+            thread_id: t.thread.id.clone(),
+            change: TriageChange::SetAside(!t.triage.set_aside),
+        })
+    }
+
+    fn triage_priority(&mut self) -> Option<Effect> {
+        let t = self.selected_thread()?;
+        let next = if t.triage.priority > 0 {
+            0
+        } else {
+            PRIORITY_ON
+        };
+        Some(Effect::Triage {
+            thread_id: t.thread.id.clone(),
+            change: TriageChange::Priority(next),
+        })
+    }
+
+    fn start_snooze(&mut self) {
+        if let Some((thread_id, _)) = self.thread_under_cursor() {
+            self.mode = Mode::Snooze {
+                thread_id,
+                input: String::new(),
+            };
+        }
+    }
+
+    fn start_remind(&mut self) {
+        if let Some((thread_id, title)) = self.thread_under_cursor() {
+            let input = inbox::default_due(&title);
+            self.mode = Mode::Remind {
+                thread_id,
+                title,
+                input,
+            };
+        }
+    }
+
+    /// `r`: reply. A mail thread with several people asks first whether to reply to the sender
+    /// or to everyone; anything else goes straight to the editor.
+    fn start_reply(&mut self) -> Option<Effect> {
+        let (several, thread_id) = {
+            let t = self.selected_thread()?;
+            (
+                inbox::is_mail(&t.thread.source.as_name()) && t.thread.participants.len() > 2,
+                t.thread.id.clone(),
+            )
+        };
+        if several {
+            self.mode = Mode::ReplyChoice { thread_id };
+            None
+        } else {
+            Some(Effect::Reply { thread_id })
+        }
+    }
+
+    fn key_snooze(&mut self, key: Key, thread_id: String, mut input: String) -> Option<Effect> {
+        match key {
+            Key::Esc => self.mode = Mode::Normal,
+            Key::Enter => match inbox::parse_snooze(&input) {
+                Ok(secs) => {
+                    self.mode = Mode::Normal;
+                    return Some(Effect::Triage {
+                        thread_id,
+                        change: TriageChange::SnoozeUntil(haste_core::time::now_secs() + secs),
+                    });
+                }
+                Err(e) => self.status = e,
+            },
+            Key::Backspace => {
+                input.pop();
+                self.mode = Mode::Snooze { thread_id, input };
+            }
+            Key::Char(c) => {
+                input.push(c);
+                self.mode = Mode::Snooze { thread_id, input };
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn key_remind(
+        &mut self,
+        key: Key,
+        thread_id: String,
+        title: String,
+        mut input: String,
+    ) -> Option<Effect> {
+        match key {
+            Key::Esc => self.mode = Mode::Normal,
+            Key::Enter => match inbox::parse_due(&input, haste_core::time::now_secs()) {
+                Ok(due) => {
+                    self.mode = Mode::Normal;
+                    return Some(Effect::ToReminder {
+                        thread_id,
+                        title,
+                        due,
+                    });
+                }
+                Err(e) => self.status = e,
+            },
+            Key::Backspace => {
+                input.pop();
+                self.mode = Mode::Remind {
+                    thread_id,
+                    title,
+                    input,
+                };
+            }
+            Key::Char(c) => {
+                input.push(c);
+                self.mode = Mode::Remind {
+                    thread_id,
+                    title,
+                    input,
+                };
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn key_reply_choice(&mut self, key: Key, thread_id: String) -> Option<Effect> {
+        match key {
+            Key::Char('r') | Key::Enter => {
+                self.mode = Mode::Normal;
+                return Some(Effect::Reply { thread_id });
+            }
+            Key::Char('a') => {
+                // The send path addresses exactly one recipient (v1), so a reply to everyone
+                // cannot be sent yet. Say so instead of silently replying to one person.
+                self.mode = Mode::Normal;
+                self.status =
+                    "reply-all is not available yet: sending addresses one recipient".into();
+            }
+            Key::Esc => self.mode = Mode::Normal,
+            _ => {}
+        }
+        None
     }
 
     pub fn set_reminders(&mut self, status: RemindersStatusView) {
@@ -951,6 +1268,15 @@ impl App {
     pub fn confirm_prompt(&self) -> Option<String> {
         match &self.mode {
             Mode::ConfirmBatch(ids) => Some(format!("Approve {} proposal(s)? [y/N]", ids.len())),
+            Mode::Snooze { input, .. } => Some(format!(
+                "Snooze for (whole hours or days, e.g. 3h or 2d; Enter to set, Esc to cancel): {input}"
+            )),
+            Mode::Remind { input, .. } => Some(format!(
+                "Reminder due (UTC; Enter accepts, empty = no date, Esc cancels): {input}"
+            )),
+            Mode::ReplyChoice { .. } => {
+                Some("Several people on this thread: r reply to sender · a reply to all · Esc".into())
+            }
             Mode::ConfirmRelease(source) => Some(format!(
                 "Release {source}? It will sync again from its saved cursor. [y/N]"
             )),
@@ -1033,7 +1359,7 @@ mod tests {
     }
 
     fn app_with(list: Vec<Proposal>) -> App {
-        let mut app = App::new();
+        let mut app = approvals_app();
         app.set_proposals(list);
         app
     }
@@ -1044,6 +1370,12 @@ mod tests {
             proposal("p2", "agent-a", ProposalState::Pending, false),
             proposal("p3", "agent-b", ProposalState::Pending, false),
         ])
+    }
+
+    fn approvals_app() -> App {
+        let mut app = App::new();
+        app.view = View::Approvals;
+        app
     }
 
     fn press(app: &mut App, keys: &str) -> Vec<Effect> {
@@ -1096,30 +1428,256 @@ mod tests {
         assert_eq!(app.rows().len(), 3, "it stays listed as open");
     }
 
-    #[test]
-    fn t_in_the_inbox_proposes_a_reminder_about_the_selected_thread() {
-        let mut app = App::new();
-        app.view = View::Inbox;
-        app.set_threads(vec![ThreadView {
+    fn mail_thread(id: &str, subject: &str, who: &[&str], t: i64) -> ThreadView {
+        ThreadView {
             thread: haste_core::model::Thread {
-                id: "t1".into(),
-                source: Source::Gmail,
-                external_id: "g1".into(),
-                subject: "Quarterly plan".into(),
-                participants: vec![],
-                last_activity_at: 1,
+                id: id.into(),
+                source: haste_core::model::Source::Gmail,
+                external_id: format!("g-{id}"),
+                subject: subject.into(),
+                participants: who.iter().map(|s| (*s).to_owned()).collect(),
+                last_activity_at: t,
                 version: 1,
             },
-            triage: haste_core::model::Triage::new("t1", haste_core::model::ObjectKind::Thread),
+            triage: haste_core::model::Triage::new(id, haste_core::model::ObjectKind::Thread),
             tags: vec![],
-        }]);
+        }
+    }
+
+    fn inbox_app() -> App {
+        let mut app = App::new();
+        app.set_threads(vec![
+            mail_thread("t1", "Quarterly plan", &["a@x.com"], 10),
+            mail_thread("t2", "Team lunch", &["a@x.com", "b@x.com", "c@x.com"], 20),
+        ]);
+        app
+    }
+
+    #[test]
+    fn the_app_starts_on_today_with_newest_first() {
+        let app = inbox_app();
+        assert_eq!(app.view, View::Today);
+        let ids: Vec<&str> = app
+            .today_threads()
+            .iter()
+            .map(|t| t.thread.id.as_str())
+            .collect();
+        assert_eq!(ids, ["t2", "t1"]);
+    }
+
+    #[test]
+    fn archive_aside_and_priority_keys_emit_triage_effects() {
+        let mut app = inbox_app(); // cursor on t2
         assert_eq!(
-            press(&mut app, "T"),
-            vec![Effect::ToReminder {
-                thread_id: "t1".into(),
-                title: "Quarterly plan".into()
+            press(&mut app, "e"),
+            vec![Effect::Triage {
+                thread_id: "t2".into(),
+                change: TriageChange::Archive
             }]
         );
+        assert_eq!(
+            press(&mut app, "g"),
+            vec![Effect::Triage {
+                thread_id: "t2".into(),
+                change: TriageChange::SetAside(true)
+            }]
+        );
+        assert_eq!(
+            press(&mut app, "p"),
+            vec![Effect::Triage {
+                thread_id: "t2".into(),
+                change: TriageChange::Priority(PRIORITY_ON)
+            }]
+        );
+    }
+
+    #[test]
+    fn priority_threads_sort_first_and_aside_threads_leave_today() {
+        let mut app = inbox_app();
+        app.threads[0].triage.priority = 1;
+        assert_eq!(app.today_threads()[0].thread.id, "t1");
+        app.threads[0].triage.set_aside = true;
+        assert_eq!(app.today_threads().len(), 1);
+        app.threads[0].triage.archived = true;
+        app.threads[0].triage.set_aside = false;
+        assert_eq!(app.today_threads().len(), 1, "archived threads are hidden");
+    }
+
+    #[test]
+    fn snooze_prompt_takes_whole_hours_or_days_only() {
+        let mut app = inbox_app();
+        press(&mut app, "s");
+        assert!(matches!(app.mode, Mode::Snooze { .. }));
+        press(&mut app, "1.5h");
+        assert!(press(&mut app, "\n").is_empty());
+        assert!(
+            matches!(app.mode, Mode::Snooze { .. }),
+            "stays open on a bad value"
+        );
+        for _ in 0..4 {
+            app.handle_key(Key::Backspace);
+        }
+        press(&mut app, "3h");
+        let effects: Vec<Effect> = app.handle_key(Key::Enter).into_iter().collect();
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Triage {
+                change: TriageChange::SnoozeUntil(_),
+                ..
+            }]
+        ));
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn t_asks_for_a_due_date_prefilled_and_empty_means_undated() {
+        let mut app = inbox_app();
+        press(&mut app, "t");
+        let Mode::Remind { input, .. } = &app.mode else {
+            panic!("{:?}", app.mode)
+        };
+        assert_eq!(input, "tomorrow 09:00");
+        for _ in 0..input.len() {
+            app.handle_key(Key::Backspace);
+        }
+        let effects: Vec<Effect> = app.handle_key(Key::Enter).into_iter().collect();
+        assert_eq!(
+            effects,
+            vec![Effect::ToReminder {
+                thread_id: "t2".into(),
+                title: "Team lunch".into(),
+                due: None
+            }]
+        );
+    }
+
+    #[test]
+    fn reply_asks_only_when_several_people_and_reply_all_is_not_offered_a_send() {
+        let mut app = inbox_app(); // t2 has three participants
+        assert!(press(&mut app, "r").is_empty());
+        assert!(matches!(app.mode, Mode::ReplyChoice { .. }));
+        assert!(press(&mut app, "a").is_empty());
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.status.contains("reply-all"));
+        press(&mut app, "r");
+        assert_eq!(
+            press(&mut app, "r"),
+            vec![Effect::Reply {
+                thread_id: "t2".into()
+            }]
+        );
+        press(&mut app, "j"); // t1: one other person, straight to the editor
+        assert_eq!(
+            press(&mut app, "r"),
+            vec![Effect::Reply {
+                thread_id: "t1".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn filters_cycle_in_order_and_a_rejected_file_keeps_the_previous_set() {
+        let mut app = inbox_app();
+        let f = |name: &str, sender: &str| FilterView {
+            name: name.into(),
+            sender: vec![sender.into()],
+            ..FilterView::default()
+        };
+        app.set_filters(vec![f("one", "a@x.com"), f("two", "c@x.com")], None);
+        assert_eq!(app.today_threads().len(), 2);
+        press(&mut app, "f");
+        assert_eq!(app.active_filter().name, "two");
+        assert_eq!(app.today_threads().len(), 1);
+        press(&mut app, "f");
+        assert_eq!(app.active_filter().name, "one", "wraps to the first");
+        app.set_filters(vec![], Some("filter \"x\": unknown key \"y\"".into()));
+        assert_eq!(app.filters.len(), 2, "previous valid set stays");
+        assert!(app.filter_error.is_some());
+    }
+
+    #[test]
+    fn channels_group_by_source_and_open_with_enter() {
+        let mut app = inbox_app();
+        press(&mut app, "2");
+        assert_eq!(app.view, View::Channels);
+        assert_eq!(
+            app.channel_threads(0).len(),
+            2,
+            "gmail is the first channel"
+        );
+        assert_eq!(app.channel_threads(2).len(), 0);
+        app.handle_key(Key::Enter);
+        assert!(app.channel_inner);
+        assert_eq!(
+            press(&mut app, "e"),
+            vec![Effect::Triage {
+                thread_id: "t2".into(),
+                change: TriageChange::Archive
+            }]
+        );
+        app.handle_key(Key::Esc);
+        assert!(!app.channel_inner);
+    }
+
+    #[test]
+    fn todos_are_open_reminders_due_today_or_undated() {
+        let mut app = App::new();
+        let now = haste_core::time::now_secs();
+        let r = |id: &str, due: Option<i64>, done: bool| ReminderView {
+            reminder: haste_core::model::Reminder {
+                id: id.into(),
+                external_id: id.into(),
+                title: id.into(),
+                notes_snippet: String::new(),
+                due_at: due,
+                completed: done,
+                list_name: "L".into(),
+                remote_modified_at: 0,
+                missing_since: None,
+                version: 1,
+            },
+            tags: vec![],
+        };
+        app.set_reminder_list(vec![
+            r("undated", None, false),
+            r("today", Some(now), false),
+            r("later", Some(now + 3 * 86_400), false),
+            r("done", None, true),
+        ]);
+        let ids: Vec<&str> = app.todos().iter().map(|t| t.reminder.id.as_str()).collect();
+        assert_eq!(ids, ["today", "undated"]);
+    }
+
+    #[test]
+    fn the_agenda_covers_seven_days_and_hides_cancelled_events() {
+        let mut app = App::new();
+        let now = haste_core::time::now_secs();
+        let e = |id: &str, start: i64, status: &str| EventView {
+            event: haste_core::model::Event {
+                id: id.into(),
+                external_id: id.into(),
+                calendar: "c".into(),
+                title: id.into(),
+                start_at: start,
+                end_at: start + 3600,
+                all_day: false,
+                status: status.into(),
+                attendees: vec![],
+                location: String::new(),
+                description_snippet: String::new(),
+                updated_at: 0,
+                missing_since: None,
+                version: 1,
+            },
+            tags: vec![],
+        };
+        app.set_events(vec![
+            e("soon", now + 3600, "confirmed"),
+            e("far", now + 9 * 86_400, "confirmed"),
+            e("gone", now + 7200, "cancelled"),
+        ]);
+        let ids: Vec<&str> = app.agenda().iter().map(|x| x.event.id.as_str()).collect();
+        assert_eq!(ids, ["soon"]);
     }
 
     #[test]
@@ -1724,7 +2282,7 @@ mod tests {
 
     #[test]
     fn the_agents_panel_lists_machines_then_workspaces_then_agents_and_hides_stale_rows() {
-        let mut app = App::new();
+        let mut app = approvals_app();
         app.set_machines(vec![
             machine(
                 "local",
@@ -1785,10 +2343,7 @@ mod tests {
             MachineState::Connected,
             vec![agent("local", "haste", "w1:p1", AgentStatus::Working, 1)],
         )]);
-        // the app starts on Approvals: Connectors, then Agents
-        for _ in 0..2 {
-            app.handle_key(Key::Tab);
-        }
+        press(&mut app, "6");
         assert_eq!(app.view, View::Agents);
         press(&mut app, "G");
         assert_eq!(app.agents_selected, 2);
@@ -1798,12 +2353,12 @@ mod tests {
             assert!(press(&mut app, keys).is_empty(), "{keys:?}");
         }
         assert_eq!(app.mode, Mode::Normal);
-        app.handle_key(Key::Tab);
-        assert_eq!(app.view, View::Calendar);
-        app.handle_key(Key::Tab);
-        assert_eq!(app.view, View::Reminders);
-        app.handle_key(Key::Tab);
-        assert_eq!(app.view, View::Inbox);
+        app.handle_key(Key::Esc);
+        assert_eq!(app.view, View::Today);
+        for expected in [View::Channels, View::Calendar, View::Today] {
+            app.handle_key(Key::Tab);
+            assert_eq!(app.view, expected);
+        }
     }
 
     fn connectors() -> Vec<ConnectorView> {
@@ -1822,9 +2377,9 @@ mod tests {
     }
 
     fn connectors_app() -> App {
-        let mut app = App::new();
+        let mut app = approvals_app();
         app.set_connectors(connectors());
-        app.handle_key(Key::Tab); // approvals -> connectors
+        press(&mut app, "5");
         assert_eq!(app.view, View::Connectors);
         app
     }

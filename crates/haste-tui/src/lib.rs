@@ -2,4 +2,6 @@
 
 pub mod app;
 pub mod client;
+pub mod inbox;
+pub mod theme;
 pub mod ui;

@@ -74,3 +74,11 @@ The TUI logs only event kinds, counts and identifiers. Subject, sender, body and
 - Snooze accepts whole hours or whole days only (`3h`, `2d`); fractions are rejected.
 - The Calendar agenda window is 7 days.
 - Reply-all offers To and Cc only; Bcc is never offered.
+
+## Deviations found while building
+
+- **Upstream mail archive is not built (task 5.1 stays open).** The connectors cannot archive: Gmail is authorized with `gmail.readonly` and `gmail.compose` only, and iCloud opens IMAP read-only. Archiving in the mailbox needs the wider `gmail.modify` scope (re-authorization) and an IMAP write path, which is the human's decision. Until then `e` archives in haste only, for mail and chats alike, and says so.
+- **Reply-all is not available.** The send path resolves exactly one recipient (`to` is one address, the digest covers one list of one). `r` asks reply or reply-all on a mail thread with several people; reply-all explains that it is unavailable. Multi-recipient send needs its own change (validation, digest, connector send, tests).
+- **Filter keys.** `label` and `unread` are not stored on threads, so they are not allowed keys. Allowed: `sender`, `subject`, `source`, `min_priority`.
+- **No new TODO or agenda requests.** The Today TODOs and the 7-day agenda reuse `RemindersList` and `EventsList`; the window is the TUI constant `AGENDA_DAYS`. Triage writes are one request, `TriageSet`; filters are `FilterList`. The protocol version is now 2, so `hasted`, `haste` and `haste-tui` must be reinstalled together.
+- **`t` and approvals.** `t` proposes the reminder as before; it still needs approval and a run in Approvals.

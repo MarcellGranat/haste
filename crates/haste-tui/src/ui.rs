@@ -1,16 +1,20 @@
-//! Drawing. All state lives in [`crate::app::App`].
+//! Drawing. All state lives in [`crate::app::App`]. Colours come from [`crate::theme`].
 
-use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{summary, AgentRow, App, Mode, Row, View};
+use crate::inbox::{self, CHANNELS};
+use crate::theme;
 use haste_core::herdr::{AgentStatus, MachineState};
 use haste_core::proposal::ProposalState;
+use haste_proto::ThreadView;
 
 pub fn draw(frame: &mut Frame<'_>, app: &App) {
+    frame.render_widget(Block::new().style(theme::text()), frame.area());
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
@@ -18,101 +22,366 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     ])
     .areas(frame.area());
 
-    let tab = |name: &str, active: bool| {
-        let style = if active {
-            Style::new().add_modifier(Modifier::REVERSED)
-        } else {
-            Style::new()
-        };
-        Span::styled(format!(" {name} "), style)
-    };
-    frame.render_widget(
-        Line::from(vec![
-            tab("Inbox", app.view == View::Inbox),
-            tab(
-                &format!("Approvals ({})", app.proposals.len()),
-                app.view == View::Approvals,
-            ),
-            tab(
-                &format!("Connectors ({})", app.connectors.len()),
-                app.view == View::Connectors,
-            ),
-            tab(
-                &format!("Agents ({})", app.blocked().len()),
-                app.view == View::Agents,
-            ),
-            tab(
-                &format!("Calendar ({})", app.events.len()),
-                app.view == View::Calendar,
-            ),
-            tab(
-                &format!("Reminders ({})", app.reminder_list.len()),
-                app.view == View::Reminders,
-            ),
-            Span::raw("  Tab switch · j/k g/G move · q quit"),
-        ]),
-        header,
-    );
-
+    draw_header(frame, app, header);
     match app.view {
-        View::Inbox => draw_inbox(frame, app, body),
+        View::Today => draw_today(frame, app, body),
+        View::Channels => draw_channels(frame, app, body),
+        View::Calendar => draw_calendar(frame, app, body),
         View::Approvals => draw_approvals(frame, app, body),
         View::Connectors => draw_connectors(frame, app, body),
         View::Agents => draw_agents(frame, app, body),
-        View::Calendar => draw_calendar(frame, app, body),
-        View::Reminders => draw_reminders(frame, app, body),
     }
     if let Mode::Detail(id) = &app.mode {
         draw_detail(frame, app, id, body);
     }
+    draw_footer(frame, app, footer);
+}
 
+fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let tab = |name: &str, active: bool| {
+        if active {
+            Span::styled(
+                format!(" {name} "),
+                Style::new()
+                    .fg(theme::BASE)
+                    .bg(theme::MAUVE)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(format!(" {name} "), Style::new().fg(theme::SUBTEXT0))
+        }
+    };
+    let mut spans = vec![
+        Span::styled(
+            " haste ",
+            Style::new().fg(theme::MAUVE).add_modifier(Modifier::BOLD),
+        ),
+        tab("1 Today", app.view == View::Today),
+        tab("2 Channels", app.view == View::Channels),
+        tab("3 Calendar", app.view == View::Calendar),
+        Span::styled(" │ ", theme::muted()),
+    ];
+    let pending = app.proposals.len();
+    let approvals = format!("4 Approvals {pending}");
+    spans.push(if pending > 0 && app.view != View::Approvals {
+        Span::styled(
+            format!(" {approvals} "),
+            Style::new().fg(theme::PEACH).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        tab(&approvals, app.view == View::Approvals)
+    });
+    spans.push(tab(
+        &format!("5 Connectors {}", app.connectors.len()),
+        app.view == View::Connectors,
+    ));
+    spans.push(tab(
+        &format!("6 Agents {}", app.blocked().len()),
+        app.view == View::Agents,
+    ));
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(theme::text()), area);
+}
+
+/// `(key, what)` hints for the footer, depending on where the cursor is.
+fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
+    let thread_keys = vec![
+        ("e", "archive"),
+        ("r", "reply"),
+        ("g", "aside"),
+        ("p", "priority"),
+        ("s", "snooze"),
+        ("t", "remind"),
+        ("f", "filter"),
+    ];
+    match app.view {
+        View::Today => thread_keys,
+        View::Channels if app.channel_inner => {
+            let mut h = thread_keys;
+            h.push(("Esc", "back"));
+            h
+        }
+        View::Channels => vec![("Enter", "open"), ("j/k", "move")],
+        View::Calendar => vec![("j/k", "move"), ("Tab", "next tab")],
+        View::Approvals => vec![
+            ("a", "approve"),
+            ("s", "send"),
+            ("r", "reject"),
+            ("x", "mark"),
+            ("/", "filter"),
+            ("Esc", "back"),
+        ],
+        View::Connectors => vec![("R", "release"), ("E", "engage"), ("Esc", "back")],
+        View::Agents => vec![("Esc", "back")],
+    }
+}
+
+fn draw_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let prompt = app
         .confirm_prompt()
         .or_else(|| (app.mode == Mode::Filter).then(|| format!("/{}", app.filter)));
     let mut lines = vec![Line::from(match prompt {
         Some(p) => Span::styled(
             p,
-            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::new().fg(theme::WARNING).add_modifier(Modifier::BOLD),
         ),
-        None => Span::raw(app.status.clone()),
+        None => {
+            let mut spans = Vec::new();
+            for (k, what) in hints(app) {
+                spans.push(Span::styled(
+                    format!(" {k}"),
+                    Style::new()
+                        .fg(theme::HINT_KEY)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    format!(" {what} "),
+                    Style::new().fg(theme::HINT_TEXT),
+                ));
+            }
+            spans.push(Span::styled(" q quit ", theme::muted()));
+            if !app.status.is_empty() {
+                spans.push(Span::styled(
+                    format!("  {}", app.status),
+                    Style::new().fg(theme::TEXT),
+                ));
+            }
+            return_footer(frame, app, area, spans);
+            return;
+        }
     })];
     if let Some(notice) = app.notices.last() {
         lines.push(Line::from(Span::styled(
             format!("! {notice}"),
-            Style::new().fg(Color::Red),
+            Style::new().fg(theme::DANGER),
         )));
     }
-    frame.render_widget(Paragraph::new(lines), footer);
+    frame.render_widget(Paragraph::new(lines).style(theme::text()), area);
 }
 
-fn draw_inbox(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
-    let items: Vec<ListItem<'_>> = app
-        .inbox_threads()
-        .iter()
-        .map(|t| {
-            ListItem::new(format!(
-                "[{:<9}] p{} {}",
-                t.thread.source.as_name(),
-                t.triage.priority,
-                t.thread.subject
-            ))
-        })
-        .collect();
-    let title = match &app.source_filter {
-        Some(s) => format!("Inbox · {} (f cycles source)", s.as_name()),
-        None => "Inbox · all sources (f cycles source)".to_owned(),
+fn return_footer(frame: &mut Frame<'_>, app: &App, area: Rect, spans: Vec<Span<'static>>) {
+    let mut lines = vec![Line::from(spans)];
+    if let Some(notice) = app.notices.last() {
+        lines.push(Line::from(Span::styled(
+            format!("! {notice}"),
+            Style::new().fg(theme::DANGER),
+        )));
+    } else if let Some(e) = &app.filter_error {
+        lines.push(Line::from(Span::styled(
+            format!("filters.json: {e}"),
+            Style::new().fg(theme::WARNING),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines).style(theme::text()), area);
+}
+
+/// `45s`, `12m`, `3h`, `2d`.
+fn human_duration(secs: i64) -> String {
+    match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86_400),
+    }
+}
+
+fn thread_line(t: &ThreadView, now: i64) -> ListItem<'static> {
+    let source = t.thread.source.as_name();
+    let star = if t.triage.priority > 0 { "★" } else { " " };
+    let aside = if t.triage.set_aside { " ◌" } else { "" };
+    let age = human_duration(now.saturating_sub(t.thread.last_activity_at));
+    ListItem::new(Line::from(vec![
+        Span::styled(format!("{star} "), Style::new().fg(theme::PRIORITY)),
+        Span::styled(
+            format!("{source:<10}"),
+            Style::new().fg(theme::channel_colour(&source)),
+        ),
+        Span::styled(t.thread.subject.clone(), Style::new().fg(theme::UNREAD)),
+        Span::styled(aside.to_owned(), Style::new().fg(theme::MUTED)),
+        Span::styled(format!("  {age}"), Style::new().fg(theme::MUTED)),
+    ]))
+}
+
+fn section(title: &str, count: usize) -> ListItem<'static> {
+    ListItem::new(Line::from(Span::styled(
+        format!("{title} ({count})"),
+        Style::new()
+            .fg(theme::LAVENDER)
+            .add_modifier(Modifier::BOLD),
+    )))
+}
+
+fn filter_title(app: &App, what: &str) -> String {
+    format!(
+        " {what} · filter: {} ({}/{}) ",
+        app.active_filter().name,
+        app.filter_index + 1,
+        app.filters.len()
+    )
+}
+
+fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let now = haste_core::time::now_secs();
+    let threads = app.today_threads();
+    let todos = app.todos();
+    let mut items = vec![section("Inbox", threads.len())];
+    items.extend(threads.iter().map(|t| thread_line(t, now)));
+    let todo_header = items.len();
+    items.push(section("TODO today and undated", todos.len()));
+    items.extend(todos.iter().map(|r| {
+        let due = r
+            .reminder
+            .due_at
+            .map_or_else(|| "no date".to_owned(), inbox::stamp);
+        let overdue = r.reminder.due_at.is_some_and(|d| d < now);
+        ListItem::new(Line::from(vec![
+            Span::styled("☐ ", Style::new().fg(theme::GREEN)),
+            Span::styled(r.reminder.title.clone(), Style::new().fg(theme::TEXT)),
+            Span::styled(
+                format!("  {due}"),
+                Style::new().fg(if overdue { theme::DANGER } else { theme::MUTED }),
+            ),
+        ]))
+    }));
+    // The cursor counts threads then TODOs; headers are not selectable.
+    let selected = app.today_selected;
+    let position = if selected < threads.len() {
+        selected + 1
+    } else {
+        selected + 2
     };
-    let mut state = ListState::default().with_selected(Some(app.inbox_selected));
+    let _ = todo_header;
+    let mut state = ListState::default().with_selected((app.today_len() > 0).then_some(position));
     frame.render_stateful_widget(
         List::new(items)
-            .block(Block::new().borders(Borders::ALL).title(title))
-            .highlight_symbol("> "),
+            .block(
+                theme::panel(&filter_title(app, "Today"))
+                    .border_style(Style::new().fg(theme::BORDER_ACTIVE)),
+            )
+            .highlight_style(theme::selected())
+            .highlight_symbol("▌ "),
         area,
         &mut state,
     );
 }
 
-fn draw_approvals(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
+fn draw_channels(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let [left, right] =
+        Layout::horizontal([Constraint::Length(28), Constraint::Min(20)]).areas(area);
+    let now = haste_core::time::now_secs();
+    let channel_items: Vec<ListItem<'_>> = CHANNELS
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let n = app.channel_threads(i).len();
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("● {name:<10}"),
+                    Style::new().fg(theme::channel_colour(name)),
+                ),
+                Span::styled(
+                    format!("{n:>4}"),
+                    Style::new().fg(if n > 0 { theme::TEXT } else { theme::MUTED }),
+                ),
+            ]))
+        })
+        .collect();
+    let mut cs = ListState::default().with_selected(Some(app.channels_selected));
+    frame.render_stateful_widget(
+        List::new(channel_items)
+            .block(
+                theme::panel(&filter_title(app, "Channels")).border_style(Style::new().fg(
+                    if app.channel_inner {
+                        theme::BORDER
+                    } else {
+                        theme::BORDER_ACTIVE
+                    },
+                )),
+            )
+            .highlight_style(theme::selected())
+            .highlight_symbol("▌ "),
+        left,
+        &mut cs,
+    );
+    let threads = app.channel_threads(app.channels_selected);
+    let items: Vec<ListItem<'_>> = threads.iter().map(|t| thread_line(t, now)).collect();
+    let title = CHANNELS.get(app.channels_selected).copied().unwrap_or("");
+    let mut ts = ListState::default().with_selected(
+        (app.channel_inner && !threads.is_empty()).then_some(app.channel_thread_selected),
+    );
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(
+                theme::panel(&format!(" {title} ")).border_style(Style::new().fg(
+                    if app.channel_inner {
+                        theme::BORDER_ACTIVE
+                    } else {
+                        theme::BORDER
+                    },
+                )),
+            )
+            .highlight_style(theme::selected())
+            .highlight_symbol("▌ "),
+        right,
+        &mut ts,
+    );
+}
+
+fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let events = app.agenda();
+    let mut items: Vec<ListItem<'_>> = Vec::new();
+    let mut position = None;
+    let mut last_day = i64::MIN;
+    for (i, e) in events.iter().enumerate() {
+        let day = inbox::day_start(e.event.start_at);
+        if day != last_day {
+            last_day = day;
+            items.push(ListItem::new(Line::from(Span::styled(
+                inbox::day_label(day),
+                Style::new()
+                    .fg(theme::LAVENDER)
+                    .add_modifier(Modifier::BOLD),
+            ))));
+        }
+        if i == app.calendar_selected {
+            position = Some(items.len());
+        }
+        let when = if e.event.all_day {
+            "all day".to_owned()
+        } else {
+            inbox::stamp(e.event.start_at)[11..].to_owned()
+        };
+        let tags = if e.tags.is_empty() {
+            String::new()
+        } else {
+            format!("  #{}", e.tags.join(" #"))
+        };
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(format!("  {when:<8}"), Style::new().fg(theme::SAPPHIRE)),
+            Span::styled(e.event.title.clone(), Style::new().fg(theme::TEXT)),
+            Span::styled(tags, Style::new().fg(theme::MAUVE)),
+        ])));
+    }
+    if items.is_empty() {
+        items.push(ListItem::new(Span::styled(
+            "nothing on the calendar for the next 7 days (or Calendar is not authorized yet)",
+            theme::muted(),
+        )));
+    }
+    let mut state = ListState::default().with_selected(position);
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(
+                theme::panel(" Calendar · next 7 days (UTC) · read-only ")
+                    .border_style(Style::new().fg(theme::BORDER_ACTIVE)),
+            )
+            .highlight_style(theme::selected())
+            .highlight_symbol("▌ "),
+        area,
+        &mut state,
+    );
+}
+
+fn draw_approvals(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let items: Vec<ListItem<'_>> = app
         .rows()
         .iter()
@@ -133,7 +402,7 @@ fn draw_approvals(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect)
                     "{} Blocked agents ({count}) · read-only",
                     if *collapsed { "▸" } else { "▾" }
                 ),
-                Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::new().fg(theme::WARNING).add_modifier(Modifier::BOLD),
             ))),
             Row::Blocked(i) => {
                 let blocked = app.blocked();
@@ -174,14 +443,15 @@ fn draw_approvals(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect)
         "a approve · A batch · x mark · s send/run · m/b settle NEEDS CHECK · r reject · c collapse · P group by agent/project · / filter";
     frame.render_stateful_widget(
         List::new(items)
-            .block(Block::new().borders(Borders::ALL).title(help))
-            .highlight_symbol("> "),
+            .block(theme::panel(help))
+            .highlight_style(theme::selected())
+            .highlight_symbol("▌ "),
         area,
         &mut state,
     );
 }
 
-fn draw_connectors(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
+fn draw_connectors(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let items: Vec<ListItem<'_>> = app
         .connectors
         .iter()
@@ -189,10 +459,10 @@ fn draw_connectors(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect
             let (marker, style) = if c.engaged {
                 (
                     "ENGAGED ",
-                    Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    Style::new().fg(theme::DANGER).add_modifier(Modifier::BOLD),
                 )
             } else {
-                ("running ", Style::new().fg(Color::Green))
+                ("running ", Style::new().fg(theme::OK))
             };
             let loaded = if c.registered { "" } else { " (not loaded)" };
             let extra = match (&app.reminders, c.source.as_str()) {
@@ -215,104 +485,15 @@ fn draw_connectors(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect
     let mut state = ListState::default().with_selected(Some(app.connectors_selected));
     frame.render_stateful_widget(
         List::new(items)
-            .block(
-                Block::new()
-                    .borders(Borders::ALL)
-                    .title("R release (asks) · E engage · u refresh"),
-            )
-            .highlight_symbol("> "),
+            .block(theme::panel("R release (asks) · E engage · u refresh"))
+            .highlight_style(theme::selected())
+            .highlight_symbol("▌ "),
         area,
         &mut state,
     );
 }
 
-/// `YYYY-MM-DD HH:MM` (UTC) for unix seconds.
-fn stamp(secs: i64) -> String {
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!(
-        "{y:04}-{m:02}-{d:02} {:02}:{:02}",
-        rem / 3600,
-        rem % 3600 / 60
-    )
-}
-
-fn tag_suffix(tags: &[String]) -> String {
-    if tags.is_empty() {
-        String::new()
-    } else {
-        format!("  #{}", tags.join(" #"))
-    }
-}
-
-fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
-    let items: Vec<ListItem<'_>> = app
-        .events
-        .iter()
-        .map(|e| {
-            let when = if e.event.all_day {
-                format!("{} all day", &stamp(e.event.start_at)[..10])
-            } else {
-                stamp(e.event.start_at)
-            };
-            ListItem::new(format!("{when}  {}{}", e.event.title, tag_suffix(&e.tags)))
-        })
-        .collect();
-    let mut state = ListState::default().with_selected(Some(app.calendar_selected));
-    frame.render_stateful_widget(
-        List::new(items)
-            .block(
-                Block::new()
-                    .borders(Borders::ALL)
-                    .title("Calendar · upcoming (UTC) · read-only"),
-            )
-            .highlight_symbol("> "),
-        area,
-        &mut state,
-    );
-}
-
-fn draw_reminders(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
-    let items: Vec<ListItem<'_>> = app
-        .reminder_list
-        .iter()
-        .map(|r| {
-            let due = r
-                .reminder
-                .due_at
-                .map_or_else(|| "no date".to_owned(), stamp);
-            ListItem::new(format!(
-                "{due}  [{}] {}{}",
-                r.reminder.list_name,
-                r.reminder.title,
-                tag_suffix(&r.tags)
-            ))
-        })
-        .collect();
-    let mut state = ListState::default().with_selected(Some(app.reminders_selected));
-    frame.render_stateful_widget(
-        List::new(items)
-            .block(
-                Block::new()
-                    .borders(Borders::ALL)
-                    .title("Reminders · open (UTC) · read-only; T in Inbox proposes one"),
-            )
-            .highlight_symbol("> "),
-        area,
-        &mut state,
-    );
-}
-
-fn draw_agents(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
+fn draw_agents(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let now = haste_core::time::now_secs();
     let items: Vec<ListItem<'_>> = app
         .agent_rows()
@@ -320,11 +501,11 @@ fn draw_agents(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
         .map(|row| match row {
             AgentRow::Machine { name, state } => {
                 let (text, color) = match state {
-                    MachineState::Connected => (format!("● {name} · connected"), Color::Green),
-                    MachineState::Unreachable => (format!("○ {name} · unreachable"), Color::Red),
+                    MachineState::Connected => (format!("● {name} · connected"), theme::OK),
+                    MachineState::Unreachable => (format!("○ {name} · unreachable"), theme::DANGER),
                     MachineState::Mismatch { expected, observed } => (
                         format!("✕ {name} · protocol mismatch (expected {expected}, observed {observed})"),
-                        Color::Red,
+                        theme::DANGER,
                     ),
                 };
                 ListItem::new(Line::from(Span::styled(text, Style::new().fg(color).add_modifier(Modifier::BOLD))))
@@ -333,9 +514,9 @@ fn draw_agents(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
             AgentRow::Agent(a) => {
                 let since = now.saturating_sub(a.status_since);
                 let color = match a.status {
-                    AgentStatus::Blocked => Color::Yellow,
-                    AgentStatus::Working => Color::Cyan,
-                    _ => Color::Reset,
+                    AgentStatus::Blocked => theme::WARNING,
+                    AgentStatus::Working => theme::SAPPHIRE,
+                    _ => theme::SUBTEXT0,
                 };
                 ListItem::new(Line::from(vec![
                     Span::raw(format!("      {:<12}", a.agent.as_deref().unwrap_or("agent"))),
@@ -348,28 +529,17 @@ fn draw_agents(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
     let mut state = ListState::default().with_selected(Some(app.agents_selected));
     frame.render_stateful_widget(
         List::new(items)
-            .block(
-                Block::new()
-                    .borders(Borders::ALL)
-                    .title("Agents by machine and workspace · read-only · u refresh"),
-            )
-            .highlight_symbol("> "),
+            .block(theme::panel(
+                "Agents by machine and workspace · read-only · u refresh",
+            ))
+            .highlight_style(theme::selected())
+            .highlight_symbol("▌ "),
         area,
         &mut state,
     );
 }
 
-/// `45s`, `12m`, `3h`, `2d`.
-fn human_duration(secs: i64) -> String {
-    match secs {
-        s if s < 60 => format!("{s}s"),
-        s if s < 3600 => format!("{}m", s / 60),
-        s if s < 86_400 => format!("{}h", s / 3600),
-        s => format!("{}d", s / 86_400),
-    }
-}
-
-fn draw_detail(frame: &mut Frame<'_>, app: &App, id: &str, area: ratatui::layout::Rect) {
+fn draw_detail(frame: &mut Frame<'_>, app: &App, id: &str, area: Rect) {
     let Some(p) = app.proposals.iter().find(|p| p.id == id) else {
         return;
     };
@@ -388,22 +558,52 @@ fn draw_detail(frame: &mut Frame<'_>, app: &App, id: &str, area: ratatui::layout
     );
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(text).wrap(Wrap { trim: false }).block(
-            Block::new()
-                .borders(Borders::ALL)
-                .title("Proposal (Esc to close)"),
-        ),
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .block(theme::panel("Proposal (Esc to close)")),
         area,
     );
 }
 
 #[cfg(test)]
-mod stamp_tests {
-    use super::stamp;
+mod tests {
+    use super::*;
+    use crate::app::Key;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn render(app: &App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect()
+    }
 
     #[test]
-    fn stamps_are_utc_dates() {
-        assert_eq!(stamp(0), "1970-01-01 00:00");
-        assert_eq!(stamp(1_794_000_000), "2026-11-06 21:20");
+    fn every_screen_renders_with_rounded_borders_and_the_tab_bar() {
+        let mut app = App::new();
+        for key in ['1', '2', '3', '4', '5', '6'] {
+            app.handle_key(Key::Char(key));
+            let text = render(&app);
+            assert!(text.contains('╭') && text.contains('╯'), "{:?}", app.view);
+            assert!(text.contains("Today") && text.contains("Calendar"));
+        }
+    }
+
+    #[test]
+    fn colours_come_only_from_the_theme() {
+        for (name, src) in [
+            ("ui.rs", include_str!("ui.rs")),
+            ("app.rs", include_str!("app.rs")),
+        ] {
+            let body = src.split("#[cfg(test)]").next().unwrap();
+            assert!(!body.contains("Color::Rgb"), "{name}");
+            assert!(!body.contains("Color::Yellow"), "{name}");
+        }
     }
 }

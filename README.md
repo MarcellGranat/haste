@@ -475,6 +475,7 @@ Read this before you turn it on:
   account in `beeper.json`. If Beeper does not say (`platform-sdk`, `self-hosted`, older versions),
   haste refuses it unless you attest it (`"on_device_attested": true`). Attesting never overrides a
   reported cloud connection; `allow_cloud` is the only way to accept one.
+- **iMessage self-chat does not send.** A message to your own iMessage chat came back unconfirmed (NEEDS CHECK, nothing delivered); sends to other contacts work. WhatsApp and Messenger self-chats work.
 - **Agents never send.** They propose a reply; approving it creates nothing at Beeper. Only you can
   send, from the TUI: the preview shows the chat name, the network and the remaining sends, and the send runs after a 5-second countdown you can cancel.
 
@@ -580,4 +581,4 @@ cargo test -p haste --features human
 4. ~~`reminders-and-links` (EventKit helper, email to reminder)~~ implemented, awaiting live smoke check
 5. ~~`google-calendar`~~ implemented, awaiting live smoke check; `imessage-connector` is parked until Messages is set up on the hub Mac
 6. ~~`obsidian-notes` (Person notes, one notes folder)~~ implemented, awaiting live smoke check
-7. ~~`beeper-messaging` (WhatsApp, Messenger, iMessage through Beeper Desktop; replaces `whatsapp-messenger-spike`)~~ implemented against fakes, awaiting the live spike and smoke check
+7. ~~`beeper-messaging` (WhatsApp, Messenger, iMessage through Beeper Desktop; replaces `whatsapp-messenger-spike`)~~ implemented and smoke-tested live (WhatsApp, Messenger, iMessage sends); remaining smoke checks 11.1-11.3, 11.5, 11.6, 11.8-11.10 open

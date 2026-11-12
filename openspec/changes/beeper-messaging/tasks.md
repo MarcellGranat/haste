@@ -88,10 +88,10 @@
 - [ ] 11.1 Fresh install: start the daemon and confirm `haste connector status` lists `whatsapp`, `messenger` and `imessage` engaged and no Beeper request is made
 - [ ] 11.2 With Beeper Desktop quit, release `whatsapp` and confirm the status shows "Beeper Desktop not running", no breaker, and no retry loop in the audit log
 - [ ] 11.3 Start Beeper Desktop, create the token with `haste connector beeper auth`, confirm no token text is in any file under the data directory
-- [ ] 11.4 Select one throwaway WhatsApp chat in `beeper.json` and one account, release `whatsapp`, and confirm one cycle adds one thread with counts-only audit
+- [x] 11.4 Select one throwaway WhatsApp chat in `beeper.json` and one account, release `whatsapp`, and confirm one cycle adds one thread with counts-only audit (done 2026-11-10 on the own-number WhatsApp chat: `accounts=1 chats=1 messages=1`)
 - [ ] 11.5 Confirm a cloud account (if one exists) is refused, or confirm the attestation path for an on-device account
 - [ ] 11.6 Propose a reply to the throwaway chat as an agent, approve it, and confirm nothing was sent at approval
-- [ ] 11.7 Send the reply from the TUI after reading the confirmation; confirm it arrives in the throwaway chat once and the proposal shows `sent` with `sent:beeper:<id>`
+- [x] 11.7 Send the reply from the TUI after reading the confirmation; confirm it arrives in the throwaway chat once and the proposal shows `sent` with `sent:beeper:<id>` (done 2026-11-12 on the own-number WhatsApp chat, human draft; the user reports it arrived and was sent; the `sent:` result string and the single-arrival were not separately recorded)
 - [ ] 11.8 Repeat the send of the same proposal and confirm it is refused (not `approved`) with no second message
 - [ ] 11.9 Engage `whatsapp` and confirm preview and send are refused before any request
 - [ ] 11.10 Delete the throwaway chat's messages by hand in Beeper Desktop (haste never deletes) and remove the Keychain item `com.haste.beeper` if the integration is retired

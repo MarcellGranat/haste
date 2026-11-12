@@ -43,6 +43,68 @@ fn find_from_args() -> Option<String> {
     None
 }
 
+/// `--probe <chat id>`: print only counts about that chat's newest messages (never text, names
+/// or ids), to see why a chat reads empty.
+fn probe_from_args() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--probe" {
+            return args.next();
+        }
+    }
+    None
+}
+
+async fn probe_chat(client: &BeeperClient, chat_id: &str) {
+    match client.messages(chat_id, 20, None).await {
+        Err(e) => eprintln!("probe: could not read messages: {e:?}"),
+        Ok((items, more, cursor)) => {
+            let now = haste_core::time::now_secs();
+            println!(
+                "\nProbe: {} messages in the newest page, hasMore={more}, cursor={}",
+                items.len(),
+                cursor.is_some()
+            );
+            let mut kinds: std::collections::BTreeMap<String, usize> =
+                std::collections::BTreeMap::new();
+            let (mut mapped, mut no_ts, mut no_key, mut hidden, mut deleted, mut own) =
+                (0, 0, 0, 0, 0, 0);
+            let mut ages: Vec<i64> = Vec::new();
+            for m in &items {
+                *kinds
+                    .entry(m.kind.clone().unwrap_or_else(|| "none".into()))
+                    .or_default() += 1;
+                match haste_core::time::parse_rfc3339(&m.timestamp) {
+                    Some(t) => ages.push((now - t) / 86_400),
+                    None => no_ts += 1,
+                }
+                if m.sort_key.is_none() {
+                    no_key += 1;
+                }
+                hidden += usize::from(m.is_hidden);
+                deleted += usize::from(m.is_deleted);
+                own += usize::from(m.is_sender);
+                if haste_connector_beeper::mapper::map_message(
+                    chat_id,
+                    &BeeperSource::Imessage.source(),
+                    m,
+                )
+                .is_some()
+                {
+                    mapped += 1;
+                }
+            }
+            println!("  types: {kinds:?}");
+            println!(
+                "  age in days (newest..oldest): {:?}..{:?}",
+                ages.iter().min(),
+                ages.iter().max()
+            );
+            println!("  usable after mapping: {mapped}; no timestamp: {no_ts}; no sort key: {no_key}; hidden: {hidden}; deleted: {deleted}; sent by you: {own}");
+        }
+    }
+}
+
 /// Best effort: ask the running daemon to audit the authorization.
 fn tell_daemon(home: &Path) -> Result<(), String> {
     let token = std::fs::read_to_string(home.join("human.token")).map_err(|e| e.to_string())?;
@@ -137,6 +199,9 @@ async fn main() -> ExitCode {
             }
         }
         Err(e) => eprintln!("could not list chats: {e:?}"),
+    }
+    if let Some(id) = probe_from_args() {
+        probe_chat(&client, &id).await;
     }
     println!(
         "\nChoose what to read in {}: account ids, `on_device_attested` (when the connection is not reported) or `allow_cloud` (accept a cloud account) where needed, and the chat ids to allow.",

@@ -1237,6 +1237,10 @@ fn set_switch(state: &State, actor: &Principal, source: &str, engaged: bool) -> 
     state.publish(Event::Notice {
         message: format!("connector {} {verb}", source.as_name()),
     });
+    if !engaged {
+        // First sync now, not at the next tick (the loop of a source that has none ignores it).
+        state.wake_sync(&source);
+    }
     Response::Done
 }
 

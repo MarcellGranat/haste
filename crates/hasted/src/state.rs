@@ -12,7 +12,7 @@ use haste_core::notes::MAX_NOTE_APPENDS_PER_DAY;
 use haste_core::proposal::DEFAULT_TTL_SECS;
 use haste_proto::Event;
 use haste_store::Store;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 
 use crate::notifier::Notifier;
 
@@ -93,6 +93,9 @@ pub struct State {
     pub herdr: crate::herdr::HerdrState,
     /// The Reminders helper, once the connector is started (used to read the permission state).
     pub(crate) reminders_helper: RwLock<Option<Arc<dyn haste_connector_reminders::Helper>>>,
+    /// Per-source wake-ups: releasing a source runs its first sync now instead of at the next
+    /// tick.
+    sync_wakers: Mutex<HashMap<Source, Arc<Notify>>>,
 }
 
 impl State {
@@ -108,10 +111,26 @@ impl State {
             note_counts: Mutex::new(HashMap::new()),
             herdr: crate::herdr::HerdrState::default(),
             reminders_helper: RwLock::new(None),
+            sync_wakers: Mutex::new(HashMap::new()),
         }
     }
 
     /// Register a connector (real ones arrive in later changes; tests use doubles).
+    /// The wake-up for a source's sync loop.
+    #[must_use]
+    pub fn sync_waker(&self, source: &Source) -> Arc<Notify> {
+        let mut wakers = self
+            .sync_wakers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(wakers.entry(source.clone()).or_default())
+    }
+
+    /// Ask a source's sync loop to run a cycle now (a permit is kept if it is busy).
+    pub fn wake_sync(&self, source: &Source) {
+        self.sync_waker(source).notify_one();
+    }
+
     pub fn register_connector(&self, connector: Arc<dyn Connector>) {
         // A connector that asks for it starts engaged the first time it is ever registered. A
         // persisted choice (engaged or released) is never overridden.

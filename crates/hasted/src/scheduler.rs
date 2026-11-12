@@ -275,15 +275,20 @@ fn store_batch(
     ))
 }
 
-/// Run [`sync_once`] forever at a fixed interval. Outcomes are audited by the guard.
+/// Run [`sync_once`] forever at a fixed interval, and also right away when the source is
+/// released (see [`State::wake_sync`]). Outcomes are audited by the guard.
 pub async fn sync_loop(
     state: Arc<State>,
     connector: Arc<dyn Connector>,
     every: std::time::Duration,
 ) {
+    let waker = state.sync_waker(&connector.source());
     let mut ticker = interval(every);
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            _ = ticker.tick() => {}
+            () = waker.notified() => ticker.reset(),
+        }
         let _ = sync_once(&state, &connector).await;
     }
 }

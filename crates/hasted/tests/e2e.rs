@@ -952,3 +952,75 @@ async fn the_eleventh_send_in_an_hour_is_refused_before_the_connector_is_called(
     );
     h.daemon.shutdown().await;
 }
+
+/// Reads nothing; counts how often it is asked to fetch. Starts engaged like a fresh install.
+struct CountingConnector {
+    fetches: Arc<std::sync::atomic::AtomicU32>,
+}
+
+impl Connector for CountingConnector {
+    fn source(&self) -> Source {
+        Source::Gmail
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            read: true,
+            ..Default::default()
+        }
+    }
+    fn default_engaged(&self) -> bool {
+        true
+    }
+    fn fetch(&self, _c: Option<Cursor>) -> BoxFuture<'_, Result<Batch, ConnectorError>> {
+        self.fetches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async { Ok(Batch::default()) })
+    }
+    fn send<'a>(
+        &'a self,
+        _d: &'a DraftToSend,
+    ) -> BoxFuture<'a, Result<SendReceipt, ConnectorError>> {
+        Box::pin(async { Err(ConnectorError::Other("no send".into())) })
+    }
+}
+
+#[tokio::test]
+async fn releasing_a_source_runs_its_first_sync_at_once_not_at_the_next_tick() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    let h = boot().await;
+    let fetches = Arc::new(AtomicU32::new(0));
+    let connector: Arc<dyn Connector> = Arc::new(CountingConnector {
+        fetches: Arc::clone(&fetches),
+    });
+    h.daemon.state.register_connector(Arc::clone(&connector));
+    // an hour between ticks: only the release can trigger the next cycle in this test
+    tokio::spawn(hasted::scheduler::sync_loop(
+        Arc::clone(&h.daemon.state),
+        connector,
+        Duration::from_secs(3600),
+    ));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        fetches.load(Ordering::SeqCst),
+        0,
+        "engaged on a fresh install: the start-up cycle is refused before any fetch"
+    );
+    let released = h
+        .call(
+            &h.human,
+            RequestBody::ConnectorRelease {
+                source: "gmail".into(),
+            },
+        )
+        .await;
+    assert!(matches!(released, Response::Done), "{released:?}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fetches.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        fetches.load(Ordering::SeqCst),
+        1,
+        "one cycle ran on release"
+    );
+}

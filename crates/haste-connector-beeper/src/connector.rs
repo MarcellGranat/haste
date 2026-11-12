@@ -261,17 +261,38 @@ impl BeeperConnector {
         let mut batch = Batch::default();
         let (mut chats_read, mut skipped_chats, mut skipped_msgs) = (0_usize, 0_usize, 0_usize);
         if !accounts.is_empty() {
-            // Only the chats named in beeper.json are requested, each by id: the chat list is
-            // paginated newest-first, so a listing could miss a selected chat that is quiet.
+            // Chats named in beeper.json are requested by id: the chat list is paginated
+            // newest-first, so a listing could miss a selected chat that is quiet. With
+            // `allow_all` the newest chats of the selected accounts are listed as well.
+            let mut selected: Vec<crate::wire::WireChat> = Vec::new();
+            let mut listed = 0_usize;
+            if self.config.chats.allow_all {
+                for c in self.client.chats().await? {
+                    if !self.config.selects_chat(&c.id)
+                        || !accounts.iter().any(|(a, _)| a.id == c.account_id)
+                    {
+                        continue;
+                    }
+                    if selected.len() >= BEEPER_MAX_CHATS_PER_CYCLE {
+                        listed += 1;
+                    } else {
+                        selected.push(c);
+                    }
+                }
+                skipped_chats += listed;
+            }
             let mut named: Vec<&String> = Vec::new();
             for id in &self.config.chats.allow {
-                if self.config.selects_chat(id) && !named.contains(&id) {
+                if self.config.selects_chat(id)
+                    && !named.contains(&id)
+                    && !selected.iter().any(|c| &c.id == id)
+                {
                     named.push(id);
                 }
             }
-            skipped_chats = named.len().saturating_sub(BEEPER_MAX_CHATS_PER_CYCLE);
-            let mut selected = Vec::new();
-            for id in named.into_iter().take(BEEPER_MAX_CHATS_PER_CYCLE) {
+            let room = BEEPER_MAX_CHATS_PER_CYCLE.saturating_sub(selected.len());
+            skipped_chats += named.len().saturating_sub(room);
+            for id in named.into_iter().take(room) {
                 match self.client.chat_if_exists(id).await? {
                     Some(c) if accounts.iter().any(|(a, _)| a.id == c.account_id) => {
                         selected.push(c);

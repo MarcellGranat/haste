@@ -149,6 +149,7 @@ fn config(accounts: &[(&str, bool)], allow: &[&str], deny: &[&str]) -> BeeperCon
             })
             .collect(),
         chats: ChatSelection {
+            allow_all: false,
             allow: allow.iter().map(|s| (*s).into()).collect(),
             deny: deny.iter().map(|s| (*s).into()).collect(),
         },
@@ -840,4 +841,31 @@ fn the_connector_starts_engaged_declares_no_drafts_and_owns_one_network() {
         assert!(caps.read && caps.send && !caps.draft && !caps.archive);
         let _ = CallError::KillSwitchEngaged;
     }
+}
+
+#[tokio::test]
+async fn allow_all_reads_every_chat_of_the_selected_accounts_except_denied_ones() {
+    let mut cfg = config(&[("acc-wa", false), ("acc-ms", false)], &[], &["chat-c"]);
+    cfg.chats.allow_all = true;
+    let r = rig(BeeperSource::Whatsapp, basic, cfg).await;
+    let batch = r.connector.fetch(None).await.unwrap();
+    let mut ids: Vec<&str> = batch
+        .threads
+        .iter()
+        .map(|t| t.external_id.as_str())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        ["chat-a", "chat-b"],
+        "this network only, denied chat skipped"
+    );
+    for never in ["chat-c/messages", "chat-m/messages"] {
+        assert_eq!(gets(&r.server, never), 0, "{never}");
+    }
+    let joined = r.audits.lock().unwrap().join("|");
+    assert_eq!(
+        joined,
+        "ok:accounts=1 chats=2 messages=4 skipped_chats=0 skipped_messages=0"
+    );
 }

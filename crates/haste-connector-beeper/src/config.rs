@@ -29,10 +29,16 @@ pub struct AccountSelection {
     pub allow_cloud: bool,
 }
 
-/// Which chats are read. `deny` wins over `allow`; an empty `allow` reads nothing.
+/// Which chats are read. `deny` wins over `allow`; an empty `allow` reads nothing unless
+/// `allow_all` is set.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ChatSelection {
+    /// Read every chat of the selected accounts (the most recent ones, up to the per-cycle chat
+    /// limit), except those in `deny`. Off unless written here; `allow` still names chats that
+    /// must always be read.
+    #[serde(default)]
+    pub allow_all: bool,
     #[serde(default)]
     pub allow: Vec<String>,
     #[serde(default)]
@@ -160,7 +166,7 @@ impl BeeperConfig {
     /// Whether a chat may be read or replied to: allowed, and not denied.
     #[must_use]
     pub fn selects_chat(&self, chat_id: &str) -> bool {
-        self.chats.allow.iter().any(|c| c == chat_id)
+        (self.chats.allow_all || self.chats.allow.iter().any(|c| c == chat_id))
             && !self.chats.deny.iter().any(|c| c == chat_id)
     }
 }
@@ -202,6 +208,7 @@ mod tests {
         assert!(!c.selects_chat("any"));
         let c = BeeperConfig {
             chats: ChatSelection {
+                allow_all: false,
                 allow: vec!["a".into(), "b".into()],
                 deny: vec!["b".into()],
             },
@@ -224,6 +231,7 @@ mod tests {
                 allow_cloud: true,
             }],
             chats: ChatSelection {
+                allow_all: false,
                 allow: vec!["c1".into()],
                 deny: vec![],
             },

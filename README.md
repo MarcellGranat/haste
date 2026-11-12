@@ -568,6 +568,12 @@ Read this before you turn it on:
 
    Unknown keys are rejected; the file must be mode 0600. Nothing outside `allow` is ever
    requested, and `deny` wins over `allow`.
+
+   To read **all** chats of the selected accounts instead of naming them, write
+   `"chats": { "allow_all": true, "deny": ["<chat id>"] }`. Each cycle then reads the 50 most recent
+   chats of those accounts (the per-cycle chat limit; quieter chats are counted as skipped), plus any
+   chat named in `allow`. `deny` still wins. Every chat read this way is also a chat you can reply
+   to from the TUI, and cloud accounts still need `allow_cloud`.
 3. `haste connector beeper auth` (the human build) asks for the token without echoing it, checks it
    against the local API, and stores it in the Keychain (`com.haste.beeper`) only if the check
    passes. It then lists your accounts and chats so you can fill in `beeper.json`.

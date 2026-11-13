@@ -296,6 +296,14 @@ pub fn transient_label(e: &ConnectorError) -> &'static str {
         "transient_http_429"
     } else if m.starts_with("http 5") {
         "transient_http_5xx"
+    } else if m.contains("rate limited: userratelimitexceeded") {
+        "transient_user_rate_limit"
+    } else if m.contains("rate limited: ratelimitexceeded") {
+        "transient_rate_limit"
+    } else if m.contains("rate limited: quotaexceeded") {
+        "transient_quota"
+    } else if m.contains("rate limited: backenderror") {
+        "transient_backend_error"
     } else if m.contains("rate limited") {
         "transient_rate_limited"
     } else if m.contains("unreachable") {
@@ -722,6 +730,11 @@ mod tests {
         assert_eq!(t("http 503"), "transient_http_5xx");
         assert_eq!(t("http 429"), "transient_http_429");
         assert_eq!(t("rate limited"), "transient_rate_limited");
+        assert_eq!(
+            t("rate limited: userratelimitexceeded"),
+            "transient_user_rate_limit"
+        );
+        assert_eq!(t("rate limited: quotaexceeded"), "transient_quota");
         assert_eq!(t("something with secret text"), "transient");
     }
 

@@ -2,9 +2,10 @@
 
 use haste_core::connector::ConnectorError;
 
+/// Longest first, so `userratelimitexceeded` is not read as `ratelimitexceeded`.
 const RATE_LIMIT_MARKERS: [&str; 4] = [
-    "ratelimitexceeded",
     "userratelimitexceeded",
+    "ratelimitexceeded",
     "quotaexceeded",
     "backenderror",
 ];
@@ -38,8 +39,11 @@ pub fn classify(status: u16, body: &str) -> ConnectorError {
     if lower.contains("invalid_grant") {
         return ConnectorError::Checkpoint("re-authorization required (invalid_grant)".into());
     }
-    if status == 403 && RATE_LIMIT_MARKERS.iter().any(|m| lower.contains(m)) {
-        return ConnectorError::Transient("rate limited".into());
+    if status == 403 {
+        let found = RATE_LIMIT_MARKERS.into_iter().find(|m| lower.contains(m));
+        if let Some(marker) = found {
+            return ConnectorError::Transient(format!("rate limited: {marker}"));
+        }
     }
     if CHALLENGE_MARKERS.iter().any(|m| lower.contains(m)) {
         return ConnectorError::Challenge(format!("http {status}: verification requested"));

@@ -97,10 +97,17 @@ async fn main() -> ExitCode {
             Err(_) => return fail("could not read the Gmail profile"),
         },
         Ok(r) => {
+            let status = r.status().as_u16();
+            let reason = r
+                .text()
+                .await
+                .ok()
+                .and_then(|b| error_reason(&b))
+                .map(|s| format!(" ({s})"))
+                .unwrap_or_default();
             return fail(&format!(
-                "profile request failed with http {}",
-                r.status().as_u16()
-            ))
+                "profile request failed with http {status}{reason}"
+            ));
         }
         Err(e) => return fail(&e.without_url().to_string()),
     };
@@ -125,4 +132,41 @@ async fn main() -> ExitCode {
     println!("Authorized {}.", profile.email_address);
     println!("Restart hasted to start syncing, and run `haste connector release gmail` if it was engaged.");
     ExitCode::SUCCESS
+}
+
+/// Google's short error code from an error body (`error.status` and the first `reason`), kept to
+/// a few plain characters. The message text is never shown.
+fn error_reason(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let e = v.get("error")?;
+    let status = e.get("status").and_then(|s| s.as_str());
+    let reason = e
+        .get("errors")
+        .and_then(|a| a.get(0))
+        .and_then(|x| x.get("reason"))
+        .and_then(|s| s.as_str());
+    let text: Vec<&str> = [status, reason].into_iter().flatten().collect();
+    let text = text.join(", ");
+    let ok = !text.is_empty()
+        && text.len() <= 80
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ',' | ' ' | '-'));
+    ok.then_some(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::error_reason;
+
+    #[test]
+    fn only_the_short_code_is_shown() {
+        let body = r#"{"error":{"code":403,"message":"secret text","status":"PERMISSION_DENIED","errors":[{"reason":"accessNotConfigured"}]}}"#;
+        assert_eq!(
+            error_reason(body).as_deref(),
+            Some("PERMISSION_DENIED, accessNotConfigured")
+        );
+        assert_eq!(error_reason("not json"), None);
+        assert_eq!(error_reason(r#"{"error":{"status":"a b\nc<"}}"#), None);
+    }
 }

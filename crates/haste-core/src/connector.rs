@@ -281,6 +281,30 @@ pub fn error_class(e: &ConnectorError) -> &'static str {
     }
 }
 
+/// A fixed label for why a call failed transiently (never the error text), for the log.
+#[must_use]
+pub fn transient_label(e: &ConnectorError) -> &'static str {
+    let ConnectorError::Transient(m) = e else {
+        return error_class(e);
+    };
+    let m = m.to_lowercase();
+    if m.contains("timeout") {
+        "transient_timeout"
+    } else if m.contains("connect") {
+        "transient_connect"
+    } else if m.starts_with("http 429") {
+        "transient_http_429"
+    } else if m.starts_with("http 5") {
+        "transient_http_5xx"
+    } else if m.contains("rate limited") {
+        "transient_rate_limited"
+    } else if m.contains("unreachable") {
+        "transient_network"
+    } else {
+        "transient"
+    }
+}
+
 fn log_call(source: &Source, call: &'static str, outcome: &'static str, ms: i64, class: &str) {
     let level = match outcome {
         "ok" => crate::log::Level::Info,
@@ -372,7 +396,13 @@ impl Guarded<'_> {
                 }
                 Err(e @ ConnectorError::Transient(_)) => {
                     self.hooks.audit("fetch", &source, "transient_error");
-                    log_call(&source, "fetch", "transient_error", timer.ms(), "transient");
+                    log_call(
+                        &source,
+                        "fetch",
+                        "transient_error",
+                        timer.ms(),
+                        transient_label(&e),
+                    );
                     last = e;
                 }
                 // Waiting on a human: no retry, no breaker.
@@ -682,6 +712,17 @@ mod tests {
                 return v;
             }
         }
+    }
+
+    #[test]
+    fn transient_labels_are_fixed_words() {
+        let t = |m: &str| transient_label(&ConnectorError::Transient(m.into()));
+        assert_eq!(t("gmail unreachable: timeout"), "transient_timeout");
+        assert_eq!(t("gmail unreachable: connect"), "transient_connect");
+        assert_eq!(t("http 503"), "transient_http_5xx");
+        assert_eq!(t("http 429"), "transient_http_429");
+        assert_eq!(t("rate limited"), "transient_rate_limited");
+        assert_eq!(t("something with secret text"), "transient");
     }
 
     #[test]

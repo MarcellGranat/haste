@@ -125,7 +125,10 @@ impl GmailClient {
     ) -> Result<Option<String>, ConnectorError> {
         let token = self.tokens.access_token().await?;
         let response = request.bearer_auth(token).send().await.map_err(|e| {
-            ConnectorError::Transient(format!("gmail unreachable: {}", e.without_url()))
+            ConnectorError::Transient(format!(
+                "gmail unreachable: {}",
+                haste_google_oauth::errors::request_kind(&e)
+            ))
         })?;
         let status = response.status().as_u16();
         let body = response.text().await.unwrap_or_default();

@@ -10,6 +10,18 @@ const RATE_LIMIT_MARKERS: [&str; 4] = [
 ];
 const CHALLENGE_MARKERS: [&str; 5] = ["challenge", "captcha", "reauth", "verify it", "suspicious"];
 
+/// What kind of failure a request error was, as a fixed word (never the error text or URL).
+#[must_use]
+pub fn request_kind(e: &reqwest::Error) -> &'static str {
+    if e.is_timeout() {
+        "timeout"
+    } else if e.is_connect() {
+        "connect"
+    } else {
+        "request"
+    }
+}
+
 /// Classify a non-success HTTP response.
 ///
 /// * 429 and 5xx, and 403 rate-limit reasons, are `Transient` (bounded retries).

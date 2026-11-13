@@ -145,7 +145,7 @@ impl TokenSource {
             .map_err(|e| {
                 ConnectorError::Transient(format!(
                     "token endpoint unreachable: {}",
-                    e.without_url()
+                    crate::errors::request_kind(&e)
                 ))
             })?;
         let status = response.status().as_u16();

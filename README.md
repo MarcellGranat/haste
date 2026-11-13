@@ -44,6 +44,17 @@ sed -e "s|__HASTED_BINARY__|$PWD/target/release/hasted|" -e "s|__HOME__|$HOME|g"
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.haste.hasted.plist
 ```
 
+After the first install, one command rebuilds, signs and restarts everything that changed:
+
+```sh
+scripts/deploy.sh hasted tui      # or: cli, helpers, reminders (no argument: hasted tui cli helpers)
+```
+
+It signs each binary with your Apple Development identity, so the macOS Keychain "Always Allow"
+(and the Reminders permission) survives rebuilds instead of asking again. It restarts `hasted`
+with `launchctl kickstart -k` only when `hasted` runs as the launchd job above, never one you
+started by hand. Set `HASTE_SIGN_IDENTITY` to a certificate hash to use another identity.
+
 Stop and roll back:
 
 ```sh

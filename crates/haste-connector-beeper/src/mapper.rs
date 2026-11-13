@@ -74,6 +74,24 @@ pub struct Mapped {
     pub timestamp: i64,
 }
 
+/// Who sent it, for display: the sender's name, else the sender id, else nothing. Control
+/// characters are dropped and the name is bounded.
+fn sender_label(wire: &WireMessage) -> Option<String> {
+    let name: String = wire
+        .sender_name
+        .as_deref()
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(100)
+        .collect();
+    let name = name.trim();
+    if !name.is_empty() {
+        return Some(name.to_owned());
+    }
+    (!wire.sender_id.is_empty()).then(|| wire.sender_id.clone())
+}
+
 /// Map one wire message. `None` when it cannot be placed (no usable timestamp or sort key): such a
 /// message is skipped and counted, never guessed. Non-text messages store a fixed label, never an
 /// attachment's name.
@@ -106,7 +124,8 @@ pub fn map_message(chat_id: &str, source: &Source, wire: &WireMessage) -> Option
             source: source.clone(),
             external_id: wire.id.clone(),
             sender_person_id: None,
-            sender_identifier: (!wire.sender_id.is_empty()).then(|| wire.sender_id.clone()),
+            // the person's name reads better than an id; the id is the fallback
+            sender_identifier: sender_label(wire),
             body_text: body,
             sent_at: timestamp,
             is_own: wire.is_sender,
@@ -122,6 +141,14 @@ mod tests {
 
     fn wire(json: &str) -> WireMessage {
         serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn the_sender_name_is_shown_instead_of_the_id_and_the_id_is_the_fallback() {
+        let named = map_message("c1", &Source::Whatsapp, &wire(r#"{"id":"m1","senderID":"u1","senderName":"  Ana\u0007 Kiss ","text":"hi","timestamp":"2026-11-09T10:00:00Z","sortKey":"005","isSender":false}"#)).unwrap();
+        assert_eq!(named.message.sender_identifier.as_deref(), Some("Ana Kiss"));
+        let nameless = map_message("c1", &Source::Whatsapp, &wire(r#"{"id":"m2","senderID":"u1","senderName":"","text":"hi","timestamp":"2026-11-09T10:00:00Z","sortKey":"006"}"#)).unwrap();
+        assert_eq!(nameless.message.sender_identifier.as_deref(), Some("u1"));
     }
 
     #[test]

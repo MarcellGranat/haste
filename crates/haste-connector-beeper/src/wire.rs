@@ -70,6 +70,9 @@ pub struct WireMessage {
     pub chat_id: String,
     #[serde(default, alias = "senderID", alias = "senderId")]
     pub sender_id: String,
+    /// The sender's display name (`senderName` in the local API); `None` when Beeper has none.
+    #[serde(default, alias = "senderName")]
+    pub sender_name: Option<String>,
     #[serde(default)]
     pub text: Option<String>,
     /// RFC 3339.

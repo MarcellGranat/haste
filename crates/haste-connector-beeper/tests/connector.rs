@@ -471,6 +471,7 @@ async fn pages_are_bounded_and_a_delta_reads_only_what_is_newer_than_the_cursor(
         .connector
         .fetch(Some(Cursor(
             BeeperCursor {
+                v: haste_connector_beeper::connector::CURSOR_VERSION,
                 chats: [("chat-a".to_owned(), "000100".to_owned())].into(),
             }
             .encode(),
@@ -479,6 +480,19 @@ async fn pages_are_bounded_and_a_delta_reads_only_what_is_newer_than_the_cursor(
         .unwrap();
     assert_eq!(third.messages.len(), 1);
     assert_eq!(third.messages[0].external_id, "new");
+
+    // a cursor from before the current layout (no version) reads the history again, so fields
+    // added since (sender names) are filled in for chats stored earlier
+    let old = r
+        .connector
+        .fetch(Some(Cursor(r#"{"chats":{"chat-a":"000300"}}"#.to_owned())))
+        .await
+        .unwrap();
+    assert_eq!(old.messages.len(), 2, "both messages are read again");
+    assert_eq!(
+        BeeperCursor::decode(&old.next_cursor.unwrap().0).v,
+        haste_connector_beeper::connector::CURSOR_VERSION
+    );
 }
 
 #[tokio::test]

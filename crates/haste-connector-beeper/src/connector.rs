@@ -30,9 +30,16 @@ pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 /// Where each chat's read continues: chat id to the newest sort key stored.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BeeperCursor {
+    /// Layout of what was stored. An older cursor makes the next cycle read each chat's recent
+    /// history again, which refreshes fields added since (sender names, who wrote what).
+    #[serde(default)]
+    pub v: u32,
     #[serde(default)]
     pub chats: BTreeMap<String, String>,
 }
+
+/// Bump when the stored message fields change and old chats should be read again.
+pub const CURSOR_VERSION: u32 = 2;
 
 impl BeeperCursor {
     #[must_use]
@@ -257,7 +264,15 @@ impl BeeperConnector {
 
     async fn cycle(&self, state: BeeperCursor, now: i64) -> Result<Batch, ConnectorError> {
         let accounts = self.selected_accounts().await?;
-        let mut next = BeeperCursor::default();
+        let state = if state.v < CURSOR_VERSION {
+            BeeperCursor::default()
+        } else {
+            state
+        };
+        let mut next = BeeperCursor {
+            v: CURSOR_VERSION,
+            ..BeeperCursor::default()
+        };
         let mut batch = Batch::default();
         let (mut chats_read, mut skipped_chats, mut skipped_msgs) = (0_usize, 0_usize, 0_usize);
         if !accounts.is_empty() {

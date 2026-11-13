@@ -635,19 +635,19 @@ async fn tags_are_workspace_labels_set_only_by_the_human_and_scope_a_machines_re
         &rig,
         RequestBody::TagAdd {
             thread_id: t_haste.clone(),
-            tag: "hastee".into(),
+            tag: "bad\u{7}".into(),
         },
     )
     .await;
     assert_eq!(
         code(&typo),
         Some(ErrorCode::Validation),
-        "only a known workspace label is accepted"
+        "an invalid label is refused"
     );
     assert!(
         rig.audit()
             .contains(r#""action":"tag.change","outcome":"refused""#)
-            && rig.audit().contains("unknown_tag")
+            && rig.audit().contains("invalid_tag")
     );
 
     // agents and machines cannot change tags, and the denial names the request
@@ -914,6 +914,8 @@ fn kind(body: &RequestBody) -> Kind {
         | RequestBody::TagAdd { .. }
         | RequestBody::TagRemove { .. }
         | RequestBody::TagList
+        | RequestBody::ReminderNew { .. }
+        | RequestBody::ReminderEdit { .. }
         | RequestBody::ReminderTagAdd { .. }
         | RequestBody::ReminderTagRemove { .. }
         | RequestBody::EventTagAdd { .. }

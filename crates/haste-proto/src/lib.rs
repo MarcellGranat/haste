@@ -10,7 +10,7 @@ use haste_core::policy::PrincipalKind;
 use haste_core::proposal::{Payload, Proposal, ProposalState};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 /// Largest frame either side accepts.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
@@ -177,6 +177,23 @@ pub enum RequestBody {
     TagList,
     /// Agent status by machine, narrowed to what the caller may see.
     AgentList,
+    /// Human-only: create a reminder now (no approval: the human typed it).
+    ReminderNew {
+        title: String,
+        #[serde(default)]
+        due: Option<i64>,
+        #[serde(default)]
+        notes: Option<String>,
+    },
+    /// Human-only: set a reminder's title and due date and append to its notes.
+    ReminderEdit {
+        reminder_id: String,
+        title: String,
+        #[serde(default)]
+        due: Option<i64>,
+        #[serde(default)]
+        append_notes: Option<String>,
+    },
     /// Mirrored reminders the caller may see (titles included; never exposed in audit).
     RemindersList {
         include_completed: bool,

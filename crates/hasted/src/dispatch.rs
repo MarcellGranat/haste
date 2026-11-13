@@ -80,6 +80,8 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::TagAdd { .. }
         | RequestBody::TagRemove { .. }
         | RequestBody::TagList
+        | RequestBody::ReminderNew { .. }
+        | RequestBody::ReminderEdit { .. }
         | RequestBody::ReminderTagAdd { .. }
         | RequestBody::ReminderTagRemove { .. }
         | RequestBody::NoteMode { .. }
@@ -103,6 +105,8 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::TagAdd { .. } => "tag_add",
         RequestBody::TagRemove { .. } => "tag_remove",
         RequestBody::TagList => "tag_list",
+        RequestBody::ReminderNew { .. } => "reminder_new",
+        RequestBody::ReminderEdit { .. } => "reminder_edit",
         RequestBody::ConnectorStatus => "connector_status",
         RequestBody::ConnectorRelease { .. } => "connector_release",
         RequestBody::ConnectorEngage { .. } => "connector_engage",
@@ -592,6 +596,24 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             },
             Err(e) => map_store(&e),
         },
+        RequestBody::ReminderNew { title, due, notes } => {
+            reminder_write(state, principal, ReminderWrite::New { title, due, notes })
+        }
+        RequestBody::ReminderEdit {
+            reminder_id,
+            title,
+            due,
+            append_notes,
+        } => reminder_write(
+            state,
+            principal,
+            ReminderWrite::Edit {
+                reminder_id,
+                title,
+                due,
+                append_notes,
+            },
+        ),
         RequestBody::RemindersList { include_completed } => {
             reminders_list(state, principal, include_completed)
         }
@@ -688,6 +710,93 @@ fn reminders_list(state: &State, principal: &Principal, include_completed: bool)
                 .collect(),
         },
         Err(e) => map_store(&e),
+    }
+}
+
+enum ReminderWrite {
+    New {
+        title: String,
+        due: Option<i64>,
+        notes: Option<String>,
+    },
+    Edit {
+        reminder_id: String,
+        title: String,
+        due: Option<i64>,
+        append_notes: Option<String>,
+    },
+}
+
+/// The human's own reminder change: run through the connector guard (so the kill switch and the
+/// breaker still apply), then ask the sync loop to refresh the mirror. Titles and notes are never
+/// audited; only the action and the reminder's haste id.
+fn reminder_write(state: &State, actor: &Principal, write: ReminderWrite) -> Response {
+    let title_ok = |t: &str| !t.trim().is_empty() && t.chars().count() <= 500;
+    let (action, object) = match &write {
+        ReminderWrite::New { .. } => ("reminder.new", None),
+        ReminderWrite::Edit { reminder_id, .. } => ("reminder.edit", Some(reminder_id.clone())),
+    };
+    let valid = match &write {
+        ReminderWrite::New { title, notes, .. } => {
+            title_ok(title) && notes.as_ref().is_none_or(|n| n.len() <= 20_000)
+        }
+        ReminderWrite::Edit {
+            title,
+            append_notes,
+            ..
+        } => title_ok(title) && append_notes.as_ref().is_none_or(|n| n.len() <= 20_000),
+    };
+    if !valid {
+        return err(ErrorCode::Validation, "invalid title or notes");
+    }
+    let Some(connector) = state.connector_for(&Source::Reminders) else {
+        return err(ErrorCode::NotFound, "no reminders connector");
+    };
+    let guard = Guarded {
+        connector: connector.as_ref(),
+        hooks: state,
+    };
+    let handle = tokio::runtime::Handle::current();
+    let result = match write {
+        ReminderWrite::New { title, due, notes } => handle
+            .block_on(guard.create_reminder(&NewReminder {
+                title,
+                due,
+                list: None,
+                notes,
+            }))
+            .map(|_| ()),
+        ReminderWrite::Edit {
+            reminder_id,
+            title,
+            due,
+            append_notes,
+        } => {
+            let external = match state.store.get_reminder(&reminder_id) {
+                Ok(Some(r)) => r.external_id,
+                Ok(None) => return err(ErrorCode::NotFound, "reminder not found"),
+                Err(e) => return map_store(&e),
+            };
+            handle.block_on(guard.update_reminder(
+                &external,
+                &haste_core::connector::ReminderPatch {
+                    title,
+                    due,
+                    append_notes,
+                },
+            ))
+        }
+    };
+    match result {
+        Ok(()) => {
+            state.audit(&actor.id, action, "ok", object.as_deref(), None);
+            state.wake_sync(&Source::Reminders);
+            Response::Done
+        }
+        Err(e) => {
+            state.audit(&actor.id, action, "error", object.as_deref(), None);
+            err(ErrorCode::Internal, &format!("{e:?}"))
+        }
     }
 }
 

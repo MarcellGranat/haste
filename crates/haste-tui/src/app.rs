@@ -4,6 +4,8 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
+use crate::compose::{Compose, ComposeKind, ComposeOutcome, LabelOutcome, LabelPicker};
+use crate::editor;
 use crate::inbox;
 use haste_core::herdr::{AgentStatus, AgentStatusRecord, MachineState};
 use haste_core::ignore::IgnoreList;
@@ -24,6 +26,10 @@ pub enum Key {
     Backspace,
     Down,
     Up,
+    Left,
+    Right,
+    /// A control chord such as Ctrl-S, as the lowercase letter.
+    Ctrl(char),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +169,34 @@ pub enum Effect {
     Reply {
         thread_id: String,
     },
+    /// Append a note about a thread to the notes folder (no approval: the human wrote it).
+    SaveNote {
+        thread_id: String,
+        text: String,
+        attachments: Vec<std::path::PathBuf>,
+    },
+    /// Create a TODO, or change an existing one (no approval: the human did it).
+    SaveTodo {
+        reminder_id: Option<String>,
+        title: String,
+        due: Option<i64>,
+        notes: String,
+        attachments: Vec<std::path::PathBuf>,
+    },
+    /// `Ctrl-G` in a form: edit this text in `$EDITOR`, then call [`App::compose_replace_text`].
+    ExternalEdit {
+        text: String,
+    },
+    /// `l`: load the candidate labels, then call [`App::show_labels`].
+    OpenLabels {
+        thread_id: String,
+    },
+    /// Put a label on a thread or take it off.
+    LabelChange {
+        thread_id: String,
+        label: String,
+        add: bool,
+    },
     ReleaseConnector {
         source: String,
     },
@@ -216,6 +250,10 @@ pub enum Mode {
     },
     /// Reading a thread (see [`App::reader`]).
     Read,
+    /// A note or TODO form (see [`App::compose`]).
+    Compose,
+    /// Choosing a label (see [`App::labeler`]).
+    Label,
     /// Typing a snooze (`3h`, `2d`).
     Snooze {
         thread_id: String,
@@ -270,6 +308,10 @@ pub struct App {
     pub filter_index: usize,
     pub today_selected: usize,
     pub reader: Option<Reader>,
+    /// The open note or TODO form.
+    pub compose: Option<Box<Compose>>,
+    /// The open label picker.
+    pub labeler: Option<LabelPicker>,
     /// Muted senders (`.haste_ignore`), applied to the Today and Channels lists only.
     pub ignore: IgnoreList,
     pub ignore_errors: Vec<String>,
@@ -384,6 +426,8 @@ impl App {
             filter_index: 0,
             today_selected: 0,
             reader: None,
+            compose: None,
+            labeler: None,
             ignore: IgnoreList::default(),
             ignore_errors: Vec::new(),
             todo_marked: BTreeSet::new(),
@@ -837,6 +881,8 @@ impl App {
         match self.mode.clone() {
             Mode::Filter => self.key_filter(key),
             Mode::Read => self.key_read(key),
+            Mode::Compose => self.key_compose(key),
+            Mode::Label => self.key_label(key),
             Mode::Snooze { thread_id, input } => self.key_snooze(key, thread_id, input),
             Mode::Remind {
                 thread_id,
@@ -958,6 +1004,10 @@ impl App {
             Key::Char('J') if self.view == View::Today => self.today_focus = TodayFocus::Todo,
             Key::Char('K') if self.view == View::Today => self.today_focus = TodayFocus::Inbox,
             Key::Enter if thread_view => return self.open_selected(),
+            Key::Enter if self.on_todos() => self.start_todo(false),
+            Key::Char('c') if self.on_todos() => self.start_todo(true),
+            Key::Char('n') if thread_view => self.start_note(),
+            Key::Char('l') if thread_view => return self.start_labels(),
             Key::Char('f') if matches!(self.view, View::Today | View::Channels) => {
                 self.cycle_filter();
             }
@@ -1286,6 +1336,10 @@ impl App {
             Key::Esc | Key::Enter | Key::Char('q' | 'h') => self.close_reader(),
             Key::Char('j') | Key::Down => to(at.saturating_add(1)),
             Key::Char('k') | Key::Up => to(at.saturating_sub(1)),
+            Key::Char('n') => {
+                self.start_note_for(&thread_id, reader.view.thread.subject.clone());
+            }
+            Key::Char('l') => return Some(Effect::OpenLabels { thread_id }),
             Key::Char(' ' | 'd') => to(at.saturating_add(READER_PAGE)),
             Key::Char('b' | 'u') => to(at.saturating_sub(READER_PAGE)),
             Key::Char('g' | '0') => {
@@ -1304,6 +1358,190 @@ impl App {
             _ => {}
         }
         None
+    }
+
+    /// The subject and labels of a thread the TUI knows (the list or the open reader).
+    #[must_use]
+    pub fn thread_facts(&self, thread_id: &str) -> (String, Vec<String>) {
+        if let Some(t) = self.threads.iter().find(|t| t.thread.id == thread_id) {
+            return (t.thread.subject.clone(), t.tags.clone());
+        }
+        match &self.reader {
+            Some(r) if r.view.thread.id == thread_id => {
+                (r.view.thread.subject.clone(), r.view.tags.clone())
+            }
+            _ => (String::new(), Vec::new()),
+        }
+    }
+
+    /// Where a form returns to: the reader if a thread is open, else the lists.
+    fn back_mode(&self) -> Mode {
+        if self.reader.is_some() {
+            Mode::Read
+        } else {
+            Mode::Normal
+        }
+    }
+
+    /// `n`: a note about the thread under the cursor (or the open one).
+    fn start_note(&mut self) {
+        if let Some((id, subject)) = self.thread_under_cursor() {
+            let subject = inbox::sanitize(&subject).replace('\n', " ");
+            self.compose = Some(Box::new(Compose::note(&id, &subject)));
+            self.mode = Mode::Compose;
+        }
+    }
+
+    fn start_note_for(&mut self, thread_id: &str, subject: String) {
+        let subject = inbox::sanitize(&subject).replace('\n', " ");
+        self.compose = Some(Box::new(Compose::note(thread_id, &subject)));
+        self.mode = Mode::Compose;
+    }
+
+    /// `l`: ask for the candidate labels of the thread under the cursor.
+    fn start_labels(&mut self) -> Option<Effect> {
+        let (thread_id, _) = self.thread_under_cursor()?;
+        Some(Effect::OpenLabels { thread_id })
+    }
+
+    /// The answer to [`Effect::OpenLabels`].
+    pub fn show_labels(&mut self, thread_id: &str, candidates: Vec<String>) {
+        let on = self
+            .threads
+            .iter()
+            .find(|t| t.thread.id == thread_id)
+            .map(|t| t.tags.clone())
+            .unwrap_or_default();
+        self.labeler = Some(LabelPicker::new(thread_id, candidates, on));
+        self.mode = Mode::Label;
+    }
+
+    fn key_label(&mut self, key: Key) -> Option<Effect> {
+        let picker = self.labeler.as_mut()?;
+        match picker.handle(key) {
+            LabelOutcome::Open => None,
+            LabelOutcome::Closed => {
+                self.labeler = None;
+                self.mode = self.back_mode();
+                None
+            }
+            LabelOutcome::Toggle { label, add } => {
+                let thread_id = picker.thread_id.clone();
+                // the picker stays open so several labels can be set; keep its own view current
+                if add {
+                    picker.on.push(label.clone());
+                } else {
+                    picker.on.retain(|l| l != &label);
+                }
+                Some(Effect::LabelChange {
+                    thread_id,
+                    label,
+                    add,
+                })
+            }
+        }
+    }
+
+    /// `Enter` on a TODO edits it; `c` starts a new one.
+    fn start_todo(&mut self, new: bool) {
+        let form = if new {
+            Compose::todo(None, "", "")
+        } else {
+            let Some(r) = self
+                .todos()
+                .get(self.todo_selected)
+                .map(|r| r.reminder.clone())
+            else {
+                return;
+            };
+            let due = r
+                .due_at
+                .map(|d| inbox::stamp(d, self.tz_offset))
+                .unwrap_or_default();
+            Compose::todo(Some(r.id), &r.title, &due)
+        };
+        self.compose = Some(Box::new(form));
+        self.mode = Mode::Compose;
+    }
+
+    fn key_compose(&mut self, key: Key) -> Option<Effect> {
+        let c = self.compose.as_mut()?;
+        match c.handle(key) {
+            ComposeOutcome::Continue => None,
+            ComposeOutcome::Cancel => {
+                self.compose = None;
+                self.mode = self.back_mode();
+                self.status = "cancelled".into();
+                None
+            }
+            ComposeOutcome::Attach => {
+                c.open_picker(editor::scan_files(&attach_roots()));
+                None
+            }
+            ComposeOutcome::External => Some(Effect::ExternalEdit {
+                text: c.focused_text(),
+            }),
+            ComposeOutcome::Save => self.finish_compose(),
+        }
+    }
+
+    /// The text `$EDITOR` returned goes back into the focused field.
+    pub fn compose_replace_text(&mut self, text: &str) {
+        if let Some(c) = self.compose.as_mut() {
+            c.set_focused_text(text);
+        }
+    }
+
+    fn finish_compose(&mut self) -> Option<Effect> {
+        let c = self.compose.as_ref()?;
+        let attachments = c.attachments.clone();
+        let effect = match &c.kind {
+            ComposeKind::Note { thread_id } => {
+                let text = c.fields[0].area.text().trim().to_owned();
+                if text.is_empty() && attachments.is_empty() {
+                    self.status = "the note is empty".into();
+                    return None;
+                }
+                Effect::SaveNote {
+                    thread_id: thread_id.clone(),
+                    text,
+                    attachments,
+                }
+            }
+            ComposeKind::Todo { reminder_id } => {
+                let title = c.field("Title").map(|a| a.text()).unwrap_or_default();
+                let title = title.trim().to_owned();
+                if title.is_empty() {
+                    self.status = "a TODO needs a title".into();
+                    return None;
+                }
+                let due_text = c.field("Due").map(|a| a.text()).unwrap_or_default();
+                let due =
+                    match inbox::parse_due(&due_text, haste_core::time::now_secs(), self.tz_offset)
+                    {
+                        Ok(due) => due,
+                        Err(e) => {
+                            self.status = e;
+                            return None;
+                        }
+                    };
+                let notes = c
+                    .fields
+                    .last()
+                    .map(|f| f.area.text().trim().to_owned())
+                    .unwrap_or_default();
+                Effect::SaveTodo {
+                    reminder_id: reminder_id.clone(),
+                    title,
+                    due,
+                    notes,
+                    attachments,
+                }
+            }
+        };
+        self.compose = None;
+        self.mode = self.back_mode();
+        Some(effect)
     }
 
     fn on_todos(&self) -> bool {
@@ -1626,6 +1864,20 @@ impl App {
             _ => None,
         }
     }
+}
+
+/// Where the file picker looks for files to attach.
+fn attach_roots() -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        for d in ["Downloads", "Desktop", "Documents"] {
+            roots.push(home.join(d));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    roots
 }
 
 #[cfg(test)]
@@ -2275,6 +2527,77 @@ mod tests {
         ]);
         let ids: Vec<&str> = app.todos().iter().map(|t| t.reminder.id.as_str()).collect();
         assert_eq!(ids, ["today", "undated"]);
+    }
+
+    #[test]
+    fn n_writes_a_note_l_opens_labels_and_enter_edits_a_todo() {
+        let mut app = App::new();
+        app.set_threads(vec![mail_thread("t1", "Budget", &["a@x.org"], 100)]);
+        // n: a form; Ctrl-S saves the note as an effect, with no approval step
+        assert!(press(&mut app, "n").is_empty());
+        assert_eq!(app.mode, Mode::Compose);
+        assert!(
+            app.handle_key(Key::Ctrl('s')).is_none(),
+            "empty notes are refused"
+        );
+        press(&mut app, "call back");
+        let Some(Effect::SaveNote {
+            thread_id, text, ..
+        }) = app.handle_key(Key::Ctrl('s'))
+        else {
+            panic!("expected SaveNote")
+        };
+        assert_eq!((thread_id.as_str(), text.as_str()), ("t1", "call back"));
+        assert_eq!(app.mode, Mode::Normal);
+        // l: the daemon-side candidates are asked for, then picked
+        assert_eq!(
+            press(&mut app, "l"),
+            vec![Effect::OpenLabels {
+                thread_id: "t1".into()
+            }]
+        );
+        app.show_labels("t1", vec!["haste".into()]);
+        assert_eq!(app.mode, Mode::Label);
+        assert_eq!(
+            app.handle_key(Key::Enter),
+            Some(Effect::LabelChange {
+                thread_id: "t1".into(),
+                label: "haste".into(),
+                add: true
+            })
+        );
+        app.handle_key(Key::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn a_todo_form_needs_a_title_and_a_valid_date() {
+        let mut app = App::new();
+        app.today_focus = TodayFocus::Todo;
+        press(&mut app, "c");
+        assert_eq!(app.mode, Mode::Compose);
+        assert!(app.handle_key(Key::Ctrl('s')).is_none(), "no title");
+        press(&mut app, "pay rent");
+        app.handle_key(Key::Enter); // to the due field
+        press(&mut app, "not a date");
+        assert!(
+            app.handle_key(Key::Ctrl('s')).is_none(),
+            "bad date stays open"
+        );
+        assert_eq!(app.mode, Mode::Compose);
+        for _ in 0.."not a date".len() {
+            app.handle_key(Key::Backspace);
+        }
+        let Some(Effect::SaveTodo {
+            reminder_id,
+            title,
+            due,
+            ..
+        }) = app.handle_key(Key::Ctrl('s'))
+        else {
+            panic!("expected SaveTodo")
+        };
+        assert_eq!((reminder_id, title.as_str(), due), (None, "pay rent", None));
     }
 
     #[test]

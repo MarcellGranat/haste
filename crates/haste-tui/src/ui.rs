@@ -37,7 +37,238 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     if app.mode == Mode::Read {
         draw_reader(frame, app, body);
     }
+    if app.mode == Mode::Compose {
+        draw_compose(frame, app, frame.area());
+    }
+    if app.mode == Mode::Label {
+        draw_labels(frame, app, frame.area());
+    }
     draw_footer(frame, app, footer);
+}
+
+/// A rectangle `w` x `h` (clamped) in the middle of `area`.
+fn centered(area: Rect, w: u16, h: u16) -> Rect {
+    let w = w.min(area.width);
+    let h = h.min(area.height);
+    Rect::new(
+        area.x + (area.width - w) / 2,
+        area.y + (area.height - h) / 2,
+        w,
+        h,
+    )
+}
+
+fn draw_compose(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let Some(c) = &app.compose else {
+        return;
+    };
+    let rect = centered(area, 90, area.height.saturating_sub(4).max(12));
+    frame.render_widget(Clear, rect);
+    let heading = format!(" {} ", c.heading);
+    let block = theme::panel(&heading).border_style(pane_border(true));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let attach_rows = u16::try_from(c.attachments.len().min(4)).unwrap_or(4) + 1;
+    let mut constraints: Vec<Constraint> = c
+        .fields
+        .iter()
+        .map(|f| {
+            if f.area.lines().len() == 1
+                && !f.label.starts_with("Note")
+                && !f.label.starts_with("Add")
+            {
+                Constraint::Length(3)
+            } else {
+                Constraint::Min(5)
+            }
+        })
+        .collect();
+    constraints.push(Constraint::Length(attach_rows));
+    constraints.push(Constraint::Length(1));
+    let areas = Layout::vertical(constraints).split(inner);
+    for (i, f) in c.fields.iter().enumerate() {
+        let focused = i == c.focus;
+        let box_area = areas[i];
+        let label = format!(" {} ", f.label);
+        let b = theme::panel(&label).border_style(pane_border(focused));
+        let text_area = b.inner(box_area);
+        frame.render_widget(b, box_area);
+        let lines: Vec<Line<'_>> = f
+            .area
+            .lines()
+            .iter()
+            .map(|l| {
+                Line::from(Span::styled(
+                    inbox::sanitize(l),
+                    Style::new().fg(theme::TEXT),
+                ))
+            })
+            .collect();
+        // keep the cursor row visible
+        let rows = usize::from(text_area.height).max(1);
+        let top = f.area.row.saturating_sub(rows - 1);
+        let scroll = u16::try_from(top).unwrap_or(0);
+        frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), text_area);
+        if focused && c.picker.is_none() {
+            let x = text_area.x
+                + u16::try_from(f.area.col)
+                    .unwrap_or(0)
+                    .min(text_area.width.saturating_sub(1));
+            let y = text_area.y + u16::try_from(f.area.row - top).unwrap_or(0);
+            frame.set_cursor_position((x, y));
+        }
+    }
+    let n = c.fields.len();
+    let mut attach: Vec<Line<'_>> = vec![Line::from(Span::styled(
+        format!(
+            "attachments: {}",
+            if c.attachments.is_empty() { "none" } else { "" }
+        ),
+        theme::muted(),
+    ))];
+    for p in c.attachments.iter().take(4) {
+        attach.push(Line::from(Span::styled(
+            format!("  📎 {}", p.display()),
+            Style::new().fg(theme::SUBTEXT0),
+        )));
+    }
+    frame.render_widget(Paragraph::new(attach), areas[n]);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "Ctrl-S",
+                Style::new()
+                    .fg(theme::HINT_KEY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" save  ", Style::new().fg(theme::HINT_TEXT)),
+            Span::styled(
+                "Tab",
+                Style::new()
+                    .fg(theme::HINT_KEY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" next field  ", Style::new().fg(theme::HINT_TEXT)),
+            Span::styled(
+                "Ctrl-G",
+                Style::new()
+                    .fg(theme::HINT_KEY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" open in $EDITOR  ", Style::new().fg(theme::HINT_TEXT)),
+            Span::styled(
+                "Ctrl-F",
+                Style::new()
+                    .fg(theme::HINT_KEY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" attach  ", Style::new().fg(theme::HINT_TEXT)),
+            Span::styled(
+                "Ctrl-X",
+                Style::new()
+                    .fg(theme::HINT_KEY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" unattach  ", Style::new().fg(theme::HINT_TEXT)),
+            Span::styled(
+                "Esc",
+                Style::new()
+                    .fg(theme::HINT_KEY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" cancel", Style::new().fg(theme::HINT_TEXT)),
+        ])),
+        areas[n + 1],
+    );
+    if let Some(picker) = &c.picker {
+        let prect = centered(area, 80, area.height.saturating_sub(8).max(8));
+        frame.render_widget(Clear, prect);
+        let matches = picker.matches();
+        let title = format!(
+            " Attach a file · {} found · Enter takes it, Esc closes ",
+            matches.len()
+        );
+        let block = theme::panel(&title).border_style(pane_border(true));
+        let inner = block.inner(prect);
+        frame.render_widget(block, prect);
+        let [q, list] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("> ", Style::new().fg(theme::MAUVE)),
+                Span::styled(picker.query.clone(), Style::new().fg(theme::TEXT)),
+            ])),
+            q,
+        );
+        let home = std::env::var("HOME").unwrap_or_default();
+        let items: Vec<ListItem<'_>> = matches
+            .iter()
+            .map(|p| {
+                let shown = p.to_string_lossy().replacen(&home, "~", 1);
+                ListItem::new(Span::styled(
+                    inbox::sanitize(&shown),
+                    Style::new().fg(theme::TEXT),
+                ))
+            })
+            .collect();
+        let mut st =
+            ListState::default().with_selected((!items.is_empty()).then_some(picker.selected));
+        frame.render_stateful_widget(
+            List::new(items)
+                .highlight_style(theme::selected())
+                .highlight_symbol("▌ "),
+            list,
+            &mut st,
+        );
+        frame.set_cursor_position((
+            q.x + 2 + u16::try_from(picker.query.chars().count()).unwrap_or(0),
+            q.y,
+        ));
+    }
+}
+
+fn draw_labels(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let Some(p) = &app.labeler else {
+        return;
+    };
+    let rect = centered(area, 60, area.height.saturating_sub(6).clamp(8, 22));
+    frame.render_widget(Clear, rect);
+    let block = theme::panel(" Labels · Enter sets or clears · type a new one · Esc closes ")
+        .border_style(pane_border(true));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let [q, list] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("> ", Style::new().fg(theme::MAUVE)),
+            Span::styled(p.input.clone(), Style::new().fg(theme::TEXT)),
+        ])),
+        q,
+    );
+    let rows = p.rows();
+    let items: Vec<ListItem<'_>> = rows
+        .iter()
+        .map(|r| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    if r.on { "● " } else { "○ " },
+                    Style::new().fg(if r.on { theme::GREEN } else { theme::MUTED }),
+                ),
+                Span::styled(inbox::sanitize(&r.label), Style::new().fg(theme::TEXT)),
+            ]))
+        })
+        .collect();
+    let mut st = ListState::default().with_selected((!items.is_empty()).then_some(p.selected));
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_style(theme::selected())
+            .highlight_symbol("▌ "),
+        list,
+        &mut st,
+    );
+    frame.set_cursor_position((
+        q.x + 2 + u16::try_from(p.input.chars().count()).unwrap_or(0),
+        q.y,
+    ));
 }
 
 fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -98,8 +329,11 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         ];
     }
     let thread_keys = vec![
+        ("Enter", "open"),
         ("e", "archive"),
         ("r", "reply"),
+        ("n", "note"),
+        ("l", "label"),
         ("g", "aside"),
         ("p", "priority"),
         ("s", "snooze"),
@@ -110,6 +344,8 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
     match app.view {
         View::Today if app.today_focus == TodayFocus::Todo => {
             vec![
+                ("Enter", "edit"),
+                ("c", "new"),
                 ("Space", "select"),
                 ("e", "done (30 s to undo)"),
                 ("Tab", "to incoming"),

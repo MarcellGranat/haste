@@ -1,6 +1,6 @@
 // haste-reminders-helper: a tiny EventKit bridge. One JSON request on stdin, one JSON object on
 // stdout. The request set is closed: authorization, list_lists, fetch_changed, create_reminder,
-// complete_reminder. There is deliberately no delete and no edit.
+// complete_reminder, update_reminder. There is deliberately no delete.
 import EventKit
 import Foundation
 
@@ -49,7 +49,7 @@ func wire(_ r: EKReminder) -> [String: Any] {
 func checkFixture(_ path: String) -> Never {
     let required: [String: [String]] = [
         "authorization": ["prompt"], "list_lists": [], "fetch_changed": ["since", "offset", "limit", "include_completed"],
-        "create_reminder": ["title"], "complete_reminder": ["external_id"],
+        "create_reminder": ["title"], "complete_reminder": ["external_id"], "update_reminder": ["external_id", "title"],
     ]
     guard let data = FileManager.default.contents(atPath: path),
         let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -145,6 +145,24 @@ case "complete_reminder":
     reminder.isCompleted = true
     do { try store.save(reminder, commit: true) } catch { fail("failed", "save failed") }
     emit(["op": "complete_reminder"])
+
+case "update_reminder":
+    guard authorized() else { fail("not_authorized") }
+    guard let id = request["external_id"] as? String,
+          let title = request["title"] as? String, !title.isEmpty else { fail("bad_request") }
+    guard let reminder = store.calendarItem(withIdentifier: id) as? EKReminder else { fail("not_found") }
+    reminder.title = title
+    if let due = request["due"] as? Int {
+        reminder.dueDateComponents = Calendar.current.dateComponents(
+            [.year, .month, .day, .hour, .minute], from: Date(timeIntervalSince1970: TimeInterval(due)))
+    } else {
+        reminder.dueDateComponents = nil
+    }
+    if let extra = request["append_notes"] as? String, !extra.isEmpty {
+        reminder.notes = (reminder.notes ?? "").isEmpty ? extra : reminder.notes! + "\n\n" + extra
+    }
+    do { try store.save(reminder, commit: true) } catch { fail("failed", "save failed") }
+    emit(["op": "update_reminder"])
 
 default:
     fail("bad_request")

@@ -112,6 +112,15 @@ pub struct NewReminder {
     pub notes: Option<String>,
 }
 
+/// A human's change to a reminder: the title and due date are set, text is only ever appended to
+/// the notes (the old notes are kept).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReminderPatch {
+    pub title: String,
+    pub due: Option<i64>,
+    pub append_notes: Option<String>,
+}
+
 /// A calendar event to create. Attendees are stored on the event but never emailed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewEvent {
@@ -208,6 +217,20 @@ pub trait Connector: Send + Sync {
         Box::pin(async {
             Err(ConnectorError::Unsupported(
                 "events cannot be updated".into(),
+            ))
+        })
+    }
+
+    /// Change a reminder's title and due date and append to its notes. Default: unsupported.
+    /// Only the human's own TUI edit calls it.
+    fn update_reminder<'a>(
+        &'a self,
+        _external_id: &'a str,
+        _patch: &'a ReminderPatch,
+    ) -> BoxFuture<'a, Result<(), ConnectorError>> {
+        Box::pin(async {
+            Err(ConnectorError::Unsupported(
+                "reminders cannot be edited".into(),
             ))
         })
     }
@@ -422,6 +445,35 @@ impl Guarded<'_> {
             }
             Err(e) => {
                 self.hooks.audit("reminder.create", &source, "error");
+                Err(CallError::Connector(e))
+            }
+        }
+    }
+
+    /// Apply the human's edit to a reminder. Never retried.
+    ///
+    /// # Errors
+    /// See [`CallError`].
+    pub async fn update_reminder(
+        &self,
+        external_id: &str,
+        patch: &ReminderPatch,
+    ) -> Result<(), CallError> {
+        self.precheck(
+            self.connector.capabilities().reminders_create,
+            "reminder.update",
+        )?;
+        let source = self.connector.source();
+        match self.connector.update_reminder(external_id, patch).await {
+            Ok(()) => {
+                self.hooks.audit("reminder.update", &source, "ok");
+                Ok(())
+            }
+            Err(e @ (ConnectorError::Challenge(_) | ConnectorError::Checkpoint(_))) => {
+                Err(self.trip("reminder.update", e))
+            }
+            Err(e) => {
+                self.hooks.audit("reminder.update", &source, "error");
                 Err(CallError::Connector(e))
             }
         }

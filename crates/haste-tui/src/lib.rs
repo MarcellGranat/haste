@@ -2,6 +2,8 @@
 
 pub mod app;
 pub mod client;
+pub mod compose;
+pub mod editor;
 pub mod inbox;
 pub mod theme;
 pub mod ui;

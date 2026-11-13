@@ -251,6 +251,31 @@ impl Connector for RemindersConnector {
         })
     }
 
+    fn update_reminder<'a>(
+        &'a self,
+        external_id: &'a str,
+        patch: &'a haste_core::connector::ReminderPatch,
+    ) -> BoxFuture<'a, Result<(), ConnectorError>> {
+        Box::pin(async move {
+            let helper = Arc::clone(&self.helper);
+            let request = RemindersRequest::UpdateReminder {
+                external_id: external_id.to_owned(),
+                title: patch.title.clone(),
+                due: patch.due,
+                append_notes: patch.append_notes.clone(),
+            };
+            let reply = tokio::task::spawn_blocking(move || helper.call(&request))
+                .await
+                .map_err(|_| ConnectorError::Other("reminder task failed".into()))?
+                .map_err(helper_error)?;
+            match reply {
+                RemindersResponse::UpdateReminder {} => Ok(()),
+                RemindersResponse::Error { kind, .. } => Err(reply_error(&kind)),
+                _ => Err(unexpected()),
+            }
+        })
+    }
+
     fn complete_reminder<'a>(
         &'a self,
         external_id: &'a str,

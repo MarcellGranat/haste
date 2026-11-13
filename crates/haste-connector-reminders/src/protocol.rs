@@ -1,5 +1,6 @@
 //! The helper protocol. One JSON request on stdin, one JSON object on stdout. The set of
-//! requests is closed: there is deliberately no delete and no edit.
+//! requests is closed: there is deliberately no delete, and the only edit is the human's
+//! `update_reminder` (title, due date, appended notes).
 
 use haste_core::model::{notes_snippet, Reminder};
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,14 @@ pub enum RemindersRequest {
     },
     /// Fails when the target is missing or already completed.
     CompleteReminder { external_id: String },
+    /// The human's edit: sets the title and due date (`null` clears it) and appends text to the
+    /// notes. The completed state, the list and the old notes are never touched.
+    UpdateReminder {
+        external_id: String,
+        title: String,
+        due: Option<i64>,
+        append_notes: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +117,7 @@ pub enum RemindersResponse {
         reminder: WireReminder,
     },
     CompleteReminder {},
+    UpdateReminder {},
     /// `kind`: `not_authorized`, `not_found`, `already_completed`, `list_not_found`, `failed`.
     Error {
         kind: String,
@@ -144,13 +154,8 @@ mod tests {
     }
 
     #[test]
-    fn there_is_no_delete_or_edit_request() {
-        for op in [
-            "delete_reminder",
-            "update_reminder",
-            "edit_reminder",
-            "remove",
-        ] {
+    fn there_is_no_delete_request() {
+        for op in ["delete_reminder", "edit_reminder", "remove"] {
             let raw = format!(r#"{{"op":"{op}","external_id":"x"}}"#);
             assert!(
                 serde_json::from_str::<RemindersRequest>(&raw).is_err(),

@@ -99,6 +99,24 @@ impl Helper for FakeHelper {
                     }),
                 }
             }
+            RemindersRequest::UpdateReminder {
+                external_id,
+                title,
+                append_notes,
+                ..
+            } => match list.iter_mut().find(|r| &r.external_id == external_id) {
+                Some(r) => {
+                    r.title = title.clone();
+                    if let Some(extra) = append_notes {
+                        r.notes = format!("{}{extra}", r.notes);
+                    }
+                    Ok(RemindersResponse::UpdateReminder {})
+                }
+                None => Ok(RemindersResponse::Error {
+                    kind: "not_found".into(),
+                    message: String::new(),
+                }),
+            },
             RemindersRequest::ListLists => Ok(RemindersResponse::ListLists { count: 1 }),
             RemindersRequest::Authorization { .. } => unreachable!(),
         }
@@ -510,5 +528,74 @@ async fn a_restart_leaves_an_executing_proposal_untouched_and_reports_it() {
     assert_eq!(hasted::report_interrupted_executions(&rig.daemon.state), 1);
     let after = rig.daemon.state.store.get_proposal(&p.id).unwrap();
     assert_eq!(after.state, ProposalState::Executing);
+    rig.daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_human_creates_and_edits_reminders_directly_and_an_agent_cannot() {
+    let rig = boot().await;
+    release_and_sync(&rig).await;
+    let Response::Reminders { reminders } = human(
+        &rig,
+        RequestBody::RemindersList {
+            include_completed: true,
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    let id = reminders[0].reminder.id.clone();
+
+    // no approval step: the human's edit and new TODO run at once
+    let edit = RequestBody::ReminderEdit {
+        reminder_id: id.clone(),
+        title: "renamed".into(),
+        due: Some(1_800_000_000),
+        append_notes: Some("see the attached file".into()),
+    };
+    assert!(matches!(human(&rig, edit.clone()).await, Response::Done));
+    assert!(matches!(
+        human(
+            &rig,
+            RequestBody::ReminderNew {
+                title: "fresh".into(),
+                due: None,
+                notes: Some("n".into()),
+            }
+        )
+        .await,
+        Response::Done
+    ));
+    {
+        let list = rig.helper.reminders.lock().unwrap();
+        let edited = list.iter().find(|r| r.title == "renamed").unwrap();
+        assert!(edited.notes.ends_with("see the attached file"));
+        assert!(
+            edited.notes.starts_with("SECRET NOTES"),
+            "old notes are kept"
+        );
+        assert!(list.iter().any(|r| r.title == "fresh"));
+    }
+    // an empty title is refused, and an agent may do neither
+    assert_eq!(
+        code(
+            &human(
+                &rig,
+                RequestBody::ReminderNew {
+                    title: "  ".into(),
+                    due: None,
+                    notes: None
+                }
+            )
+            .await
+        ),
+        Some(ErrorCode::Validation)
+    );
+    let token = agent(&rig).await;
+    assert_eq!(
+        code(&call(&rig, &token, edit).await),
+        Some(ErrorCode::Denied)
+    );
     rig.daemon.shutdown().await;
 }

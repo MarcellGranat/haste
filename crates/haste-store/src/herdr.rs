@@ -138,8 +138,10 @@ impl Store {
     /// Add a tag to a thread. Returns `true` if it was added, `false` if it was already there.
     ///
     /// # Errors
-    /// [`StoreError::Validation`] for an invalid tag or one that is in no machine's label set,
-    /// [`StoreError::NotFound`] for a missing thread.
+    /// [`StoreError::Validation`] for an invalid tag, [`StoreError::NotFound`] for a missing
+    /// thread. Any valid label is accepted: a human may label a thread with a project that has no
+    /// Herdr workspace. Such a label never widens what a machine principal can read, because that
+    /// scope only matches the workspace labels on the machine itself.
     pub fn add_thread_tag(&self, thread_id: &str, tag: &str) -> StoreResult<bool> {
         let tag = ProjectTag::new(tag)
             .map_err(|e| StoreError::Validation(e.0.into()))?
@@ -147,11 +149,6 @@ impl Store {
             .to_owned();
         let id = thread_id.to_owned();
         self.write(move |conn| {
-            if !known(conn)?.contains(&tag) {
-                return Err(StoreError::Validation(format!(
-                    "'{tag}' is not a known project (workspace) label"
-                )));
-            }
             let current: Option<Option<String>> = conn
                 .query_row("SELECT scope_tags FROM threads WHERE id = ?1", [&id], |r| {
                     r.get(0)
@@ -260,14 +257,10 @@ mod tests {
     }
 
     #[test]
-    fn only_known_tags_can_be_added_and_adding_twice_is_a_no_op() {
+    fn any_valid_label_can_be_added_and_adding_twice_is_a_no_op() {
         let (_d, s) = test_store();
         let t = thread(&s);
         s.replace_machine_labels("m1", &labels(&["haste"])).unwrap();
-        assert!(matches!(
-            s.add_thread_tag(&t, "typo"),
-            Err(StoreError::Validation(_))
-        ));
         assert!(matches!(
             s.add_thread_tag(&t, "bad\u{7}"),
             Err(StoreError::Validation(_))
@@ -279,6 +272,9 @@ mod tests {
         assert!(s.add_thread_tag(&t, "haste").unwrap());
         assert!(!s.add_thread_tag(&t, "haste").unwrap());
         assert_eq!(s.thread_tags(&t).unwrap(), ["haste"]);
+        // a label with no Herdr workspace is fine for the human
+        assert!(s.add_thread_tag(&t, "free text").unwrap());
+        assert_eq!(s.thread_tags(&t).unwrap(), ["free text", "haste"]);
     }
 
     #[test]

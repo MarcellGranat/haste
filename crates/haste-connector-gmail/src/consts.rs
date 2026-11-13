@@ -5,9 +5,9 @@ use std::time::Duration;
 /// How far back the first sync looks.
 pub const BACKFILL_DAYS: u32 = 30;
 /// Upper bound on threads fetched by one backfill, however many match.
-pub const BACKFILL_MAX_THREADS: usize = 200;
+pub const BACKFILL_MAX_THREADS: usize = 60;
 /// Pause between two thread reads, so a backfill stays far below Gmail's per-user rate limit.
-pub const THREAD_GET_PACING: Duration = Duration::from_millis(120);
+pub const THREAD_GET_PACING: Duration = Duration::from_millis(250);
 /// A rate-limited thread read is retried this many times, doubling the wait from the base.
 pub const THREAD_RETRIES: u32 = 3;
 pub const THREAD_RETRY_BASE: Duration = Duration::from_secs(1);

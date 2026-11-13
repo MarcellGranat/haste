@@ -126,8 +126,12 @@ impl GmailConnector {
                 None => break,
             }
         }
-        let mut batch = self.fetch_threads(ids.iter().map(String::as_str)).await?;
-        batch.next_cursor = Some(Cursor(history_id));
+        let (mut batch, complete) = self
+            .fetch_threads(ids.iter().map(String::as_str), true)
+            .await?;
+        // Only a full backfill moves to incremental sync. A partial one keeps what it read (the
+        // newest threads) and the next cycle tries again.
+        batch.next_cursor = complete.then_some(Cursor(history_id));
         Ok(batch)
     }
 
@@ -152,18 +156,26 @@ impl GmailConnector {
     async fn fetch_threads<'a>(
         &self,
         ids: impl Iterator<Item = &'a str>,
-    ) -> Result<Batch, ConnectorError> {
+        partial_ok: bool,
+    ) -> Result<(Batch, bool), ConnectorError> {
         let mut batch = Batch::default();
         for id in ids {
             tokio::time::sleep(THREAD_GET_PACING).await;
             // A thread deleted since it was listed is simply skipped.
-            if let Some(api) = self.get_thread_patiently(id).await? {
+            let read = match self.get_thread_patiently(id).await {
+                // Rate limited for good: keep what was read (a backfill only), stop here.
+                Err(ConnectorError::Transient(_)) if partial_ok && !batch.threads.is_empty() => {
+                    return Ok((batch, false));
+                }
+                other => other?,
+            };
+            if let Some(api) = read {
                 let mapped = map_thread(&api);
                 batch.threads.push(mapped.thread);
                 batch.messages.extend(mapped.messages);
             }
         }
-        Ok(batch)
+        Ok((batch, true))
     }
 
     async fn delta(&self, cursor: Cursor) -> Result<Batch, ConnectorError> {
@@ -198,8 +210,8 @@ impl GmailConnector {
                 ..Batch::default()
             });
         }
-        let mut batch = self
-            .fetch_threads(changed.iter().map(String::as_str))
+        let (mut batch, _) = self
+            .fetch_threads(changed.iter().map(String::as_str), false)
             .await?;
         batch.next_cursor = Some(latest.map_or(cursor, Cursor));
         Ok(batch)

@@ -914,6 +914,7 @@ fn kind(body: &RequestBody) -> Kind {
         | RequestBody::TagAdd { .. }
         | RequestBody::TagRemove { .. }
         | RequestBody::TagList
+        | RequestBody::ThreadRefresh { .. }
         | RequestBody::ReminderNew { .. }
         | RequestBody::ReminderEdit { .. }
         | RequestBody::ReminderTagAdd { .. }

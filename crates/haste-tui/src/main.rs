@@ -343,12 +343,25 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                     view,
                     messages,
                     own,
-                }) => app.show_thread(view, messages, own),
+                }) => {
+                    let thread_id = view.thread.id.clone();
+                    app.show_thread(view, messages, own);
+                    // Ask for a fresh sync of this source (the daemon rate-limits it); the
+                    // reader reloads when the new messages arrive. A failure changes nothing.
+                    let _ = client.call(RequestBody::ThreadRefresh { thread_id });
+                }
                 other => {
                     app.status = describe(other)
                         .err()
                         .unwrap_or_else(|| "could not open the thread".into());
                 }
+            }
+        }
+        Effect::ReloadThread { thread_id } => {
+            if let Ok(Response::Thread { messages, .. }) =
+                client.call(RequestBody::ThreadShow { thread_id })
+            {
+                app.update_thread(messages);
             }
         }
         Effect::Mute { thread_id } => {

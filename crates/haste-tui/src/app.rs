@@ -159,6 +159,10 @@ pub enum Effect {
     OpenThread {
         thread_id: String,
     },
+    /// New messages arrived for the thread that is open: fetch it again, keeping the place.
+    ReloadThread {
+        thread_id: String,
+    },
     /// Hide a thread's sender from the TUI (the local `.haste_ignore` list).
     Mute {
         thread_id: String,
@@ -545,6 +549,16 @@ impl App {
     /// Daemon change events: proposals refresh the list, notices are shown to the human.
     pub fn on_event(&mut self, event: &Event) -> Option<Effect> {
         match event {
+            Event::ThreadChanged { thread_id }
+                if self
+                    .reader
+                    .as_ref()
+                    .is_some_and(|r| &r.view.thread.id == thread_id) =>
+            {
+                Some(Effect::ReloadThread {
+                    thread_id: thread_id.clone(),
+                })
+            }
             Event::ProposalChanged { .. } | Event::ThreadChanged { .. } => Some(Effect::Refresh),
             Event::Notice { message } => {
                 self.notices.push(message.clone());
@@ -1335,6 +1349,27 @@ impl App {
             own,
         });
         self.mode = Mode::Read;
+    }
+
+    /// The open thread was fetched again: take the new messages, keeping the selected message
+    /// (by id) where it is and leaving the selection alone when nothing changed.
+    pub fn update_thread(&mut self, mut messages: Vec<Message>) {
+        let Some(reader) = &mut self.reader else {
+            return;
+        };
+        messages.sort_by_key(|m| m.sent_at);
+        if messages.len() == reader.messages.len() {
+            return;
+        }
+        let was_last = reader.selected + 1 >= reader.messages.len();
+        let keep = reader.messages.get(reader.selected).map(|m| m.id.clone());
+        reader.selected = match keep.and_then(|id| messages.iter().position(|m| m.id == id)) {
+            // reading the newest message: follow the conversation
+            _ if was_last => messages.len().saturating_sub(1),
+            Some(i) => i,
+            None => reader.selected.min(messages.len().saturating_sub(1)),
+        };
+        reader.messages = messages;
     }
 
     fn close_reader(&mut self) {
@@ -2415,6 +2450,53 @@ mod tests {
         press(&mut app, "1");
         app.handle_key(Key::Tab);
         assert!(app.handle_key(Key::Enter).is_none());
+    }
+
+    #[test]
+    fn new_messages_reload_the_open_thread_and_keep_your_place() {
+        let mut app = inbox_app();
+        let view = app.threads[1].clone(); // thread t2
+        app.show_thread(
+            view,
+            vec![
+                message("m1", "a@x.com", "first", 10),
+                message("m2", "b@x.com", "second", 20),
+            ],
+            None,
+        );
+        let other = Event::ThreadChanged {
+            thread_id: "t1".into(),
+        };
+        assert_eq!(app.on_event(&other), Some(Effect::Refresh));
+        let mine = Event::ThreadChanged {
+            thread_id: "t2".into(),
+        };
+        assert_eq!(
+            app.on_event(&mine),
+            Some(Effect::ReloadThread {
+                thread_id: "t2".into()
+            })
+        );
+        // reading an older message: a new one arrives, the selection stays on the same message
+        press(&mut app, "k");
+        app.update_thread(vec![
+            message("m3", "c@x.com", "third", 30),
+            message("m1", "a@x.com", "first", 10),
+            message("m2", "b@x.com", "second", 20),
+        ]);
+        let reader = app.reader.as_ref().unwrap();
+        assert_eq!(reader.messages.len(), 3);
+        assert_eq!(reader.messages[reader.selected].id, "m1");
+        // reading the newest: the reader follows the conversation
+        press(&mut app, "G");
+        app.update_thread(vec![
+            message("m1", "a@x.com", "first", 10),
+            message("m2", "b@x.com", "second", 20),
+            message("m3", "c@x.com", "third", 30),
+            message("m4", "d@x.com", "fourth", 40),
+        ]);
+        let reader = app.reader.as_ref().unwrap();
+        assert_eq!(reader.messages[reader.selected].id, "m4");
     }
 
     #[test]

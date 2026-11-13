@@ -10,7 +10,7 @@ use haste_core::policy::PrincipalKind;
 use haste_core::proposal::{Payload, Proposal, ProposalState};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 /// Largest frame either side accepts.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
@@ -177,6 +177,10 @@ pub enum RequestBody {
     TagList,
     /// Agent status by machine, narrowed to what the caller may see.
     AgentList,
+    /// Human-only: ask for a fresh sync of the thread's source (the daemon rate-limits it).
+    ThreadRefresh {
+        thread_id: String,
+    },
     /// Human-only: create a reminder now (no approval: the human typed it).
     ReminderNew {
         title: String,

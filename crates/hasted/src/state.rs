@@ -96,7 +96,29 @@ pub struct State {
     /// Per-source wake-ups: releasing a source runs its first sync now instead of at the next
     /// tick.
     sync_wakers: Mutex<HashMap<Source, Arc<Notify>>>,
+    /// When each source was last woken by a thread being opened.
+    refreshed: Mutex<RefreshGate>,
 }
+
+/// Remembers when each source was last woken, so opening threads cannot hammer a provider.
+#[derive(Default)]
+pub(crate) struct RefreshGate(HashMap<Source, std::time::Instant>);
+
+impl RefreshGate {
+    /// True (and recorded) at most once per [`REFRESH_MIN_INTERVAL`] for a source.
+    fn due(&mut self, source: &Source, now: std::time::Instant) -> bool {
+        match self.0.get(source) {
+            Some(t) if now.duration_since(*t) < REFRESH_MIN_INTERVAL => false,
+            _ => {
+                self.0.insert(source.clone(), now);
+                true
+            }
+        }
+    }
+}
+
+/// The shortest time between two syncs asked for by opening threads of the same source.
+pub const REFRESH_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl State {
     pub(crate) fn new(store: Store, audit: AuditWriter, config: DaemonConfig) -> Self {
@@ -112,6 +134,7 @@ impl State {
             herdr: crate::herdr::HerdrState::default(),
             reminders_helper: RwLock::new(None),
             sync_wakers: Mutex::new(HashMap::new()),
+            refreshed: Mutex::new(RefreshGate::default()),
         }
     }
 
@@ -124,6 +147,15 @@ impl State {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Arc::clone(wakers.entry(source.clone()).or_default())
+    }
+
+    /// May a thread open wake this source's sync now? True at most once per
+    /// [`REFRESH_MIN_INTERVAL`]; the moment is recorded when it says yes.
+    pub fn refresh_due(&self, source: &Source) -> bool {
+        self.refreshed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .due(source, std::time::Instant::now())
     }
 
     /// Ask a source's sync loop to run a cycle now (a permit is kept if it is busy).
@@ -286,5 +318,22 @@ impl Hooks for State {
         self.publish(Event::Notice {
             message: message.to_owned(),
         });
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn a_source_is_woken_by_opening_threads_at_most_once_per_interval() {
+        let mut gate = RefreshGate::default();
+        let t0 = Instant::now();
+        assert!(gate.due(&Source::Whatsapp, t0));
+        assert!(!gate.due(&Source::Whatsapp, t0 + REFRESH_MIN_INTERVAL / 2));
+        // another source has its own clock
+        assert!(gate.due(&Source::Gmail, t0));
+        assert!(gate.due(&Source::Whatsapp, t0 + REFRESH_MIN_INTERVAL));
     }
 }

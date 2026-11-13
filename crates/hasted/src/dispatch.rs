@@ -80,6 +80,7 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::TagAdd { .. }
         | RequestBody::TagRemove { .. }
         | RequestBody::TagList
+        | RequestBody::ThreadRefresh { .. }
         | RequestBody::ReminderNew { .. }
         | RequestBody::ReminderEdit { .. }
         | RequestBody::ReminderTagAdd { .. }
@@ -105,6 +106,7 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::TagAdd { .. } => "tag_add",
         RequestBody::TagRemove { .. } => "tag_remove",
         RequestBody::TagList => "tag_list",
+        RequestBody::ThreadRefresh { .. } => "thread_refresh",
         RequestBody::ReminderNew { .. } => "reminder_new",
         RequestBody::ReminderEdit { .. } => "reminder_edit",
         RequestBody::ConnectorStatus => "connector_status",
@@ -334,6 +336,19 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
                     },
                     Err(e) => map_store(&e),
                 }
+            }
+            Ok(None) => err(ErrorCode::NotFound, "thread not found"),
+            Err(e) => map_store(&e),
+        },
+        RequestBody::ThreadRefresh { thread_id } => match state.store.get_thread(&thread_id) {
+            Ok(Some((thread, _))) => {
+                // Opening a thread may wake its source's sync, at most once per interval.
+                if state.connector_for(&thread.source).is_some()
+                    && state.refresh_due(&thread.source)
+                {
+                    state.wake_sync(&thread.source);
+                }
+                Response::Done
             }
             Ok(None) => err(ErrorCode::NotFound, "thread not found"),
             Err(e) => map_store(&e),

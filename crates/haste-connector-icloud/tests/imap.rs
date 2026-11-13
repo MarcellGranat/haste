@@ -107,12 +107,78 @@ impl Hooks for TestHooks {
 }
 
 #[test]
-fn capabilities_are_read_and_the_human_only_send() {
+fn capabilities_are_read_send_and_the_humans_archive() {
     let r = rig(&[]);
     let caps = r.connector.capabilities();
     // `send` is consulted only by the human path: the gate denies Action::Send to agents
-    assert!(caps.read && !caps.draft && caps.send && !caps.archive);
+    assert!(caps.read && !caps.draft && caps.send && caps.archive);
     assert_eq!(r.connector.source(), Source::Icloud);
+}
+
+#[tokio::test]
+async fn archiving_moves_the_threads_inbox_messages_to_the_archive_folder_and_nothing_else() {
+    use haste_core::connector::ArchiveTarget;
+    let r = rig_with(
+        state(
+            vec![
+                ("INBOX", 42, messages(&[1, 2, 3])),
+                ("Archive", 7, Vec::new()),
+            ],
+            PASSWORD,
+        ),
+        |_| {},
+    );
+    let uids = |r: &Rig, f: &str| -> Vec<u32> {
+        r.imap.state.lock().unwrap().folders[f]
+            .messages
+            .iter()
+            .map(|m| m.uid)
+            .collect()
+    };
+    let target = |ids: &[&str]| ArchiveTarget {
+        thread_external_id: "t".into(),
+        message_external_ids: ids.iter().map(|s| (*s).to_owned()).collect(),
+    };
+    // a recycled folder (other UIDVALIDITY) moves nothing
+    assert!(r
+        .connector
+        .archive_thread(&target(&["INBOX:99:1"]))
+        .await
+        .is_err());
+    assert_eq!(uids(&r, "INBOX"), vec![1, 2, 3]);
+    // ids of other folders or without the shape are left alone: nothing to do is an error
+    assert!(r
+        .connector
+        .archive_thread(&target(&["Sent Messages:42:1", "m1@example.org"]))
+        .await
+        .is_err());
+    assert_eq!(uids(&r, "INBOX"), vec![1, 2, 3]);
+    // the thread's two messages move; the third stays
+    r.connector
+        .archive_thread(&target(&["INBOX:42:1", "INBOX:42:2"]))
+        .await
+        .unwrap();
+    assert_eq!(uids(&r, "INBOX"), vec![3]);
+    assert_eq!(uids(&r, "Archive"), vec![1, 2]);
+    let cmds = commands(&r).join("\n");
+    assert!(
+        cmds.contains("UID MOVE 1,2 \"Archive\"") || cmds.contains("UID MOVE 1,2 Archive"),
+        "{cmds}"
+    );
+    assert!(!cmds.contains("STORE") && !cmds.contains("EXPUNGE") && !cmds.contains("DELETE"));
+    // a missing Archive folder is refused by the server and nothing is lost
+    let missing = rig_with(state(vec![("INBOX", 42, messages(&[1]))], PASSWORD), |_| {});
+    assert!(missing
+        .connector
+        .archive_thread(&target(&["INBOX:42:1"]))
+        .await
+        .is_err());
+    assert_eq!(
+        missing.imap.state.lock().unwrap().folders["INBOX"]
+            .messages
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]

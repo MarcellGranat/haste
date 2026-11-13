@@ -198,6 +198,45 @@ impl GmailClient {
         .await
     }
 
+    /// Take a thread out of the inbox: `threads.modify` removing the `INBOX` label, nothing else.
+    /// Nothing is deleted and the thread stays in All Mail.
+    ///
+    /// # Errors
+    /// `Other` when the token lacks the `gmail.modify` permission (sign in again) or the thread
+    /// is gone; otherwise a classified [`ConnectorError`].
+    pub async fn archive_thread(&self, id: &str) -> Result<(), ConnectorError> {
+        let token = self.tokens.access_token().await?;
+        let response = self
+            .http
+            .post(format!(
+                "{}/gmail/v1/users/me/threads/{id}/modify",
+                self.base
+            ))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "removeLabelIds": ["INBOX"] }))
+            .send()
+            .await
+            .map_err(|e| {
+                ConnectorError::Transient(format!(
+                    "gmail unreachable: {}",
+                    haste_google_oauth::errors::request_kind(&e)
+                ))
+            })?;
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+        match status {
+            200..=299 => Ok(()),
+            // an old token without the modify scope: ask for a fresh sign-in, do not trip anything
+            403 if body.contains("insufficient") || body.contains("ACCESS_TOKEN_SCOPE") => {
+                Err(ConnectorError::Other(
+                    "archiving needs the gmail.modify permission: run `haste connector gmail auth` again".into(),
+                ))
+            }
+            404 => Err(ConnectorError::Other("thread not found".into())),
+            _ => Err(classify(status, &body)),
+        }
+    }
+
     /// Headers only; used to thread a reply.
     ///
     /// # Errors

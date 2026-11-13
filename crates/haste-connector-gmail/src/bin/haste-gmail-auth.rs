@@ -75,7 +75,7 @@ async fn main() -> ExitCode {
 
     println!("Opening your browser. Google will warn that the app is unverified: that is expected");
     println!(
-        "for your own project. Choose Advanced, then continue, and approve the two Gmail scopes."
+        "for your own project. Choose Advanced, then continue, and approve the Gmail permissions (read, compose, and change labels)."
     );
     let open = |url: &str| {
         println!("If the browser does not open, visit:\n{url}");

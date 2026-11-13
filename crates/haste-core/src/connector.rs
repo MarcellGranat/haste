@@ -61,6 +61,14 @@ pub struct Batch {
     pub next_cursor: Option<Cursor>,
 }
 
+/// What an upstream archive acts on: the provider's thread id and the provider ids of the
+/// thread's stored messages (IMAP needs the messages, Gmail the thread).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArchiveTarget {
+    pub thread_external_id: String,
+    pub message_external_ids: Vec<String>,
+}
+
 /// The most attachments one send may carry (chats take one), and the most bytes in all.
 pub const MAX_SEND_ATTACHMENTS: usize = 5;
 pub const MAX_SEND_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
@@ -185,6 +193,15 @@ pub trait Connector: Send + Sync {
         &'a self,
         draft: &'a DraftToSend,
     ) -> BoxFuture<'a, Result<SendReceipt, ConnectorError>>;
+
+    /// Take a thread out of the provider's inbox (Gmail: remove the INBOX label; iCloud: move
+    /// the messages to the Archive folder). Nothing is deleted. Default: unsupported.
+    fn archive_thread<'a>(
+        &'a self,
+        _target: &'a ArchiveTarget,
+    ) -> BoxFuture<'a, Result<(), ConnectorError>> {
+        Box::pin(async { Err(ConnectorError::Unsupported("archive".into())) })
+    }
 
     /// Create a draft at the provider without sending it. `draft.thread_id` carries the
     /// provider's own thread id (the thread's `external_id`). Connectors without a `draft`
@@ -475,6 +492,30 @@ impl Guarded<'_> {
             }
             Err(e) => {
                 self.hooks.audit("draft.create", &source, "error");
+                Err(CallError::Connector(e))
+            }
+        }
+    }
+
+    /// Archive a thread upstream after the human asked for it (or approved the proposal). One
+    /// attempt, never retried: archiving again is harmless but a loop is not wanted. A missing
+    /// permission is an `Other` error and does not trip the circuit breaker.
+    ///
+    /// # Errors
+    /// See [`CallError`].
+    pub async fn archive_thread(&self, target: &ArchiveTarget) -> Result<(), CallError> {
+        self.precheck(self.connector.capabilities().archive, "thread.archive")?;
+        let source = self.connector.source();
+        match self.connector.archive_thread(target).await {
+            Ok(()) => {
+                self.hooks.audit("thread.archive", &source, "ok");
+                Ok(())
+            }
+            Err(e @ (ConnectorError::Challenge(_) | ConnectorError::Checkpoint(_))) => {
+                Err(self.trip("thread.archive", e))
+            }
+            Err(e) => {
+                self.hooks.audit("thread.archive", &source, "error");
                 Err(CallError::Connector(e))
             }
         }

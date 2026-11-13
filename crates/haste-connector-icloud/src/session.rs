@@ -94,6 +94,20 @@ pub trait MailSession {
     /// # Errors
     /// See [`ImapFailure`].
     fn append(&mut self, folder: &str, message: &[u8]) -> Result<(), ImapFailure>;
+    /// Move messages out of `folder` into `target` (`UID MOVE`: nothing is deleted, the messages
+    /// land in `target`). Opens `folder` read-write, and refuses when its UIDVALIDITY is not
+    /// `uid_validity`, so a recycled UID can never move the wrong message. The only other write
+    /// besides [`Self::append`]; only the human's archive uses it.
+    ///
+    /// # Errors
+    /// See [`ImapFailure`].
+    fn move_messages(
+        &mut self,
+        folder: &str,
+        uid_validity: u32,
+        uids: &[u32],
+        target: &str,
+    ) -> Result<(), ImapFailure>;
     fn logout(&mut self);
 }
 
@@ -118,6 +132,7 @@ enum Stage {
     FetchHeaders,
     FetchBody,
     Append,
+    Move,
 }
 
 impl Stage {
@@ -130,6 +145,7 @@ impl Stage {
             Self::FetchHeaders => "fetch headers",
             Self::FetchBody => "fetch body",
             Self::Append => "append",
+            Self::Move => "move",
         }
     }
 }
@@ -343,6 +359,30 @@ impl<T: Read + Write> MailSession for Imap<T> {
             .append_with_flags(folder, message, &[imap::types::Flag::Seen])
             .map_err(|e| classify(&e, Stage::Append))?;
         Ok(())
+    }
+
+    fn move_messages(
+        &mut self,
+        folder: &str,
+        uid_validity: u32,
+        uids: &[u32],
+        target: &str,
+    ) -> Result<(), ImapFailure> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let mailbox = self
+            .session
+            .select(folder)
+            .map_err(|e| classify(&e, Stage::Move))?;
+        if mailbox.uid_validity != Some(uid_validity) {
+            return Err(ImapFailure::Protocol(
+                "move: the folder changed since the last sync; sync again first".into(),
+            ));
+        }
+        self.session
+            .uid_mv(uid_set(uids), target)
+            .map_err(|e| classify(&e, Stage::Move))
     }
 
     fn logout(&mut self) {

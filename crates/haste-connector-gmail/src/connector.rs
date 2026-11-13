@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use haste_core::connector::{
-    Batch, BoxFuture, Capabilities, Connector, ConnectorError, Cursor, DraftReceipt, DraftToSend,
-    SendReceipt,
+    ArchiveTarget, Batch, BoxFuture, Capabilities, Connector, ConnectorError, Cursor, DraftReceipt,
+    DraftToSend, SendReceipt,
 };
 use haste_core::model::Source;
 use serde::{Deserialize, Serialize};
@@ -221,6 +221,10 @@ impl GmailConnector {
     /// A human send: the recipient, subject and body the human confirmed, exactly. One
     /// `messages.send` request, never retried; the approval-time draft is removed afterwards
     /// (best effort, once).
+    async fn archive(&self, target: &ArchiveTarget) -> Result<(), ConnectorError> {
+        self.client.archive_thread(&target.thread_external_id).await
+    }
+
     async fn send_message(&self, draft: &DraftToSend) -> Result<SendReceipt, ConnectorError> {
         let refused = |why: &str| ConnectorError::Other(format!("send refused: {why}"));
         let to = draft
@@ -346,7 +350,7 @@ impl Connector for GmailConnector {
             draft: true,
             // Consulted only by the human send path: agents are denied `Action::Send` by the gate.
             send: true,
-            archive: false,
+            archive: true,
             ..Default::default()
         }
     }
@@ -362,6 +366,13 @@ impl Connector for GmailConnector {
                 Some(c) => self.delta(c).await,
             }
         })
+    }
+
+    fn archive_thread<'a>(
+        &'a self,
+        target: &'a ArchiveTarget,
+    ) -> BoxFuture<'a, Result<(), ConnectorError>> {
+        Box::pin(self.archive(target))
     }
 
     fn send<'a>(

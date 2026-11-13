@@ -92,11 +92,11 @@ impl Hooks for TestHooks {
 }
 
 #[test]
-fn capabilities_are_read_draft_and_the_human_only_send() {
+fn capabilities_are_read_draft_send_and_the_humans_archive() {
     let c = GmailConnector::from_config(&config(), Arc::new(MemoryStore::default()));
     let caps = c.capabilities();
     // `send` is consulted only by the human path: the gate denies Action::Send to agents
-    assert!(caps.read && caps.draft && caps.send && !caps.archive);
+    assert!(caps.read && caps.draft && caps.send && caps.archive);
     assert_eq!(c.source(), Source::Gmail);
 }
 
@@ -398,7 +398,7 @@ async fn consent_flow_uses_loopback_pkce_and_returns_the_refresh_token() {
     let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
     assert!(q["redirect_uri"].starts_with("http://127.0.0.1:"));
     assert_eq!(q["code_challenge_method"], "S256");
-    assert_eq!(q["scope"].split(' ').count(), 2);
+    assert_eq!(q["scope"].split(' ').count(), 3);
     // The verifier sent to the token endpoint hashes to the challenge in the consent URL.
     let verifier = server
         .requests()
@@ -658,6 +658,53 @@ mod send {
     }
 
     #[tokio::test]
+    async fn archiving_removes_only_the_inbox_label_and_a_missing_permission_asks_for_a_new_sign_in(
+    ) {
+        use haste_core::connector::ArchiveTarget;
+        let target = ArchiveTarget {
+            thread_external_id: "t100".into(),
+            ..Default::default()
+        };
+        let ok = spawn(|r| match (r.method.as_str(), r.path.as_str()) {
+            (_, "/token") => (200, r#"{"access_token":"AT","expires_in":3600}"#.into()),
+            ("POST", "/gmail/v1/users/me/threads/t100/modify") => (200, "{}".into()),
+            _ => (404, "{}".into()),
+        })
+        .await;
+        connector(&ok, store_with_refresh())
+            .archive_thread(&target)
+            .await
+            .unwrap();
+        let req = ok
+            .requests()
+            .into_iter()
+            .find(|r| r.path.ends_with("/modify"))
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&req.body).unwrap(),
+            serde_json::json!({ "removeLabelIds": ["INBOX"] }),
+            "exactly one change: INBOX off, nothing added, nothing deleted"
+        );
+        // an old token without the scope: a plain error naming the fix, not a checkpoint
+        let old = spawn(|r| match r.path.as_str() {
+            "/token" => (200, r#"{"access_token":"AT","expires_in":3600}"#.into()),
+            _ => (
+                403,
+                r#"{"error":{"message":"Request had insufficient authentication scopes.","errors":[{"reason":"insufficientPermissions"}]}}"#.into(),
+            ),
+        })
+        .await;
+        let err = connector(&old, store_with_refresh())
+            .archive_thread(&target)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ConnectorError::Other(m) if m.contains("gmail.modify")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_rejected_refresh_token_means_nothing_was_sent() {
         let server = spawn(|r| match r.path.as_str() {
             "/token" => (400, r#"{"error":"invalid_grant"}"#.into()),
@@ -693,18 +740,19 @@ mod send {
     }
 
     #[test]
-    fn gmail_declares_send_and_still_asks_for_exactly_the_same_two_scopes() {
+    fn gmail_declares_send_and_archive_and_asks_for_exactly_three_scopes() {
         let server = tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(spawn(|_| (404, "{}".into())));
         let c = connector(&server, store_with_refresh());
-        assert!(c.capabilities().send && c.capabilities().draft && !c.capabilities().archive);
+        assert!(c.capabilities().send && c.capabilities().draft && c.capabilities().archive);
         assert_eq!(c.own_address().as_deref(), Some("me@example.com"));
         assert_eq!(
             haste_connector_gmail::consts::SCOPES,
             [
                 "https://www.googleapis.com/auth/gmail.readonly",
-                "https://www.googleapis.com/auth/gmail.compose"
+                "https://www.googleapis.com/auth/gmail.compose",
+                "https://www.googleapis.com/auth/gmail.modify"
             ]
         );
     }

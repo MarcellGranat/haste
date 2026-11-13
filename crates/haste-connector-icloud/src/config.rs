@@ -15,6 +15,8 @@ pub const DEFAULT_SMTP_HOST: &str = "smtp.mail.me.com";
 pub const DEFAULT_SMTP_PORT: u16 = 587;
 /// Where a copy of a sent message is filed over IMAP.
 pub const DEFAULT_SENT_FOLDER: &str = "Sent Messages";
+/// Where an archived message is moved over IMAP (iCloud's own Archive folder).
+pub const DEFAULT_ARCHIVE_FOLDER: &str = "Archive";
 /// Newest messages fetched by a first sync (or after a UIDVALIDITY change) unless configured.
 pub const DEFAULT_BACKFILL: usize = 200;
 /// Seconds between scheduled syncs.
@@ -34,6 +36,10 @@ fn default_smtp_host() -> String {
 
 const fn default_smtp_port() -> u16 {
     DEFAULT_SMTP_PORT
+}
+
+fn default_archive_folder() -> String {
+    DEFAULT_ARCHIVE_FOLDER.to_owned()
 }
 
 fn default_sent_folder() -> String {
@@ -89,6 +95,9 @@ pub struct IcloudConfig {
     /// The folder a copy of each sent message is filed in.
     #[serde(default = "default_sent_folder")]
     pub sent_folder: String,
+    /// The folder the human's archive moves mail to.
+    #[serde(default = "default_archive_folder")]
+    pub archive_folder: String,
     /// File a copy in `sent_folder` after a successful send. Turn off if iCloud already files
     /// the submissions itself (the live spike decides), or you would get duplicates.
     #[serde(default = "default_true")]
@@ -107,6 +116,7 @@ impl IcloudConfig {
             smtp_host: default_smtp_host(),
             smtp_port: default_smtp_port(),
             sent_folder: default_sent_folder(),
+            archive_folder: default_archive_folder(),
             append_sent: true,
         }
     }

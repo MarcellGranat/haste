@@ -226,13 +226,18 @@ fn handle(stream: TcpStream, state: &Arc<Mutex<FakeState>>) {
                     format!("{tag} NO [AUTHENTICATIONFAILED] Invalid credentials\r\n").into_bytes()
                 }
             }
-            "EXAMINE" => {
+            "EXAMINE" | "SELECT" => {
                 let name = rest.trim_matches('"').to_owned();
+                let mode = if verb == "SELECT" {
+                    "[READ-WRITE] SELECT"
+                } else {
+                    "[READ-ONLY] EXAMINE"
+                };
                 match st.folders.get(&name) {
                     Some(f) => {
                         selected = Some(name);
                         format!(
-                            "* FLAGS (\\Seen \\Answered)\r\n* {} EXISTS\r\n* 0 RECENT\r\n* OK [UIDVALIDITY {}] valid\r\n* OK [UIDNEXT {}] next\r\n{tag} OK [READ-ONLY] EXAMINE completed\r\n",
+                            "* FLAGS (\\Seen \\Answered)\r\n* {} EXISTS\r\n* 0 RECENT\r\n* OK [UIDVALIDITY {}] valid\r\n* OK [UIDNEXT {}] next\r\n{tag} OK {mode} completed\r\n",
                             f.messages.len(),
                             f.uid_validity,
                             f.messages.iter().map(|m| m.uid).max().unwrap_or(0) + 1
@@ -240,6 +245,34 @@ fn handle(stream: TcpStream, state: &Arc<Mutex<FakeState>>) {
                         .into_bytes()
                     }
                     None => format!("{tag} NO [NONEXISTENT] no such mailbox\r\n").into_bytes(),
+                }
+            }
+            "UID" if rest.to_uppercase().starts_with("MOVE") => {
+                // `MOVE <uid set> "<folder>"`: file the messages in the target, drop them here
+                let mut args = rest[4..].trim().splitn(2, ' ');
+                let set = args.next().unwrap_or("").to_owned();
+                let target = args.next().unwrap_or("").trim_matches('"').to_owned();
+                let from = selected.clone().unwrap_or_default();
+                if !st.folders.contains_key(&target) {
+                    format!("{tag} NO [TRYCREATE] no such mailbox\r\n").into_bytes()
+                } else {
+                    let present: Vec<u32> = st
+                        .folders
+                        .get(&from)
+                        .map(|f| f.messages.iter().map(|m| m.uid).collect())
+                        .unwrap_or_default();
+                    let uids = select_uids(&set, &present);
+                    let mut moved = Vec::new();
+                    if let Some(f) = st.folders.get_mut(&from) {
+                        let (gone, kept): (Vec<_>, Vec<_>) =
+                            f.messages.drain(..).partition(|m| uids.contains(&m.uid));
+                        f.messages = kept;
+                        moved = gone;
+                    }
+                    if let Some(f) = st.folders.get_mut(&target) {
+                        f.messages.extend(moved);
+                    }
+                    format!("{tag} OK MOVE completed\r\n").into_bytes()
                 }
             }
             "UID" if rest.to_uppercase().starts_with("SEARCH") => {

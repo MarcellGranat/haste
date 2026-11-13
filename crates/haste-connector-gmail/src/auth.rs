@@ -28,14 +28,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gmail_asks_for_exactly_readonly_and_compose() {
+    fn gmail_asks_for_exactly_readonly_compose_and_modify() {
         assert_eq!(
             SCOPES,
             [
                 "https://www.googleapis.com/auth/gmail.readonly",
-                "https://www.googleapis.com/auth/gmail.compose"
+                "https://www.googleapis.com/auth/gmail.compose",
+                "https://www.googleapis.com/auth/gmail.modify"
             ]
         );
-        assert!(SCOPES.iter().all(|s| !s.contains("gmail.modify")));
+        // never the full-mailbox scope, which can delete permanently
+        assert!(SCOPES.iter().all(|s| !s.ends_with("mail.google.com/")));
     }
 }

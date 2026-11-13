@@ -126,6 +126,18 @@ holds only the client id, secret and your address (mode `0600`). If the token is
 (`invalid_grant`), the connector engages its kill switch and notifies you: run the auth command
 again, then release the connector.
 
+### Archiving (human only)
+
+`e` archives a thread for real. Gmail: the thread leaves the inbox (`threads.modify` removes the
+`INBOX` label and changes nothing else; it stays in All Mail). iCloud: the thread's inbox
+messages are moved to the `Archive` folder with `UID MOVE` (change the folder with
+`archive_folder` in `icloud.json`; nothing is deleted). It runs at the provider first and is
+recorded here only when that worked; if the mailbox refuses, the thread stays where it was and the
+reason shows in the status line. Approving an agent's archive proposal does the same. Chats are
+archived here only. Gmail needs the extra `gmail.modify` permission, so after upgrading run
+`haste connector gmail auth` once more. Only the primary inbox is read: Promotions, Social,
+Updates, Forums, spam and other folders are not loaded.
+
 ### Sending attachments (human only)
 
 In the TUI, `r` opens the reply editor under the thread; `Ctrl-F` attaches files (up to 5, 10 MB

@@ -189,6 +189,15 @@ mod tests {
     }
 
     impl MailSession for Fake {
+        fn move_messages(
+            &mut self,
+            _folder: &str,
+            _uid_validity: u32,
+            _uids: &[u32],
+            _target: &str,
+        ) -> Result<(), ImapFailure> {
+            Err(ImapFailure::Protocol("not used".into()))
+        }
         fn examine(&mut self, folder: &str) -> Result<FolderInfo, ImapFailure> {
             self.folders
                 .get(folder)

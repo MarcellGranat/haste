@@ -18,8 +18,10 @@ pub const GMAIL_SYNC_INTERVAL_SECS: u64 = 300;
 
 pub const SCOPE_READONLY: &str = "https://www.googleapis.com/auth/gmail.readonly";
 pub const SCOPE_COMPOSE: &str = "https://www.googleapis.com/auth/gmail.compose";
-/// Exactly these two scopes; nothing that can modify, archive or delete.
-pub const SCOPES: [&str; 2] = [SCOPE_READONLY, SCOPE_COMPOSE];
+/// Read, compose, and change labels (the human's archive removes INBOX). `gmail.modify` can
+/// also trash, but the connector only ever calls `threads.modify` with `removeLabelIds: INBOX`.
+pub const SCOPE_MODIFY: &str = "https://www.googleapis.com/auth/gmail.modify";
+pub const SCOPES: [&str; 3] = [SCOPE_READONLY, SCOPE_COMPOSE, SCOPE_MODIFY];
 
 pub const KEYCHAIN_SERVICE: &str = "com.haste.gmail";
 pub const API_BASE: &str = "https://gmail.googleapis.com";

@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use haste_core::connector::{
-    Batch, BoxFuture, Capabilities, Connector, ConnectorError, Cursor, DraftToSend, SendReceipt,
+    ArchiveTarget, Batch, BoxFuture, Capabilities, Connector, ConnectorError, Cursor, DraftToSend,
+    SendReceipt,
 };
 use haste_core::model::Source;
 
@@ -141,7 +142,8 @@ impl Connector for IcloudConnector {
             draft: false,
             // Consulted only by the human send path: agents are denied `Action::Send` by the gate.
             send: true,
-            archive: false,
+            // the human's archive moves mail to the Archive folder; agents have no path to it
+            archive: true,
             ..Default::default()
         }
     }
@@ -162,6 +164,71 @@ impl Connector for IcloudConnector {
 
     fn own_address(&self) -> Option<String> {
         Some(self.config.address.clone())
+    }
+
+    /// The human's archive: `UID MOVE` the thread's INBOX messages into the Archive folder, one
+    /// session, one attempt. Messages of other folders and ids that do not parse are left alone.
+    fn archive_thread<'a>(
+        &'a self,
+        target: &'a ArchiveTarget,
+    ) -> BoxFuture<'a, Result<(), ConnectorError>> {
+        Box::pin(async move {
+            let password = match self.secrets.get(&self.config.address) {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    return Err(ConnectorError::Checkpoint(
+                        "no app-specific password stored; run the iCloud auth verb".into(),
+                    ))
+                }
+                Err(_) => return Err(ConnectorError::Other("keychain unavailable".into())),
+            };
+            let (config, opener) = (self.config.clone(), Arc::clone(&self.opener));
+            let ids = target.message_external_ids.clone();
+            tokio::task::spawn_blocking(move || {
+                // ids look like `INBOX:<uidvalidity>:<uid>`
+                let mut by_validity: std::collections::BTreeMap<u32, Vec<u32>> =
+                    std::collections::BTreeMap::new();
+                for id in &ids {
+                    let mut parts = id.rsplitn(3, ':');
+                    let (uid, validity, folder) = (parts.next(), parts.next(), parts.next());
+                    if let (Some(uid), Some(validity), Some(folder)) = (
+                        uid.and_then(|u| u.parse::<u32>().ok()),
+                        validity.and_then(|v| v.parse::<u32>().ok()),
+                        folder,
+                    ) {
+                        if folder == crate::config::DEFAULT_FOLDER {
+                            by_validity.entry(validity).or_default().push(uid);
+                        }
+                    }
+                }
+                if by_validity.is_empty() {
+                    return Err(ConnectorError::Other(
+                        "no inbox messages of this thread to archive".into(),
+                    ));
+                }
+                let mut session = opener
+                    .open(&config, &password)
+                    .map_err(to_connector_error)?;
+                let mut result = Ok(());
+                for (validity, uids) in &by_validity {
+                    result = session
+                        .move_messages(
+                            crate::config::DEFAULT_FOLDER,
+                            *validity,
+                            uids,
+                            &config.archive_folder,
+                        )
+                        .map_err(to_connector_error);
+                    if result.is_err() {
+                        break;
+                    }
+                }
+                session.logout();
+                result
+            })
+            .await
+            .unwrap_or_else(|_| Err(ConnectorError::Other("archive task failed".into())))
+        })
     }
 
     /// A human send: compose, submit over SMTP exactly once, then file one copy in the Sent

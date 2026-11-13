@@ -30,11 +30,15 @@ struct Harness {
     connector: Arc<dyn Connector>,
     human: String,
     disabled: Arc<AtomicBool>,
+    /// Gmail answers `threads.modify` with "insufficient permissions" (an old token).
+    no_modify: Arc<AtomicBool>,
 }
 
 async fn boot() -> Harness {
     let disabled = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&disabled);
+    let no_modify = Arc::new(AtomicBool::new(false));
+    let no_modify_flag = Arc::clone(&no_modify);
     let google = spawn(move |r: &Recorded| {
         if r.path == "/token" {
             return (200, r#"{"access_token":"AT-SECRET","expires_in":3600}"#.into());
@@ -47,6 +51,13 @@ async fn boot() -> Harness {
             ("GET", "/gmail/v1/users/me/threads") => (200, r#"{"threads":[{"id":"t100"}]}"#.into()),
             ("GET", "/gmail/v1/users/me/threads/t100") => (200, THREAD_FULL.into()),
             ("GET", "/gmail/v1/users/me/history") => (200, r#"{"historyId":"900"}"#.into()),
+            ("POST", "/gmail/v1/users/me/threads/t100/modify") => {
+                if no_modify_flag.load(Ordering::SeqCst) {
+                    (403, r#"{"error":{"message":"insufficient authentication scopes","errors":[{"reason":"insufficientPermissions"}]}}"#.into())
+                } else {
+                    (200, "{}".into())
+                }
+            }
             ("POST", "/gmail/v1/users/me/drafts") => (200, r#"{"id":"draft-1"}"#.into()),
             ("POST", "/gmail/v1/users/me/messages/send") => (200, r#"{"id":"sent-1"}"#.into()),
             ("DELETE", "/gmail/v1/users/me/drafts/draft-1") => (200, "{}".into()),
@@ -86,6 +97,7 @@ async fn boot() -> Harness {
         connector,
         human,
         disabled,
+        no_modify,
     }
 }
 
@@ -520,6 +532,53 @@ async fn only_the_human_can_attach_files_and_they_go_out_in_a_multipart_message(
     let log = audit(&h);
     assert!(log.contains("attachments=1"));
     assert!(!log.contains("report.pdf"));
+    h.daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn archiving_a_gmail_thread_leaves_the_inbox_first_and_only_then_here() {
+    let h = boot().await;
+    let thread = synced_thread(&h).await;
+    let agent = register(&h, "agent-a", PrincipalKind::Agent).await;
+    let archive = |t: &str| RequestBody::TriageSet {
+        thread_id: t.to_owned(),
+        priority: None,
+        set_aside: None,
+        snoozed_until: None,
+        archived: Some(true),
+    };
+    let modifies = |h: &Harness| h.google.count("/gmail/v1/users/me/threads/t100/modify");
+    let archived = |h: &Harness| {
+        h.daemon
+            .state
+            .store
+            .get_thread(&thread)
+            .unwrap()
+            .unwrap()
+            .1
+            .archived
+    };
+
+    // an agent cannot archive at all
+    assert_eq!(
+        code(&call_with(&h, &agent, archive(&thread)).await),
+        Some(ErrorCode::Denied)
+    );
+    assert_eq!(modifies(&h), 0);
+
+    // an old token (no modify permission): refused with the fix, nothing archived, no breaker
+    h.no_modify.store(true, Ordering::SeqCst);
+    let refused = human(&h, archive(&thread)).await;
+    assert_eq!(code(&refused), Some(ErrorCode::Denied));
+    assert!(!archived(&h));
+    assert!(audit(&h).contains(r#""action":"thread.archive","outcome":"failed""#));
+    h.no_modify.store(false, Ordering::SeqCst);
+
+    // with the permission: removed from the Gmail inbox, then archived here
+    assert!(matches!(human(&h, archive(&thread)).await, Response::Done));
+    assert!(archived(&h));
+    assert_eq!(modifies(&h), 2, "one refused attempt, one that worked");
+    assert!(audit(&h).contains("archived_upstream"));
     h.daemon.shutdown().await;
 }
 

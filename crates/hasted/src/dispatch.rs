@@ -469,6 +469,16 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             proposal_id,
             acknowledge_stale,
         } => {
+            // Approving an archive proposal archives for real: the provider first, then here.
+            if let Ok(p) = state.store.get_proposal(&proposal_id) {
+                if matches!(p.payload, Payload::Archive) {
+                    if let Some(thread_id) = &p.source_thread_id {
+                        if let Err(response) = archive_upstream(state, principal, thread_id) {
+                            return *response;
+                        }
+                    }
+                }
+            }
             match state
                 .store
                 .approve_proposal(&proposal_id, acknowledge_stale, now)
@@ -1245,6 +1255,81 @@ fn resolve_hints(state: &State, hints: Option<&Hints>) -> (Option<String>, Optio
 /// Human-only: add or remove a project tag. Every outcome is audited with a reason code.
 /// Human-only triage write. Local state only: no connector is called, thread content is not
 /// touched, and the audit row names the fields changed (labels), never the thread's text.
+/// Take a thread out of the provider's inbox, when its source can. Sources without an archive
+/// capability (chats) are archived here only. Refusals carry a fixed reason, never a name.
+fn archive_upstream(
+    state: &State,
+    actor: &Principal,
+    thread_id: &str,
+) -> Result<(), Box<Response>> {
+    let fail = |code: ErrorCode, msg: &str| Box::new(err(code, msg));
+    let thread = match state.store.get_thread(thread_id) {
+        Ok(Some((t, _))) => t,
+        Ok(None) => return Err(fail(ErrorCode::NotFound, "thread not found")),
+        Err(e) => return Err(Box::new(map_store(&e))),
+    };
+    let Some(connector) = state.connector_for(&thread.source) else {
+        return Ok(());
+    };
+    if !connector.capabilities().archive {
+        return Ok(());
+    }
+    let messages = state
+        .store
+        .messages_for_thread(thread_id)
+        .map_err(|e| Box::new(map_store(&e)))?;
+    let target = haste_core::connector::ArchiveTarget {
+        thread_external_id: thread.external_id.clone(),
+        message_external_ids: messages.iter().map(|m| m.external_id.clone()).collect(),
+    };
+    let guard = Guarded {
+        connector: connector.as_ref(),
+        hooks: state,
+    };
+    let outcome = tokio::runtime::Handle::current().block_on(guard.archive_thread(&target));
+    match outcome {
+        Ok(()) => {
+            state.audit(
+                &actor.id,
+                "thread.archive",
+                "archived_upstream",
+                Some(thread_id),
+                Some(&format!("source={}", thread.source.as_name())),
+            );
+            Ok(())
+        }
+        Err(e) => {
+            let (code, reason) = match &e {
+                CallError::KillSwitchEngaged => (
+                    ErrorCode::Denied,
+                    "the connector is stopped; release it to archive in the mailbox",
+                ),
+                CallError::BreakerOpened(_) => (ErrorCode::Denied, "circuit_breaker"),
+                CallError::Connector(ConnectorError::Other(m))
+                    if m.contains("gmail.modify") =>
+                {
+                    (
+                        ErrorCode::Denied,
+                        "Gmail needs the new permission: run `haste connector gmail auth`, restart hasted",
+                    )
+                }
+                CallError::Connector(ConnectorError::Transient(_)) => {
+                    (ErrorCode::Internal, "the mail server could not be reached")
+                }
+                _ => (ErrorCode::Internal, "the mailbox refused the archive"),
+            };
+            state.audit(
+                &actor.id,
+                "thread.archive",
+                "failed",
+                Some(thread_id),
+                Some(&format!("source={}", thread.source.as_name())),
+            );
+            Err(fail(code, reason))
+        }
+    }
+}
+
 fn triage_set(
     state: &State,
     actor: &Principal,
@@ -1260,6 +1345,13 @@ fn triage_set(
     if let Some(p) = update.priority {
         if !(0..=MAX_TRIAGE_PRIORITY).contains(&p) {
             return err(ErrorCode::Validation, "priority out of range");
+        }
+    }
+    // Archiving a mail thread is real: it leaves the provider's inbox first, and only when that
+    // worked is it archived here too. A refusal leaves everything as it was.
+    if update.archived == Some(true) {
+        if let Err(response) = archive_upstream(state, actor, thread_id) {
+            return *response;
         }
     }
     if let Err(e) = state.store.set_triage(

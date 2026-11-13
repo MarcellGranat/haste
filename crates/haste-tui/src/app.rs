@@ -1737,6 +1737,7 @@ mod tests {
             },
             triage: haste_core::model::Triage::new(id, haste_core::model::ObjectKind::Thread),
             tags: vec![],
+            last: None,
         }
     }
 

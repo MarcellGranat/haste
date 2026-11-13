@@ -278,6 +278,29 @@ impl Store {
         })
     }
 
+    /// Sender and body of the newest message of every thread (the caller shortens the body).
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn last_messages(
+        &self,
+    ) -> StoreResult<std::collections::HashMap<String, (Option<String>, String)>> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT m.thread_id, m.sender_identifier, m.body_text FROM messages m \
+                 WHERE m.id = (SELECT m2.id FROM messages m2 WHERE m2.thread_id = m.thread_id \
+                               ORDER BY m2.sent_at DESC, m2.id DESC LIMIT 1)",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    (r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?),
+                ))
+            })?;
+            Ok(rows.collect::<Result<std::collections::HashMap<_, _>, _>>()?)
+        })
+    }
+
     /// Unified listing across sources, newest first. Archived and snoozed are hidden by default.
     ///
     /// # Errors

@@ -210,21 +210,74 @@ fn human_duration(secs: i64) -> String {
     }
 }
 
+/// One character per channel, plain Unicode so it draws in any terminal font.
+#[must_use]
+pub fn source_icon(source: &str) -> &'static str {
+    match source {
+        "gmail" => "✉",
+        "icloud" => "☁",
+        "whatsapp" => "✆",
+        "messenger" => "◉",
+        "imessage" => "✎",
+        _ => "•",
+    }
+}
+
 fn thread_line(t: &ThreadView, now: i64) -> ListItem<'static> {
     let source = t.thread.source.as_name();
     let star = if t.triage.priority > 0 { "★" } else { " " };
-    let aside = if t.triage.set_aside { " ◌" } else { "" };
+    let aside = if t.triage.set_aside { "◌ " } else { "" };
     let age = human_duration(now.saturating_sub(t.thread.last_activity_at));
-    ListItem::new(Line::from(vec![
+    let is_mail = inbox::is_mail(&source);
+    // Mail: who wrote the last message, then the subject. Chats: the chat name is the subject.
+    let sender = t
+        .last
+        .as_ref()
+        .and_then(|l| l.sender.as_deref())
+        .map(inbox::short_sender)
+        .unwrap_or_default();
+    let mut spans = vec![
         Span::styled(format!("{star} "), Style::new().fg(theme::PRIORITY)),
         Span::styled(
-            format!("{source:<10}"),
+            format!("{} ", source_icon(&source)),
             Style::new().fg(theme::channel_colour(&source)),
         ),
-        Span::styled(t.thread.subject.clone(), Style::new().fg(theme::UNREAD)),
-        Span::styled(aside.to_owned(), Style::new().fg(theme::MUTED)),
-        Span::styled(format!("  {age}"), Style::new().fg(theme::MUTED)),
-    ]))
+    ];
+    if is_mail && !sender.is_empty() {
+        spans.push(Span::styled(
+            format!("{sender} "),
+            Style::new().fg(theme::SUBTEXT0),
+        ));
+    }
+    spans.push(Span::styled(
+        t.thread.subject.clone(),
+        Style::new().fg(theme::UNREAD),
+    ));
+    if let Some(last) = &t.last {
+        let who = if is_mail {
+            String::new()
+        } else {
+            last.sender
+                .as_deref()
+                .map(inbox::short_sender)
+                .map(|s| format!("{s}: "))
+                .unwrap_or_default()
+        };
+        spans.push(Span::styled(
+            format!("  {aside}{who}{}", inbox::sanitize(&last.snippet)),
+            Style::new().fg(theme::MUTED),
+        ));
+    } else if !aside.is_empty() {
+        spans.push(Span::styled(
+            format!(" {aside}"),
+            Style::new().fg(theme::MUTED),
+        ));
+    }
+    spans.push(Span::styled(
+        format!("  {age}"),
+        Style::new().fg(theme::MUTED),
+    ));
+    ListItem::new(Line::from(spans))
 }
 
 fn filter_title(app: &App, what: &str) -> String {
@@ -798,6 +851,7 @@ mod tests {
                         ),
                         thread: t,
                         tags: vec![],
+                        last: None,
                     }
                 })
                 .collect(),
@@ -829,6 +883,7 @@ mod tests {
             },
             triage: haste_core::model::Triage::new("t1", haste_core::model::ObjectKind::Thread),
             tags: vec![],
+            last: None,
         };
         app.show_thread(view, messages);
     }

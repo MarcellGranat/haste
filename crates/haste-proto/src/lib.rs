@@ -297,6 +297,16 @@ pub struct ThreadView {
     /// Project tags (herdr workspace labels).
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Newest message of the thread, for the list preview.
+    #[serde(default)]
+    pub last: Option<LastMessage>,
+}
+
+/// Sender and the first words of a thread's newest message (a list preview, never the full text).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastMessage {
+    pub sender: Option<String>,
+    pub snippet: String,
 }
 
 /// One herdr machine as the daemon sees it.

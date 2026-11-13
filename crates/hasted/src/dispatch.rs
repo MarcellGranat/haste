@@ -278,6 +278,7 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             };
             let tags = state.store.all_thread_tags().unwrap_or_default();
             let machine_labels = machine_labels_for(state, principal);
+            let lasts = state.store.last_messages().unwrap_or_default();
             match state.store.list_threads(&filter) {
                 Ok(rows) => Response::Threads {
                     threads: rows
@@ -287,6 +288,12 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
                             // The one scope filter for thread reads: a machine sees only its projects.
                             visible_to(principal, &own, machine_labels.as_ref()).then_some(
                                 ThreadView {
+                                    last: lasts.get(&thread.id).map(|(sender, body)| {
+                                        haste_proto::LastMessage {
+                                            sender: sender.clone(),
+                                            snippet: snippet(body),
+                                        }
+                                    }),
                                     thread,
                                     triage,
                                     tags: own,
@@ -312,6 +319,7 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
                             thread,
                             triage,
                             tags: own,
+                            last: None,
                         },
                         messages,
                     },
@@ -2269,4 +2277,10 @@ fn send(
             }
         },
     }
+}
+
+/// The first words of a message body on one line (a list preview).
+fn snippet(body: &str) -> String {
+    let one_line: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    one_line.chars().take(160).collect()
 }

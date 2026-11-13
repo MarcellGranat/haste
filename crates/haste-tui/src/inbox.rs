@@ -24,6 +24,21 @@ pub fn is_mail(source: &str) -> bool {
     matches!(source, "gmail" | "icloud")
 }
 
+/// A sender for a list row: the display name when the identifier is `Name <addr>`, else the part
+/// before the `@`, else the whole identifier.
+#[must_use]
+pub fn short_sender(id: &str) -> String {
+    let id = id.trim();
+    if let Some((name, _)) = id.split_once('<') {
+        let name = name.trim().trim_matches('"');
+        if !name.is_empty() {
+            return name.to_owned();
+        }
+    }
+    let bare = id.trim_matches(|c| c == '<' || c == '>');
+    bare.split('@').next().unwrap_or(bare).to_owned()
+}
+
 /// What the mute list is matched against: the thread's senders, and for a chat also its name.
 #[must_use]
 pub fn senders(t: &ThreadView) -> Vec<&str> {
@@ -304,6 +319,7 @@ mod tests {
             },
             triage,
             tags: vec![],
+            last: None,
         }
     }
 
@@ -438,6 +454,13 @@ mod tests {
         assert_eq!(wrap("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
         assert_eq!(wrap("é é é é", 3), vec!["é é", "é é"]);
         assert!(wrap("", 5) == vec![String::new()]);
+    }
+
+    #[test]
+    fn short_senders() {
+        assert_eq!(short_sender("Ada Lovelace <ada@x.org>"), "Ada Lovelace");
+        assert_eq!(short_sender("ada@x.org"), "ada");
+        assert_eq!(short_sender("+36301234567"), "+36301234567");
     }
 
     #[test]

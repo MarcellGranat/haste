@@ -87,6 +87,8 @@ pub struct Reader {
     pub selected: usize,
     /// The account's own address (mail), to tell which messages are yours.
     pub own: Option<String>,
+    /// Messages (by id) opened in full: their quoted history and recipient lists are shown.
+    pub expanded: std::collections::HashSet<String>,
 }
 
 /// Lines a page key moves in the reader.
@@ -1347,6 +1349,7 @@ impl App {
             scroll: Cell::new(0),
             selected,
             own,
+            expanded: std::collections::HashSet::new(),
         });
         self.mode = Mode::Read;
     }
@@ -1394,6 +1397,13 @@ impl App {
             Key::Char('b' | 'u') => reader.selected = step(reader.selected, -READER_PAGE),
             Key::Char('g' | '0') => reader.selected = 0,
             Key::Char('G') => reader.selected = last,
+            Key::Char('x') => {
+                if let Some(id) = reader.messages.get(reader.selected).map(|m| m.id.clone()) {
+                    if !reader.expanded.remove(&id) {
+                        reader.expanded.insert(id);
+                    }
+                }
+            }
             Key::Char('o') => {
                 let url = reader.messages.get(reader.selected).and_then(|m| {
                     crate::chat::links(&inbox::sanitize(&m.body_text))
@@ -1557,6 +1567,14 @@ impl App {
         let (subject, _) = self.thread_facts(thread_id);
         let subject = inbox::sanitize(&subject).replace('\n', " ");
         self.compose = Some(Box::new(Compose::reply(thread_id, &subject)));
+        // the thread stays above the editor, on its newest message
+        if let Some(r) = self
+            .reader
+            .as_mut()
+            .filter(|r| r.view.thread.id == thread_id)
+        {
+            r.selected = r.messages.len().saturating_sub(1);
+        }
         self.mode = Mode::Compose;
     }
 
@@ -2497,6 +2515,29 @@ mod tests {
         ]);
         let reader = app.reader.as_ref().unwrap();
         assert_eq!(reader.messages[reader.selected].id, "m4");
+    }
+
+    #[test]
+    fn x_opens_and_folds_the_selected_message_and_reply_keeps_the_thread_in_view() {
+        let mut app = inbox_app();
+        let view = app.threads[1].clone();
+        app.show_thread(
+            view,
+            vec![
+                message("m1", "a@x.com", "first", 10),
+                message("m2", "b@x.com", "second", 20),
+            ],
+            None,
+        );
+        press(&mut app, "k");
+        press(&mut app, "x");
+        assert!(app.reader.as_ref().unwrap().expanded.contains("m1"));
+        press(&mut app, "x");
+        assert!(app.reader.as_ref().unwrap().expanded.is_empty());
+        // opening the reply form jumps to the newest message and keeps the reader
+        app.open_reply_form("t2");
+        assert_eq!(app.mode, Mode::Compose);
+        assert_eq!(app.reader.as_ref().unwrap().selected, 1);
     }
 
     #[test]

@@ -174,7 +174,7 @@ impl GmailClient {
         page: Option<&str>,
     ) -> Result<ThreadList, ConnectorError> {
         let mut query = vec![
-            ("q", format!("newer_than:{days}d")),
+            ("q", format!("in:inbox category:primary newer_than:{days}d")),
             ("maxResults", "100".to_owned()),
         ];
         if let Some(p) = page {

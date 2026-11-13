@@ -114,6 +114,23 @@ fn map_message(message: &ApiMessage, thread_external_id: &str) -> Message {
     }
 }
 
+/// Is this thread in the default inbox? True when one of its messages sits in INBOX without a
+/// Promotions, Social, Updates or Forums category. Anything else (other folders, spam, archived,
+/// other tabs) is not loaded.
+#[must_use]
+pub fn is_primary_inbox(api: &ApiThread) -> bool {
+    const OTHER_TABS: [&str; 4] = [
+        "CATEGORY_PROMOTIONS",
+        "CATEGORY_SOCIAL",
+        "CATEGORY_UPDATES",
+        "CATEGORY_FORUMS",
+    ];
+    api.messages.iter().any(|m| {
+        m.label_ids.iter().any(|l| l == "INBOX")
+            && !m.label_ids.iter().any(|l| OTHER_TABS.contains(&l.as_str()))
+    })
+}
+
 /// Map a fully fetched Gmail thread. `Message::thread_id` carries the Gmail thread id.
 #[must_use]
 pub fn map_thread(api: &ApiThread) -> MappedThread {
@@ -164,6 +181,34 @@ pub fn map_thread(api: &ApiThread) -> MappedThread {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn thread_with(labels: &[&str]) -> ApiThread {
+        serde_json::from_value(serde_json::json!({
+            "id": "t",
+            "messages": [{ "id": "m", "labelIds": labels }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn only_the_primary_inbox_is_loaded() {
+        assert!(is_primary_inbox(&thread_with(&[
+            "INBOX",
+            "CATEGORY_PERSONAL"
+        ])));
+        assert!(is_primary_inbox(&thread_with(&["INBOX"])));
+        assert!(!is_primary_inbox(&thread_with(&[
+            "INBOX",
+            "CATEGORY_PROMOTIONS"
+        ])));
+        assert!(!is_primary_inbox(&thread_with(&[
+            "INBOX",
+            "CATEGORY_UPDATES"
+        ])));
+        assert!(!is_primary_inbox(&thread_with(&["SENT"])));
+        assert!(!is_primary_inbox(&thread_with(&["SPAM"])));
+        assert!(!is_primary_inbox(&thread_with(&[])));
+    }
 
     fn fixture(name: &str) -> ApiThread {
         let text = std::fs::read_to_string(format!(

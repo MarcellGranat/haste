@@ -169,7 +169,8 @@ impl GmailConnector {
                 }
                 other => other?,
             };
-            if let Some(api) = read {
+            // Only the default inbox is loaded; other folders and tabs are skipped.
+            if let Some(api) = read.filter(crate::mapper::is_primary_inbox) {
                 let mapped = map_thread(&api);
                 batch.threads.push(mapped.thread);
                 batch.messages.extend(mapped.messages);

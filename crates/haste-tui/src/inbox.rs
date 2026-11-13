@@ -256,11 +256,18 @@ pub fn sanitize(text: &str) -> String {
         .collect()
 }
 
-/// Break `text` into lines of at most `width` characters, at spaces where possible. Blank lines
+/// Terminal columns `s` takes (wide letters count two, combining marks and zero-width ones none).
+#[must_use]
+pub fn width(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
+
+/// Break `text` into lines of at most `width` columns, at spaces where possible. Blank lines
 /// are kept; a word longer than a line is cut.
 #[must_use]
-pub fn wrap(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
+pub fn wrap(text: &str, width_cols: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    let limit = width_cols.max(1);
     let mut out = Vec::new();
     for line in text.split('\n') {
         if line.trim().is_empty() {
@@ -270,20 +277,25 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
         let mut cur = String::new();
         let mut cur_len = 0_usize;
         for word in line.split(' ') {
-            let w_len = word.chars().count();
-            if cur_len > 0 && cur_len + 1 + w_len > width {
+            let w_len = width(word);
+            if cur_len > 0 && cur_len + 1 + w_len > limit {
                 out.push(std::mem::take(&mut cur));
                 cur_len = 0;
             }
-            if w_len > width {
+            if w_len > limit {
                 // cut a long word into full lines
-                let chars: Vec<char> = word.chars().collect();
-                for chunk in chars.chunks(width) {
-                    if cur_len > 0 {
+                if cur_len > 0 {
+                    out.push(std::mem::take(&mut cur));
+                }
+                cur_len = 0;
+                for ch in word.chars() {
+                    let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+                    if cur_len + w > limit && cur_len > 0 {
                         out.push(std::mem::take(&mut cur));
+                        cur_len = 0;
                     }
-                    cur = chunk.iter().collect();
-                    cur_len = chunk.len();
+                    cur.push(ch);
+                    cur_len += w;
                 }
                 continue;
             }

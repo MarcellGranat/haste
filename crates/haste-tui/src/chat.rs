@@ -8,6 +8,221 @@ use ratatui::text::{Line, Span};
 use crate::inbox;
 use crate::theme;
 
+/// A recipient list longer than this is collapsed until the message is expanded.
+pub const RECIPIENTS_COLLAPSE_AT: usize = 120;
+/// How much of a collapsed recipient list stays visible.
+const RECIPIENTS_SHOWN: usize = 90;
+
+/// Turn the HTML entities mail leaves in plain text back into characters.
+#[must_use]
+pub fn decode_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        let decoded = rest.find(';').filter(|&e| e <= 10).and_then(|e| {
+            let name = &rest[1..e];
+            let ch = match name {
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "amp" => Some('&'),
+                "quot" => Some('"'),
+                "apos" | "#39" => Some('\''),
+                "nbsp" => Some(' '),
+                _ => name
+                    .strip_prefix('#')
+                    .and_then(|n| {
+                        n.strip_prefix(['x', 'X'])
+                            .map_or_else(|| n.parse().ok(), |h| u32::from_str_radix(h, 16).ok())
+                    })
+                    .and_then(char::from_u32),
+            };
+            ch.map(|c| (c, e + 1))
+        });
+        match decoded {
+            Some((c, len)) => {
+                out.push(c);
+                rest = &rest[len..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A piece of a message body after folding: text to show, or a line saying what is folded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Piece {
+    Text(String),
+    Fold(String),
+}
+
+fn is_quote(line: &str) -> bool {
+    line.trim_start().starts_with('>')
+}
+
+fn is_wrote(line: &str) -> bool {
+    let t = line.trim_end();
+    ["wrote:", "írta:", "a écrit :", "a écrit:", "schrieb:"]
+        .iter()
+        .any(|s| t.ends_with(s))
+}
+
+fn is_header_block_start(lines: &[&str], i: usize) -> bool {
+    let t = lines[i].trim();
+    if t.starts_with("-----Original Message") || t.starts_with("-----Eredeti üzenet") {
+        return true;
+    }
+    t.starts_with("From:")
+        && lines[i + 1..lines.len().min(i + 5)].iter().any(|l| {
+            let l = l.trim_start();
+            l.starts_with("Sent:") || l.starts_with("Date:") || l.starts_with("To:")
+        })
+}
+
+/// The quoted history in `lines`: `(start, end, to_the_end)` blocks, in order. A block of `>`
+/// lines (with its "wrote:" line) ends where the quote ends; an "Original Message" or
+/// "From:/Sent:" header block runs to the end. A block at the very top is the message itself
+/// (a forward), not history.
+fn history_blocks(lines: &[&str]) -> Vec<(usize, usize)> {
+    let mut blocks = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if is_quote(lines[i]) {
+            let mut start = i;
+            if start > 0 && is_wrote(lines[start - 1]) {
+                start -= 1;
+                if start > 0 && lines[start - 1].trim_start().starts_with("On ") {
+                    start -= 1;
+                }
+            }
+            let mut end = i;
+            let mut j = i;
+            while j < lines.len() {
+                if is_quote(lines[j]) {
+                    j += 1;
+                    end = j;
+                } else if lines[j].trim().is_empty() {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            blocks.push((start, end));
+            i = end.max(i + 1);
+        } else if i > 0 && is_header_block_start(lines, i) {
+            blocks.push((i, lines.len()));
+            break;
+        } else {
+            i += 1;
+        }
+    }
+    blocks
+}
+
+/// Collapse a long `To:`/`Cc:` list (with its continuation lines) into one short line.
+fn fold_recipients(lines: &[String], expanded: bool) -> Vec<Piece> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let lower = lines[i].trim_start().to_lowercase();
+        let is_list = ["to:", "cc:", "bcc:"].iter().any(|k| lower.starts_with(k));
+        if !is_list {
+            out.push(Piece::Text(lines[i].clone()));
+            i += 1;
+            continue;
+        }
+        let mut joined = lines[i].trim().to_owned();
+        let mut j = i + 1;
+        // continuation lines: not blank, not another `Key:` header, not a quote
+        while j < lines.len() {
+            let l = lines[j].trim();
+            let header_like = l
+                .split_once(':')
+                .is_some_and(|(k, _)| !k.is_empty() && k.len() < 16 && !k.contains(' '));
+            if l.is_empty() || header_like || is_quote(l) {
+                break;
+            }
+            joined.push(' ');
+            joined.push_str(l);
+            j += 1;
+        }
+        if expanded || inbox_width(&joined) <= RECIPIENTS_COLLAPSE_AT {
+            out.extend(lines[i..j].iter().cloned().map(Piece::Text));
+        } else {
+            let mut cut = joined
+                .char_indices()
+                .nth(RECIPIENTS_SHOWN)
+                .map_or(joined.len(), |(b, _)| b);
+            // end on a separator so no address is cut in half
+            if let Some(p) = joined[..cut].rfind(';') {
+                cut = p + 1;
+            }
+            let more = joined[cut..].matches('@').count();
+            out.push(Piece::Text(format!("{} …", joined[..cut].trim_end())));
+            out.push(Piece::Fold(format!(
+                "▸ +{more} more recipients (x to show)"
+            )));
+        }
+        i = j;
+    }
+    out
+}
+
+fn inbox_width(s: &str) -> usize {
+    inbox::width(s)
+}
+
+/// Fold a message's text: quoted history becomes one line, a long recipient list is shortened.
+/// `expanded` shows everything. A message that is all history (a forward) is not hidden.
+#[must_use]
+pub fn fold(text: &str, expanded: bool) -> Vec<Piece> {
+    let lines: Vec<&str> = text.lines().collect();
+    let blocks = if expanded {
+        Vec::new()
+    } else {
+        history_blocks(&lines)
+    };
+    let hidden: usize = blocks.iter().map(|(s, e)| e - s).sum();
+    let blocks = if hidden >= lines.len() {
+        Vec::new()
+    } else {
+        blocks
+    };
+    let mut out = Vec::new();
+    let mut at = 0;
+    let mut visible: Vec<String> = Vec::new();
+    let flush = |visible: &mut Vec<String>, out: &mut Vec<Piece>| {
+        out.extend(fold_recipients(visible, expanded));
+        visible.clear();
+    };
+    for (start, end) in blocks {
+        visible.extend(lines[at..start].iter().map(|l| (*l).to_owned()));
+        flush(&mut visible, &mut out);
+        let n = lines[start..end]
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .count();
+        out.push(Piece::Fold(format!("▸ {n} quoted lines (x to show)")));
+        at = end;
+    }
+    visible.extend(lines[at..].iter().map(|l| (*l).to_owned()));
+    flush(&mut visible, &mut out);
+    // trim blank edges
+    while matches!(out.first(), Some(Piece::Text(t)) if t.trim().is_empty()) {
+        out.remove(0);
+    }
+    while matches!(out.last(), Some(Piece::Text(t)) if t.trim().is_empty()) {
+        out.pop();
+    }
+    out
+}
+
 /// One laid-out message: its lines and the links found in its text.
 #[derive(Debug, Clone)]
 pub struct Laid {
@@ -24,6 +239,8 @@ pub struct Layout<'a> {
     /// The account's own address (mail), compared with the sender.
     pub own: Option<&'a str>,
     pub tz_offset: i64,
+    /// Messages (by id) shown in full, with their quoted history and recipient lists open.
+    pub expanded: &'a std::collections::HashSet<String>,
 }
 
 /// A link in a message: `http://` or `https://` up to whitespace, trailing punctuation dropped.
@@ -143,7 +360,7 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
         if day != Some(this_day) {
             day = Some(this_day);
             let label = format!("── {} ──", inbox::day_label(m.sent_at, l.tz_offset));
-            let lead = l.width.saturating_sub(label.chars().count()) / 2;
+            let lead = l.width.saturating_sub(inbox::width(&label)) / 2;
             lines.push(Line::from(Span::styled(
                 format!("{}{label}", " ".repeat(lead)),
                 theme::muted(),
@@ -151,14 +368,20 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
         }
         let own = is_own(m, l.own);
         let selected = i == l.selected;
-        let (text, files) = split_body(&inbox::sanitize(&m.body_text));
-        let mut body: Vec<String> = if text.is_empty() && files.is_empty() {
-            vec!["(no text)".to_owned()]
-        } else {
-            inbox::wrap(&text, max_inner)
-        };
-        if text.is_empty() {
-            body.clear();
+        let (text, files) = split_body(&inbox::sanitize(&decode_entities(&m.body_text)));
+        let pieces = fold(&text, l.expanded.contains(&m.id));
+        // each row: the text, and whether it is a fold marker
+        let mut body: Vec<(String, bool)> = Vec::new();
+        for piece in &pieces {
+            match piece {
+                Piece::Text(t) => {
+                    body.extend(inbox::wrap(t, max_inner).into_iter().map(|s| (s, false)))
+                }
+                Piece::Fold(t) => body.push((t.clone(), true)),
+            }
+        }
+        if body.is_empty() && files.is_empty() {
+            body.push(("(no text)".to_owned(), false));
         }
         let chips: Vec<String> = files.iter().map(|f| format!("◫ {f}")).collect();
         let who = if own {
@@ -170,9 +393,9 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
         let header = format!(" {who} · {} ", inbox::stamp(m.sent_at, l.tz_offset));
         let inner = body
             .iter()
-            .map(|s| s.chars().count())
-            .chain(chips.iter().map(|s| s.chars().count()))
-            .chain([header.chars().count().saturating_sub(2)])
+            .map(|(s, _)| inbox::width(s))
+            .chain(chips.iter().map(|s| inbox::width(s)))
+            .chain([inbox::width(&header).saturating_sub(2)])
             .max()
             .unwrap_or(10)
             .clamp(10, max_inner.max(10));
@@ -195,7 +418,7 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
             .add_modifier(Modifier::BOLD);
         let start = lines.len();
         // top edge: ╭─ who · time ───╮
-        let used = header.chars().count() + 1;
+        let used = inbox::width(&header) + 1;
         lines.push(Line::from(vec![
             Span::raw(indent.clone()),
             Span::styled("╭─", edge),
@@ -212,12 +435,17 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
             spans.push(Span::styled(" │", edge));
             Line::from(spans)
         };
-        for b in &body {
-            let len = b.chars().count();
-            lines.push(row(styled(b, Style::new().fg(theme::TEXT)), len));
+        for (b, fold_line) in &body {
+            let len = inbox::width(b);
+            let content = if *fold_line {
+                vec![Span::styled(b.clone(), Style::new().fg(theme::LAVENDER))]
+            } else {
+                styled(b, Style::new().fg(theme::TEXT))
+            };
+            lines.push(row(content, len));
         }
         for c in &chips {
-            let len = c.chars().count();
+            let len = inbox::width(c);
             lines.push(row(
                 vec![Span::styled(c.clone(), Style::new().fg(theme::PEACH))],
                 len,
@@ -319,6 +547,7 @@ mod tests {
                 selected: 0,
                 own: None,
                 tz_offset: 0,
+                expanded: &std::collections::HashSet::new(),
             },
         );
         assert_eq!(laid.len(), 2);
@@ -326,7 +555,7 @@ mod tests {
         assert!(text_of(first).starts_with("╭─ Ana"));
         // every row of a frame has the same width
         for l in &lines[laid[0].start..laid[0].end] {
-            assert_eq!(text_of(l).chars().count(), text_of(first).chars().count());
+            assert_eq!(inbox::width(&text_of(l)), inbox::width(&text_of(first)));
         }
         let mine = text_of(&lines[laid[1].start]);
         assert!(mine.starts_with(' '), "yours is indented to the right");
@@ -340,6 +569,87 @@ mod tests {
             .iter()
             .any(|s| s.content.starts_with("https://")
                 && s.style.add_modifier.contains(Modifier::UNDERLINED)));
+    }
+
+    #[test]
+    fn entities_are_decoded() {
+        assert_eq!(
+            decode_entities("&lt;your message&gt; &amp; &#39;x&#39; &#x41;"),
+            "<your message> & 'x' A"
+        );
+        assert_eq!(decode_entities("a & b &unknown; c"), "a & b &unknown; c");
+    }
+
+    fn texts(pieces: &[Piece]) -> Vec<String> {
+        pieces
+            .iter()
+            .map(|p| match p {
+                Piece::Text(t) | Piece::Fold(t) => t.clone(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn quoted_history_is_folded_and_opens() {
+        let body = "Igen, ezt csináltam.\n\nOn Thu, Nov 12, 2026 at 8:03 AM Gábor <g@x.hu> wrote:\n\n> Szia Marcell,\n> Tudnál küldeni?\n>\n> Gábor";
+        let folded = texts(&fold(body, false));
+        assert_eq!(folded[0], "Igen, ezt csináltam.");
+        assert!(
+            folded.last().unwrap().starts_with("▸ 4 quoted lines"),
+            "{folded:?}"
+        );
+        assert!(!folded.iter().any(|l| l.contains("Szia Marcell")));
+        let open = texts(&fold(body, true));
+        assert!(open.iter().any(|l| l.contains("> Szia Marcell,")));
+        // an inline answer after the quote stays visible
+        let inline = texts(&fold("> question\n\nmy answer", false));
+        assert_eq!(inline.last().unwrap(), "my answer");
+    }
+
+    #[test]
+    fn a_long_recipient_list_is_collapsed_until_opened() {
+        let list: Vec<String> = (0..40)
+            .map(|i| format!("Person {i} <person{i}@gtk.elte.hu>"))
+            .collect();
+        let body = format!(
+            "From: Dean <dekan@gtk.elte.hu>\nSent: Monday\nTo: {}\nSubject: Hello\n\nBody text",
+            list.join("; ")
+        );
+        let folded = texts(&fold(&body, false));
+        assert!(folded.iter().any(|l| l.starts_with("To: Person 0")));
+        assert!(
+            folded.iter().any(|l| l.contains("more recipients")),
+            "{folded:?}"
+        );
+        assert!(folded.iter().all(|l| inbox::width(l) < 140));
+        assert!(folded.contains(&"Subject: Hello".to_owned()));
+        let open = texts(&fold(&body, true));
+        assert!(open.iter().any(|l| l.contains("person39@")));
+    }
+
+    #[test]
+    fn frames_stay_aligned_with_wide_and_zero_width_characters() {
+        let msgs = [m(
+            "1",
+            "Ana",
+            "漢字 and a\u{200b}zero width, é\u{0301} accents",
+            1_700_000_000,
+            false,
+        )];
+        let (lines, laid) = layout(
+            &msgs,
+            &Layout {
+                width: 50,
+                selected: 0,
+                own: None,
+                tz_offset: 0,
+                expanded: &std::collections::HashSet::new(),
+            },
+        );
+        let w = inbox::width(&text_of(&lines[laid[0].start]));
+        for l in &lines[laid[0].start..laid[0].end] {
+            assert_eq!(inbox::width(&text_of(l)), w, "{}", text_of(l));
+        }
     }
 
     #[test]

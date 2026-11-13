@@ -38,7 +38,23 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         draw_reader(frame, app, body);
     }
     if app.mode == Mode::Compose {
-        draw_compose(frame, app, frame.area());
+        let replying = app
+            .compose
+            .as_ref()
+            .is_some_and(|c| matches!(c.kind, crate::compose::ComposeKind::Reply { .. }))
+            && app.reader.is_some();
+        if replying {
+            // the thread on top, the editor docked at the bottom: reply with the thread in view
+            let editor_h = (body.height / 3)
+                .clamp(9, 16)
+                .min(body.height.saturating_sub(4));
+            let [top, bottom] =
+                Layout::vertical([Constraint::Min(3), Constraint::Length(editor_h)]).areas(body);
+            draw_reader(frame, app, top);
+            draw_compose(frame, app, bottom, true);
+        } else {
+            draw_compose(frame, app, frame.area(), false);
+        }
     }
     if app.mode == Mode::Label {
         draw_labels(frame, app, frame.area());
@@ -58,11 +74,15 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
     )
 }
 
-fn draw_compose(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn draw_compose(frame: &mut Frame<'_>, app: &App, area: Rect, docked: bool) {
     let Some(c) = &app.compose else {
         return;
     };
-    let rect = centered(area, 90, area.height.saturating_sub(4).max(12));
+    let rect = if docked {
+        area
+    } else {
+        centered(area, 90, area.height.saturating_sub(4).max(12))
+    };
     frame.render_widget(Clear, rect);
     let heading = format!(" {} ", c.heading);
     let block = theme::panel(&heading).border_style(pane_border(true));
@@ -799,6 +819,7 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
             selected: reader.selected,
             own: reader.own.as_deref(),
             tz_offset: app.tz_offset,
+            expanded: &reader.expanded,
         },
     );
     if lines.is_empty() {
@@ -812,7 +833,7 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
         None => 0,
     };
     reader.scroll.set(scroll);
-    let hint = " j/k message · o open link · r reply · n note · l label · e archive · Esc close ";
+    let hint = " j/k message · x fold/unfold · o open link · r reply · n note · l label · e archive · Esc close ";
     frame.render_widget(
         Paragraph::new(lines)
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))

@@ -1452,6 +1452,20 @@ impl App {
         None
     }
 
+    /// Is this a Gmail or iCloud thread (whose archive happens in the mailbox)?
+    #[must_use]
+    pub fn thread_is_mail(&self, thread_id: &str) -> bool {
+        self.threads
+            .iter()
+            .find(|t| t.thread.id == thread_id)
+            .is_some_and(|t| {
+                matches!(
+                    t.thread.source,
+                    haste_core::model::Source::Gmail | haste_core::model::Source::Icloud
+                )
+            })
+    }
+
     /// The subject and labels of a thread the TUI knows (the list or the open reader).
     #[must_use]
     pub fn thread_facts(&self, thread_id: &str) -> (String, Vec<String>) {

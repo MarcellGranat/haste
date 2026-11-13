@@ -525,8 +525,14 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
             };
         }
         Effect::Triage { thread_id, change } => {
+            // mail is archived in the mailbox too; chats only here
+            let archived_text = if app.thread_is_mail(&thread_id) {
+                "archived in the mailbox and here"
+            } else {
+                "archived (in haste only; chats have no upstream archive)"
+            };
             let (priority, set_aside, snoozed_until, archived, done) = match change {
-                TriageChange::Archive => (None, None, None, Some(true), "archived (in haste only)"),
+                TriageChange::Archive => (None, None, None, Some(true), archived_text),
                 TriageChange::SetAside(on) => (
                     None,
                     Some(on),

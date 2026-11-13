@@ -525,6 +525,9 @@ pub enum ConnectorCmd {
     Release { source: String },
     /// Engage a connector's kill switch; nothing reaches the provider until released.
     Engage { source: String },
+    /// Forget the local copy of a mail source (gmail or icloud) and read its inbox again.
+    /// Nothing changes at the provider; triage marks on those threads are lost.
+    Resync { source: String },
     /// Provider-specific setup.
     Gmail {
         #[command(subcommand)]
@@ -1117,6 +1120,12 @@ pub fn build_body(command: &Command) -> Result<RequestBody, CliError> {
         Command::Connector {
             cmd: ConnectorCmd::Release { source },
         } => RequestBody::ConnectorRelease {
+            source: source.clone(),
+        },
+        #[cfg(feature = "human")]
+        Command::Connector {
+            cmd: ConnectorCmd::Resync { source },
+        } => RequestBody::ConnectorResync {
             source: source.clone(),
         },
         #[cfg(feature = "human")]

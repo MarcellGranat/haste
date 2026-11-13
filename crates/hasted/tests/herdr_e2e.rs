@@ -911,6 +911,7 @@ fn kind(body: &RequestBody) -> Kind {
         | RequestBody::ConnectorStatus
         | RequestBody::ConnectorRelease { .. }
         | RequestBody::ConnectorEngage { .. }
+        | RequestBody::ConnectorResync { .. }
         | RequestBody::ConnectorAuthorized { .. }
         | RequestBody::TagAdd { .. }
         | RequestBody::TagRemove { .. }

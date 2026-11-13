@@ -10,7 +10,7 @@ use haste_core::policy::PrincipalKind;
 use haste_core::proposal::{Payload, Proposal, ProposalState};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 /// Largest frame either side accepts.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
@@ -156,6 +156,11 @@ pub enum RequestBody {
         source: String,
     },
     /// Human-only: engage a connector's kill switch.
+    /// Human-only: forget the local copy of a mail source (Gmail or iCloud) and read its inbox
+    /// again from the start. Nothing changes at the provider.
+    ConnectorResync {
+        source: String,
+    },
     ConnectorEngage {
         source: String,
     },

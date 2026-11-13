@@ -216,6 +216,42 @@ impl Store {
         })
     }
 
+    /// Forget every thread and message of a source (with their triage marks and links) and its
+    /// sync cursor, so the next cycle reads from the start. Returns the number of threads.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn purge_source(&self, source: &Source) -> StoreResult<usize> {
+        let name = source.as_name();
+        self.write(move |conn| {
+            let tx = conn.transaction()?;
+            let ids: Vec<String> = {
+                let mut stmt = tx.prepare("SELECT id FROM threads WHERE source = ?1")?;
+                let rows = stmt.query_map([&name], |r| r.get(0))?;
+                rows.collect::<Result<_, _>>()?
+            };
+            for id in &ids {
+                tx.execute(
+                    "DELETE FROM triage WHERE object_kind = 'thread' AND object_id = ?1",
+                    [id],
+                )?;
+                tx.execute(
+                    "DELETE FROM links WHERE (from_kind = 'thread' AND from_id = ?1) \
+                     OR (to_kind = 'thread' AND to_id = ?1)",
+                    [id],
+                )?;
+                tx.execute("DELETE FROM messages WHERE thread_id = ?1", [id])?;
+                tx.execute("DELETE FROM threads WHERE id = ?1", [id])?;
+            }
+            tx.execute(
+                "UPDATE connector_state SET cursor = NULL WHERE source = ?1",
+                [&name],
+            )?;
+            tx.commit()?;
+            Ok(ids.len())
+        })
+    }
+
     /// Save the sync cursor without touching the kill switch.
     ///
     /// # Errors

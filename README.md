@@ -126,6 +126,13 @@ holds only the client id, secret and your address (mode `0600`). If the token is
 (`invalid_grant`), the connector engages its kill switch and notifies you: run the auth command
 again, then release the connector.
 
+### Re-reading a mail inbox (human only)
+
+`haste connector resync gmail` (or `icloud`) forgets haste's local copy of that source (its
+threads and messages, with their triage marks) and reads the inbox again from the start. Nothing
+changes at the provider. Use it after changing what is loaded, for example to drop the
+Promotions that were read before only the primary inbox was kept.
+
 ### Archiving (human only)
 
 `e` archives a thread for real. Gmail: the thread leaves the inbox (`threads.modify` removes the

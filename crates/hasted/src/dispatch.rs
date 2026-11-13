@@ -76,6 +76,7 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::ConnectorStatus
         | RequestBody::ConnectorRelease { .. }
         | RequestBody::ConnectorEngage { .. }
+        | RequestBody::ConnectorResync { .. }
         | RequestBody::ConnectorAuthorized { .. }
         | RequestBody::TagAdd { .. }
         | RequestBody::TagRemove { .. }
@@ -112,6 +113,7 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::ConnectorStatus => "connector_status",
         RequestBody::ConnectorRelease { .. } => "connector_release",
         RequestBody::ConnectorEngage { .. } => "connector_engage",
+        RequestBody::ConnectorResync { .. } => "connector_resync",
         RequestBody::ConnectorAuthorized { .. } => "connector_authorized",
         RequestBody::RegisterPrincipal { .. } => "register_principal",
         RequestBody::RevokeToken { .. } => "revoke_token",
@@ -593,6 +595,7 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
         }
         RequestBody::ConnectorStatus => connector_status(state),
         RequestBody::ConnectorRelease { source } => set_switch(state, principal, &source, false),
+        RequestBody::ConnectorResync { source } => connector_resync(state, principal, &source),
         RequestBody::ConnectorEngage { source } => set_switch(state, principal, &source, true),
         RequestBody::ConnectorAuthorized { source } => {
             state.audit(
@@ -1526,6 +1529,45 @@ fn connector_status(state: &State) -> Response {
 }
 
 /// Engage or release a kill switch. Releasing keeps the stored cursor.
+/// Forget the local copy of a mail source and read it again from the start. Only mail sources
+/// (chats keep their own history cursor); nothing is changed at the provider. The audit has the
+/// source and a count, never a subject.
+fn connector_resync(state: &State, actor: &Principal, source: &str) -> Response {
+    let source = Source::from(source.to_owned());
+    if !matches!(source, Source::Gmail | Source::Icloud) {
+        return err(
+            ErrorCode::Validation,
+            "only Gmail and iCloud can be re-read",
+        );
+    }
+    if !state.registered_sources().contains(&source) {
+        return err(
+            ErrorCode::Validation,
+            "no connector is registered for this source",
+        );
+    }
+    match state.store.purge_source(&source) {
+        Ok(threads) => {
+            state.audit(
+                &actor.id,
+                "connector.resync",
+                "purged",
+                Some(&source.as_name()),
+                Some(&format!("threads={threads}")),
+            );
+            state.publish(Event::Notice {
+                message: format!(
+                    "{}: local copy cleared; reading the inbox again",
+                    source.as_name()
+                ),
+            });
+            state.wake_sync(&source);
+            Response::Done
+        }
+        Err(e) => map_store(&e),
+    }
+}
+
 fn set_switch(state: &State, actor: &Principal, source: &str, engaged: bool) -> Response {
     let source = Source::from(source.to_owned());
     if !state.registered_sources().contains(&source) {

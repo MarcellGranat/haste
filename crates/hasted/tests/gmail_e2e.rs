@@ -583,6 +583,47 @@ async fn archiving_a_gmail_thread_leaves_the_inbox_first_and_only_then_here() {
 }
 
 #[tokio::test]
+async fn a_resync_forgets_the_local_mail_and_reads_the_inbox_again() {
+    let h = boot().await;
+    let thread = synced_thread(&h).await;
+    let agent = register(&h, "agent-a", PrincipalKind::Agent).await;
+    let resync = RequestBody::ConnectorResync {
+        source: "gmail".into(),
+    };
+    assert_eq!(
+        code(&call_with(&h, &agent, resync.clone()).await),
+        Some(ErrorCode::Denied)
+    );
+    assert_eq!(
+        code(
+            &human(
+                &h,
+                RequestBody::ConnectorResync {
+                    source: "whatsapp".into()
+                }
+            )
+            .await
+        ),
+        Some(ErrorCode::Validation),
+        "chats are not re-read this way"
+    );
+    let profile_before = h.google.count("/gmail/v1/users/me/profile");
+    assert!(matches!(human(&h, resync).await, Response::Done));
+    let store = &h.daemon.state.store;
+    // the old copy is gone and the cursor was reset, so the next cycle is a backfill again
+    assert!(store.get_thread(&thread).unwrap().is_none());
+    assert_eq!(store.connector_cursor(&Source::Gmail).unwrap(), None);
+    sync_once(&h.daemon.state, &h.connector).await.unwrap();
+    assert_eq!(
+        h.google.count("/gmail/v1/users/me/profile"),
+        profile_before + 1
+    );
+    assert_eq!(store.list_threads(&Default::default()).unwrap().len(), 1);
+    assert!(audit(&h).contains(r#""action":"connector.resync","outcome":"purged""#));
+    h.daemon.shutdown().await;
+}
+
+#[tokio::test]
 async fn stale_thread_needs_acknowledgement_before_any_draft_is_created() {
     let h = boot().await;
     let thread = synced_thread(&h).await;

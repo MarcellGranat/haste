@@ -708,6 +708,7 @@ mod tests {
                 principal_id: "agent-a".into(),
                 idempotency_key: key.into(),
                 payload: Payload::Draft {
+                    attachments: Vec::new(),
                     to: Some("ana@x".into()),
                     body: "hi".into(),
                 },

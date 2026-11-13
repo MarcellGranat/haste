@@ -734,6 +734,7 @@ pub fn build_body(command: &Command) -> Result<RequestBody, CliError> {
                 payload: Payload::Draft {
                     to: a.to.clone(),
                     body,
+                    attachments: Vec::new(),
                 },
                 thread_id: Some(a.thread.clone()),
                 idempotency_key: key_or_new(&a.key),

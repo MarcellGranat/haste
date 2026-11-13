@@ -57,6 +57,7 @@ fn rig(fault: SmtpFault, tweak: impl FnOnce(&mut IcloudConfig, &mut FakeState)) 
 
 fn draft() -> DraftToSend {
     DraftToSend {
+        attachments: Vec::new(),
         thread_id: None,
         to: Some(RECIPIENT.into()),
         body: "Noon is great.\n.leading dot line".into(),

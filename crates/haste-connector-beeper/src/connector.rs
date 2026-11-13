@@ -391,8 +391,13 @@ impl BeeperConnector {
             .thread_id
             .as_deref()
             .ok_or_else(|| refused("no chat"))?;
-        if draft.body.trim().is_empty() || draft.body.len() > BEEPER_MAX_SEND_BYTES {
+        if (draft.body.trim().is_empty() && draft.attachments.is_empty())
+            || draft.body.len() > BEEPER_MAX_SEND_BYTES
+        {
             return Err(refused("body_length"));
+        }
+        if draft.attachments.len() > 1 {
+            return Err(refused("one attachment per chat message"));
         }
         if !self.config.selects_chat(chat_id) {
             return Err(refused("chat not selected"));
@@ -410,7 +415,21 @@ impl BeeperConnector {
                 haste_core::log::n("body_bytes", draft.body.len()),
             ],
         );
-        let id = match self.client.send_message(chat_id, &draft.body).await {
+        // the file goes to the local Beeper service first: that delivers nothing, so a failure
+        // here is a plain refusal and nothing was sent
+        let upload = match draft.attachments.first() {
+            Some(a) => Some((
+                self.client.upload_asset(&a.name, &a.mime, &a.data).await?,
+                a.name.as_str(),
+            )),
+            None => None,
+        };
+        let attachment = upload.as_ref().map(|(id, name)| (id.as_str(), *name));
+        let id = match self
+            .client
+            .send_message_with(chat_id, draft.body.trim_end(), attachment)
+            .await
+        {
             Ok(id) => id,
             Err(e) => {
                 // a fixed cause label, never the error text: why the outcome is unknown or refused

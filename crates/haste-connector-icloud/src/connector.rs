@@ -203,6 +203,7 @@ impl Connector for IcloudConnector {
                 &haste_core::send::new_message_id(domain),
                 None,
                 None,
+                &draft.attachments,
             )
             .map_err(refused)?;
             // One text for both the submission and the Sent copy, ending in a line break (as

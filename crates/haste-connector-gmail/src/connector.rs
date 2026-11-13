@@ -266,6 +266,7 @@ impl GmailConnector {
             &haste_core::send::new_message_id(domain),
             in_reply_to.as_deref(),
             references.as_deref(),
+            &draft.attachments,
         )
         .map_err(refused)?;
         let id = self

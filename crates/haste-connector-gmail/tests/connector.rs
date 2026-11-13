@@ -459,6 +459,7 @@ mod send {
 
     fn draft_to_send(recipient: &str) -> DraftToSend {
         DraftToSend {
+            attachments: Vec::new(),
             thread_id: Some("t100".into()),
             to: Some(recipient.into()),
             body: "Yes!\nSee you.".into(),

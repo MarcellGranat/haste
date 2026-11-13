@@ -58,6 +58,7 @@ pub fn build_send_message(
     message_id: &str,
     in_reply_to: Option<&str>,
     references: Option<&str>,
+    attachments: &[haste_core::connector::OutAttachment],
 ) -> Result<String, &'static str> {
     haste_core::send::compose_plain_text(
         from,
@@ -68,6 +69,7 @@ pub fn build_send_message(
         message_id,
         in_reply_to,
         references,
+        attachments,
     )
 }
 
@@ -123,6 +125,7 @@ mod tests {
             "<id@x.org>",
             Some("<m3@x>"),
             Some("<m1@x> <m3@x>"),
+            &[],
         )
         .unwrap();
         let headers = ok.split("\r\n\r\n").next().unwrap();
@@ -144,7 +147,7 @@ mod tests {
             ("a@x.org\0", "s"),
         ] {
             assert_eq!(
-                build_send_message("me@x.org", to, subject, "b", d, "<i@x>", None, None),
+                build_send_message("me@x.org", to, subject, "b", d, "<i@x>", None, None, &[]),
                 Err("header characters"),
                 "{to:?} {subject:?}"
             );

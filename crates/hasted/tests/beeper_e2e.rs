@@ -240,6 +240,7 @@ async fn approved_draft(h: &Harness, agent: &str, thread: &str, key: &str) -> St
         agent,
         RequestBody::Propose {
             payload: Payload::Draft {
+                attachments: Vec::new(),
                 to: None,
                 body: REPLY_MARKER.into(),
             },

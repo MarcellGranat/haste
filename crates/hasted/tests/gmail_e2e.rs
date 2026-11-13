@@ -147,6 +147,7 @@ async fn draft_proposal(h: &Harness, agent: &str, thread: &str, key: &str) -> St
         agent,
         RequestBody::Propose {
             payload: Payload::Draft {
+                attachments: Vec::new(),
                 to: None,
                 body: "Noon is great.".into(),
             },
@@ -417,6 +418,108 @@ async fn only_an_approved_draft_reaches_gmail_and_only_the_human_can_send_it() {
     for secret in [preview.recipients[0].as_str(), "Noon is great", "Re: "] {
         assert!(!log.contains(secret), "audit leaked {secret}");
     }
+    h.daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn only_the_human_can_attach_files_and_they_go_out_in_a_multipart_message() {
+    use base64::Engine;
+    let h = boot().await;
+    let thread = synced_thread(&h).await;
+    let agent = register(&h, "agent-a", PrincipalKind::Agent).await;
+    let dir = h.daemon.state.config.data_dir.join("attachments");
+    fs::create_dir_all(&dir).unwrap();
+    let content: Vec<u8> = (0..300_u32)
+        .map(|i| u8::try_from(i % 251).unwrap())
+        .collect();
+    fs::write(dir.join("100-report.pdf"), &content).unwrap();
+    std::os::unix::fs::symlink("/etc/hosts", dir.join("100-link")).unwrap();
+    let propose = |names: &[&str], key: &str| RequestBody::Propose {
+        payload: Payload::Draft {
+            attachments: names.iter().map(|n| (*n).to_owned()).collect(),
+            to: None,
+            body: "Here it is.".into(),
+        },
+        thread_id: Some(thread.clone()),
+        idempotency_key: key.into(),
+        hints: None,
+    };
+
+    // an agent can never attach a file, even one that exists
+    let denied = call_with(&h, &agent, propose(&["100-report.pdf"], "a1")).await;
+    assert_eq!(code(&denied), Some(ErrorCode::Denied));
+    // the human is refused names that escape the folder, links and files that are not there
+    for bad in [
+        "../haste.db",
+        "/etc/hosts",
+        "100-link",
+        "missing.pdf",
+        ".hidden",
+    ] {
+        let r = human(&h, propose(&[bad], "h-bad")).await;
+        assert_eq!(code(&r), Some(ErrorCode::Validation), "{bad}");
+    }
+
+    let Response::Proposal { proposal } = human(&h, propose(&["100-report.pdf"], "h1")).await
+    else {
+        panic!("no proposal")
+    };
+    human(
+        &h,
+        RequestBody::Approve {
+            proposal_id: proposal.id.clone(),
+            acknowledge_stale: false,
+        },
+    )
+    .await;
+    let Response::SendPreview { preview } = human(
+        &h,
+        RequestBody::SendPreview {
+            proposal_id: proposal.id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("no preview")
+    };
+    assert_eq!(preview.attachments.len(), 1);
+    assert_eq!(preview.attachments[0].bytes, 300);
+    let sent = human(
+        &h,
+        RequestBody::Send {
+            proposal_id: proposal.id.clone(),
+            acknowledge_stale: false,
+            recipients_digest: preview.recipients_digest.clone(),
+        },
+    )
+    .await;
+    assert!(matches!(sent, Response::Proposal { .. }), "{sent:?}");
+
+    // what reached Gmail: a multipart message holding the file
+    let req = h
+        .google
+        .requests()
+        .into_iter()
+        .find(|r| r.path == "/gmail/v1/users/me/messages/send")
+        .expect("sent");
+    let raw = serde_json::from_str::<serde_json::Value>(&req.body).unwrap()["raw"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mime = String::from_utf8(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(raw)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(mime.contains("multipart/mixed"));
+    assert!(mime.contains("filename=\"100-report.pdf\""));
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&content);
+    assert!(mime.replace("\r\n", "").contains(&encoded));
+    // the audit counts files and never names one
+    let log = audit(&h);
+    assert!(log.contains("attachments=1"));
+    assert!(!log.contains("report.pdf"));
     h.daemon.shutdown().await;
 }
 

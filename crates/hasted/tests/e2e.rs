@@ -137,6 +137,7 @@ fn code(r: &Response) -> Option<ErrorCode> {
 fn draft(thread: &str, key: &str) -> RequestBody {
     RequestBody::Propose {
         payload: Payload::Draft {
+            attachments: Vec::new(),
             to: Some("ana@x.org".into()),
             body: "hi".into(),
         },
@@ -680,6 +681,7 @@ async fn expiry_pass_expires_overdue_proposals() {
             &agent,
             RequestBody::Propose {
                 payload: Payload::Draft {
+                    attachments: Vec::new(),
                     to: None,
                     body: "x".into(),
                 },

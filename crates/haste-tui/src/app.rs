@@ -182,6 +182,7 @@ pub enum Effect {
     SaveReply {
         thread_id: String,
         body: String,
+        attachments: Vec<std::path::PathBuf>,
     },
     /// Append a note about a thread to the notes folder (no approval: the human wrote it).
     SaveNote {
@@ -381,11 +382,29 @@ impl Default for App {
     }
 }
 
+/// The subject line of a send confirmation, followed by the files that go with it.
+fn with_files(subject: String, files: &[haste_proto::AttachmentInfo]) -> String {
+    if files.is_empty() {
+        return subject;
+    }
+    let list: Vec<String> = files
+        .iter()
+        .map(|f| {
+            format!(
+                "{} ({})",
+                inbox::sanitize(&f.name),
+                crate::chat::human_size(f.bytes as u64)
+            )
+        })
+        .collect();
+    format!("{subject} · attached: {}", list.join(", "))
+}
+
 /// One-line description of what a proposal would do.
 #[must_use]
 pub fn summary(p: &Proposal) -> String {
     match &p.payload {
-        Payload::Draft { to, body } => {
+        Payload::Draft { to, body, .. } => {
             let head: String = body.chars().take(40).collect();
             format!("draft to {}: {head}", to.as_deref().unwrap_or("(thread)"))
         }
@@ -1238,7 +1257,7 @@ impl App {
         self.mode = Mode::SendCountdown {
             id: id.to_owned(),
             recipients: preview.recipients,
-            subject: preview.subject,
+            subject: with_files(preview.subject, &preview.attachments),
             source: preview.source,
             remaining: preview.sends_remaining,
             recipients_digest: preview.recipients_digest,
@@ -1252,7 +1271,7 @@ impl App {
         self.mode = Mode::ConfirmSend {
             id: id.to_owned(),
             recipients: preview.recipients,
-            subject: preview.subject,
+            subject: with_files(preview.subject, &preview.attachments),
             source: preview.source,
             stale: preview.stale,
             remaining: preview.sends_remaining,
@@ -1548,11 +1567,7 @@ impl App {
                 None
             }
             ComposeOutcome::Attach => {
-                if matches!(c.kind, ComposeKind::Reply { .. }) {
-                    self.status = "sending attachments is not supported yet".into();
-                } else {
-                    c.open_picker(editor::scan_files(&attach_roots()));
-                }
+                c.open_picker(editor::scan_files(&attach_roots()));
                 None
             }
             ComposeOutcome::External => Some(Effect::ExternalEdit {
@@ -1603,13 +1618,14 @@ impl App {
             }
             ComposeKind::Reply { thread_id } => {
                 let body = c.fields[0].area.text().trim().to_owned();
-                if body.is_empty() {
+                if body.is_empty() && attachments.is_empty() {
                     self.status = "the reply is empty".into();
                     return None;
                 }
                 Effect::SaveReply {
                     thread_id: thread_id.clone(),
                     body,
+                    attachments,
                 }
             }
             ComposeKind::Todo { reminder_id } => {
@@ -1994,6 +2010,7 @@ mod tests {
             idempotency_key: id.into(),
             principal_id: principal.into(),
             payload: Payload::Draft {
+                attachments: Vec::new(),
                 to: Some("ana@x.org".into()),
                 body: "hello".into(),
             },
@@ -2615,17 +2632,22 @@ mod tests {
         app.open_reply_form("t1");
         assert_eq!(app.mode, Mode::Compose);
         assert!(app.handle_key(Key::Ctrl('s')).is_none(), "empty reply");
+        // attaching works in a reply too: the picker opens, and a chosen file goes with the draft
         assert!(app.handle_key(Key::Ctrl('f')).is_none());
-        assert!(
-            app.status.contains("attachments"),
-            "no attaching to a reply yet"
-        );
+        assert!(app.compose.as_ref().unwrap().picker.is_some());
+        app.compose.as_mut().unwrap().picker = None;
+        app.compose
+            .as_mut()
+            .unwrap()
+            .attachments
+            .push(std::path::PathBuf::from("/a/report.pdf"));
         press(&mut app, "thanks");
         assert_eq!(
             app.handle_key(Key::Ctrl('s')),
             Some(Effect::SaveReply {
                 thread_id: "t1".into(),
-                body: "thanks".into()
+                body: "thanks".into(),
+                attachments: vec![std::path::PathBuf::from("/a/report.pdf")],
             })
         );
     }
@@ -3001,6 +3023,7 @@ mod tests {
                 recipients: vec!["ana@x.org".into()],
                 subject: "Re: plan".into(),
                 body_bytes: 10,
+                attachments: Vec::new(),
                 stale: false,
                 sends_remaining: 7,
                 recipients_digest: "digest-1".into(),
@@ -3086,6 +3109,7 @@ mod tests {
             recipients: vec!["ana@x.org".into()],
             subject: "Re: plan".into(),
             body_bytes: 10,
+            attachments: Vec::new(),
             stale,
             sends_remaining: 7,
             recipients_digest: "digest-1".into(),
@@ -3108,6 +3132,7 @@ mod tests {
                 recipients: vec!["Family chat".into()],
                 subject: String::new(),
                 body_bytes: 12,
+                attachments: Vec::new(),
                 stale: false,
                 sends_remaining: 4,
                 recipients_digest: "digest-chat".into(),

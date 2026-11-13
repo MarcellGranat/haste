@@ -296,6 +296,7 @@ fn hints(machine: &str, pane: &str) -> Option<Hints> {
 fn draft(thread: &str, key: &str, hints: Option<Hints>) -> RequestBody {
     RequestBody::Propose {
         payload: Payload::Draft {
+            attachments: Vec::new(),
             to: None,
             body: "hello".into(),
         },

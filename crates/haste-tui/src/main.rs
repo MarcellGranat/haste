@@ -559,7 +559,11 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
             };
         }
         Effect::Reply { .. } => {} // opens the form; handled in the loop
-        Effect::SaveReply { thread_id, body } => save_reply(app, client, thread_id, body),
+        Effect::SaveReply {
+            thread_id,
+            body,
+            attachments,
+        } => save_reply(app, client, thread_id, body, &attachments),
         Effect::Resolve { id, done } => {
             app.status = match describe(client.call(RequestBody::ResolveExecuting {
                 proposal_id: id,
@@ -675,17 +679,65 @@ fn edit_external(terminal: &mut ratatui::DefaultTerminal, app: &mut App, text: &
 
 /// A reply written in the form becomes a draft proposal, approved right away because the human
 /// wrote it. Sending is still its own step in Approvals, with the recipient check and countdown.
-fn save_reply(app: &mut App, client: &Client, thread_id: String, body: String) {
+fn save_reply(
+    app: &mut App,
+    client: &Client,
+    thread_id: String,
+    body: String,
+    attachments: &[std::path::PathBuf],
+) {
+    // files are copied into the attachments folder first; the draft names them, the daemon reads
+    // them at send time and the confirmation shows them
+    let names = match store_for_send(attachments) {
+        Ok(n) => n,
+        Err(e) => {
+            app.status = format!("reply not saved, {e}");
+            return;
+        }
+    };
     let key = format!("tui-reply-{thread_id}-{}", haste_core::time::now_secs());
-    app.status = match run_draft(client, thread_id, body, key) {
+    app.status = match run_draft(client, thread_id, body, names, key) {
         Ok(()) => "reply drafted and approved: 4 Approvals, then s to send".into(),
         Err(e) => e,
     };
 }
 
-fn run_draft(client: &Client, thread_id: String, body: String, key: String) -> Result<(), String> {
+/// Copy files into the attachments folder and return the stored file names.
+fn store_for_send(files: &[std::path::PathBuf]) -> Result<Vec<String>, String> {
+    let dir = base_dir().join("attachments");
+    let stamp = haste_core::time::now_secs();
+    files
+        .iter()
+        .map(|f| {
+            haste_tui::compose::store_attachment(&dir, f, stamp)
+                .map(|p| {
+                    p.file_name()
+                        .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+                })
+                .map_err(|e| {
+                    format!(
+                        "{}: {e}",
+                        f.file_name()
+                            .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+                    )
+                })
+        })
+        .collect()
+}
+
+fn run_draft(
+    client: &Client,
+    thread_id: String,
+    body: String,
+    attachments: Vec<String>,
+    key: String,
+) -> Result<(), String> {
     let proposal = match client.call(RequestBody::Propose {
-        payload: haste_core::proposal::Payload::Draft { to: None, body },
+        payload: haste_core::proposal::Payload::Draft {
+            to: None,
+            body,
+            attachments,
+        },
         thread_id: Some(thread_id),
         idempotency_key: key,
         hints: None,

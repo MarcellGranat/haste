@@ -10,7 +10,7 @@ use haste_core::policy::PrincipalKind;
 use haste_core::proposal::{Payload, Proposal, ProposalState};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 /// Largest frame either side accepts.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
@@ -365,6 +365,13 @@ pub struct ReminderView {
     pub tags: Vec<String>,
 }
 
+/// A file attached to a send, as the confirmation shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentInfo {
+    pub name: String,
+    pub bytes: usize,
+}
+
 /// What a send would do. Shown for confirmation; nothing has happened yet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SendPreviewView {
@@ -373,6 +380,9 @@ pub struct SendPreviewView {
     pub recipients: Vec<String>,
     pub subject: String,
     pub body_bytes: usize,
+    /// Files that go out with it (names and sizes; only the human can attach).
+    #[serde(default)]
+    pub attachments: Vec<AttachmentInfo>,
     pub stale: bool,
     /// Sends left this hour.
     pub sends_remaining: u32,

@@ -93,6 +93,10 @@ pub enum Payload {
     Draft {
         to: Option<String>,
         body: String,
+        /// Names of files in the data directory's `attachments` folder that go out with a human
+        /// send. Only the human's own drafts may carry any.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
     },
     Archive,
     Snooze {

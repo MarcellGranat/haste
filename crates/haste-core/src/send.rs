@@ -1,6 +1,7 @@
 //! Rules for human-sent mail: limits, address and subject validation, the recipient digest the
 //! confirmation carries, and how a send failure is classified. Nothing here does I/O.
 
+use base64::Engine;
 use sha2::{Digest, Sha256};
 
 use crate::connector::{CallError, ConnectorError};
@@ -147,7 +148,7 @@ pub fn validate_recipients(recipients: &[String]) -> Result<(), &'static str> {
 }
 
 /// A plain-text RFC 5322 message for a human send: `text/plain; charset=UTF-8`, CRLF line ends,
-/// no multipart, no Cc or Bcc header by construction. A header value containing CR, LF or NUL is
+/// no Cc or Bcc header by construction; multipart only when the human attached files. A header value containing CR, LF or NUL is
 /// *refused*, never stripped, so what the human confirmed is exactly what goes out.
 ///
 /// # Errors
@@ -162,6 +163,7 @@ pub fn compose_plain_text(
     message_id: &str,
     in_reply_to: Option<&str>,
     references: Option<&str>,
+    attachments: &[crate::connector::OutAttachment],
 ) -> Result<String, &'static str> {
     let values = [from, to, subject, date, message_id]
         .into_iter()
@@ -184,10 +186,97 @@ pub fn compose_plain_text(
     if let Some(refs) = references {
         out.push_str(&format!("References: {refs}\r\n"));
     }
+    let text = body.replace("\r\n", "\n").replace('\n', "\r\n");
+    if attachments.is_empty() {
+        out.push_str("Content-Type: text/plain; charset=UTF-8\r\n");
+        out.push_str("Content-Transfer-Encoding: 8bit\r\n\r\n");
+        out.push_str(&text);
+        return Ok(out);
+    }
+    for a in attachments {
+        if a.name.is_empty() || a.name.contains(['\r', '\n', '\0', '"', '\\', '/']) {
+            return Err("attachment name");
+        }
+    }
+    let mut boundary = format!("=_haste_{}", ulid::Ulid::new());
+    while text.contains(&boundary) {
+        boundary = format!("=_haste_{}", ulid::Ulid::new());
+    }
+    out.push_str(&format!(
+        "Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\r\n"
+    ));
+    out.push_str(&format!("--{boundary}\r\n"));
     out.push_str("Content-Type: text/plain; charset=UTF-8\r\n");
     out.push_str("Content-Transfer-Encoding: 8bit\r\n\r\n");
-    out.push_str(&body.replace("\r\n", "\n").replace('\n', "\r\n"));
+    out.push_str(&text);
+    out.push_str("\r\n");
+    for a in attachments {
+        let ascii: String = a
+            .name
+            .chars()
+            .map(|c| {
+                if c.is_ascii() && !c.is_control() {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        out.push_str(&format!("--{boundary}\r\n"));
+        out.push_str(&format!(
+            "Content-Type: {}; name=\"{ascii}\"\r\n",
+            attachment_mime(&a.name, &a.mime)
+        ));
+        out.push_str(&format!(
+            "Content-Disposition: attachment; filename=\"{ascii}\"; filename*=UTF-8''{}\r\n",
+            percent_encode(&a.name)
+        ));
+        out.push_str("Content-Transfer-Encoding: base64\r\n\r\n");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&a.data);
+        for chunk in encoded.as_bytes().chunks(76) {
+            out.push_str(std::str::from_utf8(chunk).unwrap_or(""));
+            out.push_str("\r\n");
+        }
+    }
+    out.push_str(&format!("--{boundary}--\r\n"));
     Ok(out)
+}
+
+/// The MIME type to send: the one given, else a guess from the file extension.
+#[must_use]
+pub fn attachment_mime(name: &str, given: &str) -> String {
+    if !given.is_empty() && !given.contains(['\r', '\n', ';', '"']) {
+        return given.to_owned();
+    }
+    let ext = name.rsplit_once('.').map_or("", |(_, e)| e).to_lowercase();
+    match ext.as_str() {
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "txt" | "md" => "text/plain",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "html" | "htm" => "text/html",
+        "zip" => "application/zip",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        _ => "application/octet-stream",
+    }
+    .to_owned()
+}
+
+fn percent_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_') {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// The digest a chat send's confirmation carries: SHA-256 (hex) over the chat id, the chat name
@@ -397,6 +486,53 @@ mod tests {
     }
 
     #[test]
+    fn attachments_make_a_multipart_message_with_safe_names() {
+        use crate::connector::OutAttachment;
+        let d = "Mon, 09 Nov 2026 10:00:00 +0000";
+        let file = |name: &str| OutAttachment {
+            name: name.into(),
+            mime: String::new(),
+            data: (0..200).map(|i| u8::try_from(i % 251).unwrap()).collect(),
+        };
+        let m = compose_plain_text(
+            "me@x.org",
+            "ana@x.org",
+            "Re: Lunch",
+            "Hi\nthere",
+            d,
+            "<i@x>",
+            None,
+            None,
+            &[file("Q3 jelentés.pdf")],
+        )
+        .unwrap();
+        assert!(m.contains("Content-Type: multipart/mixed; boundary=\"=_haste_"));
+        assert!(m.contains("Content-Type: application/pdf; name=\"Q3 jelent_s.pdf\""));
+        assert!(m.contains("filename*=UTF-8''Q3%20jelent%C3%A9s.pdf"));
+        assert!(m.contains("Content-Transfer-Encoding: base64"));
+        assert!(m.lines().all(|l| l.len() <= 998));
+        assert!(m.trim_end().ends_with("--"));
+        assert!(!m.to_lowercase().contains("\r\ncc:") && !m.to_lowercase().contains("\r\nbcc:"));
+        for bad in ["a\"b.pdf", "a\r\nBcc: x@y.z", "../x", ""] {
+            assert!(
+                compose_plain_text(
+                    "me@x.org",
+                    "ana@x.org",
+                    "s",
+                    "b",
+                    d,
+                    "<i@x>",
+                    None,
+                    None,
+                    &[file(bad)]
+                )
+                .is_err(),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_composed_message_refuses_injection_and_has_no_cc_or_bcc() {
         let d = "Mon, 09 Nov 2026 10:00:00 +0000";
         let ok = compose_plain_text(
@@ -408,6 +544,7 @@ mod tests {
             "<i@x>",
             Some("<m3@x>"),
             Some("<m1@x> <m3@x>"),
+            &[],
         )
         .unwrap();
         let headers = ok.split("\r\n\r\n").next().unwrap();
@@ -429,7 +566,7 @@ mod tests {
             ("a@x.org\0", "s"),
         ] {
             assert_eq!(
-                compose_plain_text("me@x.org", to, subject, "b", d, "<i@x>", None, None),
+                compose_plain_text("me@x.org", to, subject, "b", d, "<i@x>", None, None, &[]),
                 Err("header characters"),
                 "{to:?} {subject:?}"
             );

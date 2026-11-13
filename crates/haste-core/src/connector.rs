@@ -61,6 +61,26 @@ pub struct Batch {
     pub next_cursor: Option<Cursor>,
 }
 
+/// The most attachments one send may carry (chats take one), and the most bytes in all.
+pub const MAX_SEND_ATTACHMENTS: usize = 5;
+pub const MAX_SEND_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+
+/// A file that goes out with a human send. The daemon reads it from the attachments folder at
+/// send time; a connector only encodes and hands it over.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OutAttachment {
+    pub name: String,
+    pub mime: String,
+    pub data: Vec<u8>,
+}
+
+impl std::fmt::Debug for OutAttachment {
+    // never the bytes, never the name: only the size
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "OutAttachment({} bytes)", self.data.len())
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DraftToSend {
     pub thread_id: Option<String>,
@@ -72,6 +92,8 @@ pub struct DraftToSend {
     pub subject: Option<String>,
     /// The provider draft made at approval time, removed after a successful send (Gmail).
     pub approval_draft_id: Option<String>,
+    /// Files the human attached to this send (empty for agents' drafts and for creating drafts).
+    pub attachments: Vec<OutAttachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

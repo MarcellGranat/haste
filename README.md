@@ -126,6 +126,16 @@ holds only the client id, secret and your address (mode `0600`). If the token is
 (`invalid_grant`), the connector engages its kill switch and notifies you: run the auth command
 again, then release the connector.
 
+### Sending attachments (human only)
+
+In the TUI, `r` opens the reply editor under the thread; `Ctrl-F` attaches files (up to 5, 10 MB
+in all; chats take one). The files are copied to `attachments/` in the data directory, the draft
+names them, and the send confirmation lists them. Gmail and iCloud send a `multipart/mixed`
+message; Beeper chats upload the file to the local Beeper service first, then send it with the
+text. Only the human can attach: an agent's draft with attachments is refused (`Denied`), and a
+send reads only plain, non-link files from `attachments/`. The audit records the count of files,
+never a name.
+
 ### Connector administration (human only)
 
 ```sh

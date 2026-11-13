@@ -374,6 +374,7 @@ async fn a_human_sends_an_approved_icloud_draft_once_and_an_agent_never_can() {
         &agent,
         RequestBody::Propose {
             payload: haste_core::proposal::Payload::Draft {
+                attachments: Vec::new(),
                 to: None,
                 body: "Noon works well.".into(),
             },

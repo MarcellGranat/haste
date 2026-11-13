@@ -1469,7 +1469,7 @@ fn create_provider_draft(
     proposal: &haste_core::Proposal,
     now: i64,
 ) -> haste_core::Proposal {
-    let Payload::Draft { to, body } = &proposal.payload else {
+    let Payload::Draft { to, body, .. } = &proposal.payload else {
         return proposal.clone();
     };
     let Some(thread_id) = &proposal.source_thread_id else {
@@ -1540,6 +1540,17 @@ fn propose(
     hints: Option<&Hints>,
     now: i64,
 ) -> Response {
+    if let Payload::Draft { attachments, .. } = &payload {
+        if !attachments.is_empty() {
+            // only the human's own drafts carry files: an agent must not be able to name one
+            if principal.kind != PrincipalKind::Human {
+                return err(ErrorCode::Denied, "attachments_human_only");
+            }
+            if let Err(why) = check_attachments(state, attachments) {
+                return err(ErrorCode::Validation, why);
+            }
+        }
+    }
     let (project, origin_machine) = resolve_hints(state, hints);
     let payload = match prepare_reminder_payload(state, payload, thread_id.as_deref(), &project) {
         Ok(p) => p,
@@ -2111,6 +2122,7 @@ struct ResolvedSend {
     subject: String,
     body: String,
     approval_draft_id: Option<String>,
+    attachments: Vec<haste_core::connector::OutAttachment>,
     stale: bool,
 }
 
@@ -2122,7 +2134,12 @@ fn resolve_send(
     proposal: &haste_core::Proposal,
 ) -> Result<ResolvedSend, Box<Response>> {
     let fail = |code: ErrorCode, msg: &str| Box::new(err(code, msg));
-    let Payload::Draft { to, body } = &proposal.payload else {
+    let Payload::Draft {
+        to,
+        body,
+        attachments: attachment_names,
+    } = &proposal.payload
+    else {
         return Err(fail(
             ErrorCode::IllegalTransition,
             "only drafts can be sent",
@@ -2149,9 +2166,17 @@ fn resolve_send(
         SendScope::Mail => MAX_SEND_BODY_BYTES,
         SendScope::Chat => CHAT_MAX_SEND_BYTES,
     };
-    if body.trim().is_empty() || body.len() > max_body {
+    // a file may go out without any text (chats), never an empty mail
+    if (body.trim().is_empty() && (attachment_names.is_empty() || scope == SendScope::Mail))
+        || body.len() > max_body
+    {
         return Err(fail(ErrorCode::Validation, "body_length"));
     }
+    if scope == SendScope::Chat && attachment_names.len() > 1 {
+        return Err(fail(ErrorCode::Validation, "chat_one_attachment"));
+    }
+    let attachments = load_attachments(state, attachment_names)
+        .map_err(|why| fail(ErrorCode::Validation, why))?;
     if scope == SendScope::Chat {
         // A reply into the existing chat the thread is: no recipient list, no subject. The human
         // confirms the chat name and the text; the digest covers both.
@@ -2161,13 +2186,17 @@ fn resolve_send(
             .map(|p| p.stale)
             .unwrap_or(false);
         return Ok(ResolvedSend {
-            digest: chat_send_digest(&thread.external_id, &thread.subject, body),
+            digest: with_attachments_digest(
+                chat_send_digest(&thread.external_id, &thread.subject, body),
+                &attachments,
+            ),
             source: thread.source,
             recipients: vec![thread.subject.clone()],
             subject: String::new(),
             thread_external_id: thread.external_id,
             body: body.clone(),
             approval_draft_id: None,
+            attachments,
             stale,
         });
     }
@@ -2199,7 +2228,7 @@ fn resolve_send(
         .map(|p| p.stale)
         .unwrap_or(false);
     Ok(ResolvedSend {
-        digest: recipients_digest(&recipients),
+        digest: with_attachments_digest(recipients_digest(&recipients), &attachments),
         source: thread.source,
         thread_external_id: thread.external_id,
         recipients,
@@ -2210,8 +2239,93 @@ fn resolve_send(
             .as_deref()
             .and_then(|r| r.strip_prefix("draft:"))
             .map(str::to_owned),
+        attachments,
         stale,
     })
+}
+
+/// The folder the TUI copies attached files into; a send reads only from here.
+fn attachments_dir(state: &State) -> std::path::PathBuf {
+    state.config.data_dir.join("attachments")
+}
+
+/// Check the attachment names of a draft: a few plain file names that exist as regular files
+/// (never links) in the attachments folder, within the size cap. Returns each file's size.
+/// Failures carry a fixed reason label, never a name.
+fn check_attachments(state: &State, names: &[String]) -> Result<Vec<u64>, &'static str> {
+    use haste_core::connector::{MAX_SEND_ATTACHMENTS, MAX_SEND_ATTACHMENT_BYTES};
+    if names.len() > MAX_SEND_ATTACHMENTS {
+        return Err("attachments_count");
+    }
+    let dir = attachments_dir(state);
+    let mut sizes = Vec::new();
+    let mut total: u64 = 0;
+    for name in names {
+        let plain = !name.is_empty()
+            && name.chars().count() <= 120
+            && !name.starts_with('.')
+            && !name
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '/' | '\\' | '"'));
+        if !plain {
+            return Err("attachment_name");
+        }
+        let meta = std::fs::symlink_metadata(dir.join(name)).map_err(|_| "attachment_missing")?;
+        if !meta.is_file() {
+            return Err("attachment_missing");
+        }
+        total += meta.len();
+        sizes.push(meta.len());
+    }
+    if total > MAX_SEND_ATTACHMENT_BYTES as u64 {
+        return Err("attachments_size");
+    }
+    Ok(sizes)
+}
+
+/// Read the attached files for a send (after [`check_attachments`]).
+fn load_attachments(
+    state: &State,
+    names: &[String],
+) -> Result<Vec<haste_core::connector::OutAttachment>, &'static str> {
+    check_attachments(state, names)?;
+    let dir = attachments_dir(state);
+    names
+        .iter()
+        .map(|name| {
+            let data = std::fs::read(dir.join(name)).map_err(|_| "attachment_missing")?;
+            Ok(haste_core::connector::OutAttachment {
+                mime: haste_core::send::attachment_mime(name, ""),
+                name: name.clone(),
+                data,
+            })
+        })
+        .collect()
+}
+
+/// Fold the attached files (names and sizes) into the digest the human confirms, so the send
+/// goes out with exactly the files that were shown.
+fn with_attachments_digest(
+    digest: String,
+    attachments: &[haste_core::connector::OutAttachment],
+) -> String {
+    use sha2::{Digest, Sha256};
+    if attachments.is_empty() {
+        return digest;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(digest.as_bytes());
+    for a in attachments {
+        hasher.update([0_u8]);
+        hasher.update(a.name.as_bytes());
+        hasher.update([0_u8]);
+        hasher.update(Sha256::digest(&a.data));
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Read-only: who a send would go to. Changes nothing and audits no content.
@@ -2245,6 +2359,14 @@ fn send_preview(state: &State, proposal_id: &str, now: i64) -> Response {
             recipients: resolved.recipients,
             subject: resolved.subject,
             body_bytes: resolved.body.len(),
+            attachments: resolved
+                .attachments
+                .iter()
+                .map(|a| haste_proto::AttachmentInfo {
+                    name: a.name.clone(),
+                    bytes: a.data.len(),
+                })
+                .collect(),
             stale: resolved.stale,
             sends_remaining: remaining,
         },
@@ -2320,6 +2442,7 @@ fn send(
         recipients: resolved.recipients.clone(),
         subject: Some(resolved.subject.clone()),
         approval_draft_id: resolved.approval_draft_id.clone(),
+        attachments: resolved.attachments.clone(),
     };
     let guard = Guarded {
         connector: connector.as_ref(),
@@ -2331,7 +2454,16 @@ fn send(
             let result = format!("sent:{}", receipt.external_id);
             match state.store.finish_send(proposal_id, &result, now) {
                 Ok(p) => {
-                    state.audit(&actor.id, "proposal.send", "sent", Some(proposal_id), None);
+                    // the count of files only, never a name
+                    let files = resolved.attachments.len();
+                    let detail = (files > 0).then(|| format!("attachments={files}"));
+                    state.audit(
+                        &actor.id,
+                        "proposal.send",
+                        "sent",
+                        Some(proposal_id),
+                        detail.as_deref(),
+                    );
                     if receipt.external_id.contains("copy_failed") {
                         state.audit(
                             &actor.id,

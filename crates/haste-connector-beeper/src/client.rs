@@ -275,13 +275,90 @@ impl BeeperClient {
     /// # Errors
     /// Classified [`ConnectorError`].
     pub async fn send_message(&self, chat_id: &str, text: &str) -> Result<String, ConnectorError> {
+        self.send_message_with(chat_id, text, None).await
+    }
+
+    /// Upload a file to the local Beeper service so a message can carry it. Nothing is sent to
+    /// anyone by this call, so a failure is a plain refusal (never an unknown outcome).
+    ///
+    /// # Errors
+    /// `Authorization` when Beeper is not running or the token is rejected, else `Other`.
+    pub async fn upload_asset(
+        &self,
+        name: &str,
+        mime: &str,
+        data: &[u8],
+    ) -> Result<String, ConnectorError> {
+        use base64::Engine;
+        let token = self.token()?;
+        let response = self
+            .http
+            .post(self.url(&["v1", "assets", "upload", "base64"]))
+            .bearer_auth(token)
+            .json(&serde_json::json!({
+                "content": base64::engine::general_purpose::STANDARD.encode(data),
+                "fileName": name,
+                "mimeType": mime,
+            }))
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_connect() {
+                    ConnectorError::Authorization(NOT_RUNNING.into())
+                } else {
+                    ConnectorError::Other("upload failed".into())
+                }
+            })?;
+        let status = response.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            self.forget();
+            return Err(ConnectorError::Authorization(TOKEN_REJECTED.into()));
+        }
+        if !status.is_success() {
+            return Err(ConnectorError::Other(format!(
+                "upload refused: http {}",
+                status.as_u16()
+            )));
+        }
+        let text = response.text().await.unwrap_or_default();
+        serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| {
+                v.get("uploadID")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| ConnectorError::Other("upload gave no id".into()))
+    }
+
+    /// Like [`Self::send_message`], with one uploaded file (`(upload id, file name)`).
+    ///
+    /// # Errors
+    /// The same classes as [`Self::send_message`].
+    pub async fn send_message_with(
+        &self,
+        chat_id: &str,
+        text: &str,
+        attachment: Option<(&str, &str)>,
+    ) -> Result<String, ConnectorError> {
         let token = self.token()?;
         let timer = haste_core::log::Timer::start();
+        let mut payload = serde_json::Map::new();
+        if !text.is_empty() {
+            payload.insert("text".into(), serde_json::Value::String(text.to_owned()));
+        }
+        if let Some((upload_id, name)) = attachment {
+            payload.insert(
+                "attachment".into(),
+                serde_json::json!({ "uploadID": upload_id, "fileName": name }),
+            );
+        }
         let response = self
             .http
             .post(self.url(&["v1", "chats", chat_id, "messages"]))
             .bearer_auth(token)
-            .json(&serde_json::json!({ "text": text }))
+            .json(&serde_json::Value::Object(payload))
             .send()
             .await
             .map_err(|e| {

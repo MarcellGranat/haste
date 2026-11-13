@@ -84,6 +84,9 @@ fn serve(world: &Shared) -> impl Fn(&Recorded) -> (u16, String) + Send + Sync + 
                     json!({ "items": items, "hasMore": idx + 1 < pages.len(), "nextCursor": format!("p{}", idx + 1) }).to_string(),
                 )
             }
+            ("POST", ["v1", "assets", "upload", "base64"]) => {
+                (200, json!({ "uploadID": "up-1" }).to_string())
+            }
             ("POST", ["v1", "chats", _, "messages"]) => w
                 .send
                 .clone()
@@ -702,6 +705,7 @@ async fn a_redirect_is_never_followed_so_the_token_cannot_be_moved_elsewhere() {
 
 fn reply(chat: &str, text: &str) -> DraftToSend {
     DraftToSend {
+        attachments: Vec::new(),
         thread_id: Some(chat.into()),
         to: None,
         body: text.into(),
@@ -738,6 +742,51 @@ async fn a_send_makes_one_text_only_request_into_a_selected_on_device_chat() {
         json!({ "text": "On my way" }),
         "text only: no attachment, no extra field"
     );
+}
+
+#[tokio::test]
+async fn a_file_is_uploaded_to_the_local_service_then_sent_with_the_text() {
+    use haste_core::connector::OutAttachment;
+    let r = rig(BeeperSource::Whatsapp, basic, send_rig_cfg()).await;
+    let file = |name: &str| OutAttachment {
+        name: name.into(),
+        mime: "application/pdf".into(),
+        data: b"%PDF-1.4 test".to_vec(),
+    };
+    let draft = DraftToSend {
+        attachments: vec![file("report.pdf")],
+        ..reply("chat-a", "Here it is")
+    };
+    let receipt = r.connector.send(&draft).await.unwrap();
+    assert_eq!(receipt.external_id, "beeper:msg-1");
+    let reqs: Vec<_> = r
+        .server
+        .requests()
+        .into_iter()
+        .filter(|q| q.method == "POST")
+        .collect();
+    assert_eq!(reqs.len(), 2, "one upload, one message");
+    assert_eq!(reqs[0].path, "/v1/assets/upload/base64");
+    let up: Value = serde_json::from_str(&reqs[0].body).unwrap();
+    assert_eq!(up["fileName"], "report.pdf");
+    assert_eq!(reqs[1].path, "/v1/chats/chat-a/messages");
+    let body: Value = serde_json::from_str(&reqs[1].body).unwrap();
+    assert_eq!(body["text"], "Here it is");
+    assert_eq!(body["attachment"]["uploadID"], "up-1");
+
+    // a file alone is fine in a chat; two files in one message are refused before any request
+    let only_file = DraftToSend {
+        attachments: vec![file("a.pdf")],
+        ..reply("chat-a", "")
+    };
+    assert!(r.connector.send(&only_file).await.is_ok());
+    let before = r.server.requests().len();
+    let two = DraftToSend {
+        attachments: vec![file("a.pdf"), file("b.pdf")],
+        ..reply("chat-a", "x")
+    };
+    assert!(r.connector.send(&two).await.is_err());
+    assert_eq!(r.server.requests().len(), before, "nothing was requested");
 }
 
 #[tokio::test]

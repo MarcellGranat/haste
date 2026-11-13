@@ -163,6 +163,8 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE proposals ADD COLUMN send_started_at INTEGER;
     ALTER TABLE proposals ADD COLUMN send_outcome TEXT;
     ",
+    // 7: whether the human wrote a message (chats), for the reader's chat layout.
+    "ALTER TABLE messages ADD COLUMN is_own INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// Highest schema version this binary understands.

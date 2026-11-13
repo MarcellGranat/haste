@@ -320,9 +320,9 @@ fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
 fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
     if app.mode == Mode::Read {
         return vec![
-            ("j/k", "scroll"),
-            ("Space/b", "page"),
-            ("g/G", "top/end"),
+            ("j/k", "message"),
+            ("o", "open link"),
+            ("g/G", "first/last"),
             ("r", "reply"),
             ("e", "archive"),
             ("Esc", "close"),
@@ -773,67 +773,50 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(reader) = &app.reader else {
         return;
     };
-    let off = app.tz_offset;
     let thread = &reader.view.thread;
+    let source = thread.source.as_name();
+    let labels = if reader.view.tags.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", reader.view.tags.join(", "))
+    };
     let title = format!(
-        " {} · {} · {} message(s) ",
+        " {} {} · {} · {}/{}{labels} ",
+        source_icon(&source),
         inbox::sanitize(&thread.subject).replace('\n', " "),
-        thread.source.as_name(),
+        source,
+        reader.selected + 1,
         reader.messages.len()
     );
     frame.render_widget(Clear, area);
     let block = theme::panel(&title).border_style(pane_border(true));
     let inner = block.inner(area);
-    let width = usize::from(inner.width).saturating_sub(2).max(10);
     let height = usize::from(inner.height);
-
-    let mut lines: Vec<Line<'_>> = Vec::new();
-    let mut last_start = 0;
-    for m in &reader.messages {
-        last_start = lines.len();
-        let who = m.sender_identifier.as_deref().unwrap_or("unknown sender");
-        lines.push(Line::from(vec![
-            Span::styled(
-                inbox::sanitize(who).replace('\n', " "),
-                Style::new().fg(theme::MAUVE).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  {}", inbox::stamp(m.sent_at, off)),
-                Style::new().fg(theme::MUTED),
-            ),
-        ]));
-        let text = if m.body_text.trim().is_empty() {
-            "(no text)".to_owned()
-        } else {
-            inbox::sanitize(&m.body_text)
-        };
-        for l in inbox::wrap(&text, width) {
-            lines.push(Line::from(Span::styled(l, Style::new().fg(theme::TEXT))));
-        }
-        lines.push(Line::from(""));
-    }
+    let (mut lines, laid) = crate::chat::layout(
+        &reader.messages,
+        &crate::chat::Layout {
+            width: usize::from(inner.width),
+            selected: reader.selected,
+            own: reader.own.as_deref(),
+            tz_offset: app.tz_offset,
+        },
+    );
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
             "no messages stored for this thread yet",
             theme::muted(),
         )));
     }
-    let max_scroll = lines.len().saturating_sub(height);
-    if reader.to_latest.get() {
-        reader.to_latest.set(false);
-        reader.scroll.set(last_start);
-    }
-    let scroll = reader.scroll.get().min(max_scroll);
-    reader.scroll.set(scroll);
-    let more = if max_scroll > 0 {
-        format!(" {}/{} ", scroll + 1, lines.len())
-    } else {
-        String::new()
+    let scroll = match laid.get(reader.selected) {
+        Some(l) => crate::chat::scroll_to(reader.scroll.get(), l, height, lines.len()),
+        None => 0,
     };
+    reader.scroll.set(scroll);
+    let hint = " j/k message · o open link · r reply · n note · l label · e archive · Esc close ";
     frame.render_widget(
         Paragraph::new(lines)
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
-            .block(block.title_bottom(more)),
+            .block(block.title_bottom(hint)),
         area,
     );
 }
@@ -1121,7 +1104,7 @@ mod tests {
             tags: vec![],
             last: None,
         };
-        app.show_thread(view, messages);
+        app.show_thread(view, messages, None);
     }
 
     fn msg(id: &str, text: &str, at: i64) -> haste_core::model::Message {
@@ -1134,6 +1117,7 @@ mod tests {
             sender_identifier: Some("ana@x.org".into()),
             body_text: text.into(),
             sent_at: at,
+            is_own: false,
         }
     }
 
@@ -1152,7 +1136,7 @@ mod tests {
             ],
         );
         let text = render(&app);
-        assert!(text.contains("Quarterly plan") && text.contains("2 message(s)"));
+        assert!(text.contains("Quarterly plan") && text.contains("2/2"));
         assert!(text.contains("ana@x.org") && text.contains("Kedves Marcell"));
         assert!(!text.contains('\u{1b}') && !text.contains('\u{202E}'));
         assert!(text.contains("köszönöm") || text.contains("k[2Jöszönöm"));

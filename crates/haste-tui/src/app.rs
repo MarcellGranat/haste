@@ -83,12 +83,14 @@ pub struct Reader {
     pub messages: Vec<Message>,
     /// First visible line (set while drawing, which knows the width).
     pub scroll: Cell<usize>,
-    /// Start at the newest message; cleared once drawn.
-    pub to_latest: Cell<bool>,
+    /// The message the cursor is on.
+    pub selected: usize,
+    /// The account's own address (mail), to tell which messages are yours.
+    pub own: Option<String>,
 }
 
 /// Lines a page key moves in the reader.
-pub const READER_PAGE: usize = 12;
+pub const READER_PAGE: isize = 4;
 
 /// Which pane of the Today tab has the cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +171,12 @@ pub enum Effect {
     Reply {
         thread_id: String,
     },
+    /// Save a reply as a draft, approved by the human who wrote it (sending stays a separate,
+    /// confirmed step).
+    SaveReply {
+        thread_id: String,
+        body: String,
+    },
     /// Append a note about a thread to the notes folder (no approval: the human wrote it).
     SaveNote {
         thread_id: String,
@@ -182,6 +190,10 @@ pub enum Effect {
         due: Option<i64>,
         notes: String,
         attachments: Vec<std::path::PathBuf>,
+    },
+    /// Open a link from a message in the browser.
+    OpenUrl {
+        url: String,
     },
     /// `Ctrl-G` in a form: edit this text in `$EDITOR`, then call [`App::compose_replace_text`].
     ExternalEdit {
@@ -1307,13 +1319,20 @@ impl App {
 
     /// The daemon's answer to [`Effect::OpenThread`]: show the thread, starting at the newest
     /// message.
-    pub fn show_thread(&mut self, view: ThreadView, mut messages: Vec<Message>) {
+    pub fn show_thread(
+        &mut self,
+        view: ThreadView,
+        mut messages: Vec<Message>,
+        own: Option<String>,
+    ) {
         messages.sort_by_key(|m| m.sent_at);
+        let selected = messages.len().saturating_sub(1);
         self.reader = Some(Reader {
             view,
             messages,
             scroll: Cell::new(0),
-            to_latest: Cell::new(true),
+            selected,
+            own,
         });
         self.mode = Mode::Read;
     }
@@ -1323,30 +1342,39 @@ impl App {
         self.mode = Mode::Normal;
     }
 
-    /// Keys while a thread is open: scroll, reply, archive, close.
+    /// Keys while a thread is open: move between messages, open a link, reply, archive, close.
     fn key_read(&mut self, key: Key) -> Option<Effect> {
-        let Some(reader) = &self.reader else {
+        let Some(reader) = &mut self.reader else {
             self.mode = Mode::Normal;
             return None;
         };
         let thread_id = reader.view.thread.id.clone();
-        let at = reader.scroll.get();
-        let to = |v: usize| reader.scroll.set(v);
+        let last = reader.messages.len().saturating_sub(1);
+        let step = |at: usize, by: isize| at.saturating_add_signed(by).min(last);
         match key {
             Key::Esc | Key::Enter | Key::Char('q' | 'h') => self.close_reader(),
-            Key::Char('j') | Key::Down => to(at.saturating_add(1)),
-            Key::Char('k') | Key::Up => to(at.saturating_sub(1)),
+            Key::Char('j') | Key::Down => reader.selected = step(reader.selected, 1),
+            Key::Char('k') | Key::Up => reader.selected = step(reader.selected, -1),
+            Key::Char(' ' | 'd') => reader.selected = step(reader.selected, READER_PAGE),
+            Key::Char('b' | 'u') => reader.selected = step(reader.selected, -READER_PAGE),
+            Key::Char('g' | '0') => reader.selected = 0,
+            Key::Char('G') => reader.selected = last,
+            Key::Char('o') => {
+                let url = reader.messages.get(reader.selected).and_then(|m| {
+                    crate::chat::links(&inbox::sanitize(&m.body_text))
+                        .into_iter()
+                        .next()
+                });
+                match url {
+                    Some(url) => return Some(Effect::OpenUrl { url }),
+                    None => self.status = "no link in this message".into(),
+                }
+            }
             Key::Char('n') => {
-                self.start_note_for(&thread_id, reader.view.thread.subject.clone());
+                let subject = reader.view.thread.subject.clone();
+                self.start_note_for(&thread_id, subject);
             }
             Key::Char('l') => return Some(Effect::OpenLabels { thread_id }),
-            Key::Char(' ' | 'd') => to(at.saturating_add(READER_PAGE)),
-            Key::Char('b' | 'u') => to(at.saturating_sub(READER_PAGE)),
-            Key::Char('g' | '0') => {
-                reader.to_latest.set(false);
-                to(0);
-            }
-            Key::Char('G') => to(usize::MAX),
             Key::Char('r') => return Some(Effect::Reply { thread_id }),
             Key::Char('e') => {
                 self.close_reader();
@@ -1475,7 +1503,11 @@ impl App {
                 None
             }
             ComposeOutcome::Attach => {
-                c.open_picker(editor::scan_files(&attach_roots()));
+                if matches!(c.kind, ComposeKind::Reply { .. }) {
+                    self.status = "sending attachments is not supported yet".into();
+                } else {
+                    c.open_picker(editor::scan_files(&attach_roots()));
+                }
                 None
             }
             ComposeOutcome::External => Some(Effect::ExternalEdit {
@@ -1483,6 +1515,14 @@ impl App {
             }),
             ComposeOutcome::Save => self.finish_compose(),
         }
+    }
+
+    /// `Effect::Reply` was taken by the loop: open the reply form.
+    pub fn open_reply_form(&mut self, thread_id: &str) {
+        let (subject, _) = self.thread_facts(thread_id);
+        let subject = inbox::sanitize(&subject).replace('\n', " ");
+        self.compose = Some(Box::new(Compose::reply(thread_id, &subject)));
+        self.mode = Mode::Compose;
     }
 
     /// The text `$EDITOR` returned goes back into the focused field.
@@ -1506,6 +1546,17 @@ impl App {
                     thread_id: thread_id.clone(),
                     text,
                     attachments,
+                }
+            }
+            ComposeKind::Reply { thread_id } => {
+                let body = c.fields[0].area.text().trim().to_owned();
+                if body.is_empty() {
+                    self.status = "the reply is empty".into();
+                    return None;
+                }
+                Effect::SaveReply {
+                    thread_id: thread_id.clone(),
+                    body,
                 }
             }
             ComposeKind::Todo { reminder_id } => {
@@ -2337,6 +2388,7 @@ mod tests {
             sender_identifier: Some(who.into()),
             body_text: text.into(),
             sent_at: at,
+            is_own: false,
         }
     }
 
@@ -2375,28 +2427,30 @@ mod tests {
                 message("m2", "b@x.com", "second", 20),
                 message("m1", "a@x.com", "first", 10),
             ],
+            None,
         );
         assert_eq!(app.mode, Mode::Read);
         let reader = app.reader.as_ref().unwrap();
         assert_eq!(reader.messages[0].id, "m1", "oldest first");
-        assert!(reader.to_latest.get(), "opens on the newest message");
-        // scrolling
-        app.reader.as_ref().unwrap().scroll.set(5);
+        assert_eq!(reader.selected, 1, "opens on the newest message");
+        // j and k move between messages and stop at the ends
         press(&mut app, "j");
-        assert_eq!(app.reader.as_ref().unwrap().scroll.get(), 6);
+        assert_eq!(app.reader.as_ref().unwrap().selected, 1);
         press(&mut app, "k");
-        press(&mut app, "b");
+        assert_eq!(app.reader.as_ref().unwrap().selected, 0);
+        press(&mut app, "k");
         assert_eq!(
-            app.reader.as_ref().unwrap().scroll.get(),
+            app.reader.as_ref().unwrap().selected,
             0,
-            "never below the top"
+            "never above the first"
         );
         press(&mut app, "G");
-        assert_eq!(
-            app.reader.as_ref().unwrap().scroll.get(),
-            usize::MAX,
-            "clamped when drawn"
-        );
+        assert_eq!(app.reader.as_ref().unwrap().selected, 1);
+        press(&mut app, "g");
+        assert_eq!(app.reader.as_ref().unwrap().selected, 0);
+        // o opens the first link of the selected message, and says so when there is none
+        assert!(press(&mut app, "o").is_empty());
+        assert!(app.status.contains("no link"));
         // reply keeps the reader open
         assert_eq!(
             press(&mut app, "r"),
@@ -2424,11 +2478,54 @@ mod tests {
         );
         // Esc closes without doing anything
         let view = app.threads[0].clone();
-        app.show_thread(view, vec![]);
+        app.show_thread(view, vec![], None);
         assert!(app.handle_key(Key::Esc).is_none());
         assert_eq!(
             (app.mode.clone(), app.reader.is_none()),
             (Mode::Normal, true)
+        );
+    }
+
+    #[test]
+    fn a_reply_is_written_in_the_form_and_saved_as_a_draft_effect() {
+        let mut app = inbox_app();
+        app.open_reply_form("t1");
+        assert_eq!(app.mode, Mode::Compose);
+        assert!(app.handle_key(Key::Ctrl('s')).is_none(), "empty reply");
+        assert!(app.handle_key(Key::Ctrl('f')).is_none());
+        assert!(
+            app.status.contains("attachments"),
+            "no attaching to a reply yet"
+        );
+        press(&mut app, "thanks");
+        assert_eq!(
+            app.handle_key(Key::Ctrl('s')),
+            Some(Effect::SaveReply {
+                thread_id: "t1".into(),
+                body: "thanks".into()
+            })
+        );
+    }
+
+    #[test]
+    fn o_opens_the_first_link_of_the_selected_message() {
+        let mut app = inbox_app();
+        let view = app.threads[1].clone();
+        app.show_thread(
+            view,
+            vec![message(
+                "m1",
+                "a@x.com",
+                "see https://example.org/a. thanks",
+                10,
+            )],
+            None,
+        );
+        assert_eq!(
+            press(&mut app, "o"),
+            vec![Effect::OpenUrl {
+                url: "https://example.org/a".into()
+            }]
         );
     }
 

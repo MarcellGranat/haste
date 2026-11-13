@@ -339,7 +339,11 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
         Effect::CompleteReminders { ids } => complete_all(app, client, ids),
         Effect::OpenThread { thread_id } => {
             match client.call(RequestBody::ThreadShow { thread_id }) {
-                Ok(Response::Thread { view, messages }) => app.show_thread(view, messages),
+                Ok(Response::Thread {
+                    view,
+                    messages,
+                    own,
+                }) => app.show_thread(view, messages, own),
                 other => {
                     app.status = describe(other)
                         .err()
@@ -367,6 +371,21 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
             notes,
             attachments,
         } => save_todo(app, client, reminder_id, title, due, notes, attachments),
+        Effect::OpenUrl { url } => {
+            // only plain web links, so nothing but a page can be opened from message text
+            let ok = (url.starts_with("https://") || url.starts_with("http://"))
+                && !url.chars().any(|c| c.is_control() || c.is_whitespace());
+            app.status = if ok
+                && std::process::Command::new("open")
+                    .arg(&url)
+                    .status()
+                    .is_ok_and(|s| s.success())
+            {
+                "opened in the browser".into()
+            } else {
+                "could not open the link".into()
+            };
+        }
         Effect::ExternalEdit { .. } => {} // needs the terminal; handled in the loop
         Effect::OpenLabels { thread_id } => {
             let workspace = match client.call(RequestBody::TagList) {
@@ -526,7 +545,8 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 Err(e) => e,
             };
         }
-        Effect::Reply { .. } => {} // needs the terminal; handled by `edit_reply` in the loop
+        Effect::Reply { .. } => {} // opens the form; handled in the loop
+        Effect::SaveReply { thread_id, body } => save_reply(app, client, thread_id, body),
         Effect::Resolve { id, done } => {
             app.status = match describe(client.call(RequestBody::ResolveExecuting {
                 proposal_id: id,
@@ -640,61 +660,34 @@ fn edit_external(terminal: &mut ratatui::DefaultTerminal, app: &mut App, text: &
     }
 }
 
-fn edit_reply(
-    terminal: &mut ratatui::DefaultTerminal,
-    app: &mut App,
-    client: &Client,
-    thread_id: String,
-) {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let dir = base_dir().join("drafts");
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join(format!("reply-{}.txt", std::process::id()));
-    let created = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&path)
-        .and_then(|mut f| f.write_all(b""));
-    if created.is_err() {
-        app.status = "could not create the reply file".into();
-        return;
-    }
-    let editor = std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| "vi".into());
-    let mut parts = editor.split_whitespace();
-    let program = parts.next().unwrap_or("vi").to_owned();
-    ratatui::restore();
-    let ran = std::process::Command::new(program)
-        .args(parts)
-        .arg(&path)
-        .status();
-    *terminal = ratatui::init();
-    let _ = terminal.clear();
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let _ = std::fs::remove_file(&path);
-    if !matches!(ran, Ok(s) if s.success()) {
-        app.status = "the editor did not finish; reply cancelled".into();
-        return;
-    }
-    let body = text.trim().to_owned();
-    if body.is_empty() {
-        app.status = "empty reply; nothing proposed".into();
-        return;
-    }
+/// A reply written in the form becomes a draft proposal, approved right away because the human
+/// wrote it. Sending is still its own step in Approvals, with the recipient check and countdown.
+fn save_reply(app: &mut App, client: &Client, thread_id: String, body: String) {
     let key = format!("tui-reply-{thread_id}-{}", haste_core::time::now_secs());
-    app.status = match describe(client.call(RequestBody::Propose {
+    app.status = match run_draft(client, thread_id, body, key) {
+        Ok(()) => "reply drafted and approved: 4 Approvals, then s to send".into(),
+        Err(e) => e,
+    };
+}
+
+fn run_draft(client: &Client, thread_id: String, body: String, key: String) -> Result<(), String> {
+    let proposal = match client.call(RequestBody::Propose {
         payload: haste_core::proposal::Payload::Draft { to: None, body },
         thread_id: Some(thread_id),
         idempotency_key: key,
         hints: None,
-    })) {
-        Ok(()) => "reply drafted; approve it in Approvals (4), then send".into(),
-        Err(e) => e,
+    }) {
+        Ok(Response::Proposal { proposal }) => proposal,
+        other => {
+            return Err(describe(other)
+                .err()
+                .unwrap_or_else(|| "no proposal".into()))
+        }
     };
+    describe(client.call(RequestBody::Approve {
+        proposal_id: proposal.id,
+        acknowledge_stale: false,
+    }))
 }
 
 fn main() -> io::Result<()> {
@@ -733,8 +726,7 @@ fn main() -> io::Result<()> {
                             if let Effect::ExternalEdit { text } = effect {
                                 edit_external(&mut terminal, &mut app, &text);
                             } else if let Effect::Reply { thread_id } = effect {
-                                edit_reply(&mut terminal, &mut app, &client, thread_id);
-                                refresh(&mut app, &client);
+                                app.open_reply_form(&thread_id);
                             } else if run_effect(&mut app, &client, effect) {
                                 return Ok(());
                             }

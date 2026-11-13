@@ -319,6 +319,11 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
                 }
                 match state.store.messages_for_thread(&thread_id) {
                     Ok(messages) => Response::Thread {
+                        // only the human's own screen needs it
+                        own: (principal.kind == PrincipalKind::Human)
+                            .then(|| state.connector_for(&thread.source))
+                            .flatten()
+                            .and_then(|c| c.own_address()),
                         view: ThreadView {
                             thread,
                             triage,

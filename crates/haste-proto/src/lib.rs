@@ -452,6 +452,9 @@ pub enum Response {
     Thread {
         view: ThreadView,
         messages: Vec<Message>,
+        /// The account's own address (mail), so the reader can tell which messages are yours.
+        #[serde(default)]
+        own: Option<String>,
     },
     /// Result of a pending outcome: the proposal was created (or returned again).
     Proposal {

@@ -191,16 +191,16 @@ impl Store {
             if let Some(id) = existing {
                 message.id = id;
                 tx.execute(
-                    "UPDATE messages SET sender_person_id = ?2, sender_identifier = ?3, body_text = ?4, sent_at = ?5 WHERE id = ?1",
-                    params![message.id, message.sender_person_id, message.sender_identifier, message.body_text, message.sent_at],
+                    "UPDATE messages SET sender_person_id = ?2, sender_identifier = ?3, body_text = ?4, sent_at = ?5, is_own = ?6 WHERE id = ?1",
+                    params![message.id, message.sender_person_id, message.sender_identifier, message.body_text, message.sent_at, message.is_own],
                 )?;
             } else {
                 if message.id.is_empty() {
                     message.id = new_id();
                 }
                 tx.execute(
-                    "INSERT INTO messages (id, thread_id, source, external_id, sender_person_id, sender_identifier, body_text, sent_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-                    params![message.id, message.thread_id, message.source.as_name(), message.external_id, message.sender_person_id, message.sender_identifier, message.body_text, message.sent_at],
+                    "INSERT INTO messages (id, thread_id, source, external_id, sender_person_id, sender_identifier, body_text, sent_at, is_own) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                    params![message.id, message.thread_id, message.source.as_name(), message.external_id, message.sender_person_id, message.sender_identifier, message.body_text, message.sent_at, message.is_own],
                 )?;
                 tx.execute(
                     "UPDATE threads SET version = version + 1, last_activity_at = MAX(last_activity_at, ?2) WHERE id = ?1",
@@ -259,7 +259,7 @@ impl Store {
         let thread_id = thread_id.to_owned();
         self.read(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, thread_id, source, external_id, sender_person_id, sender_identifier, body_text, sent_at \
+                "SELECT id, thread_id, source, external_id, sender_person_id, sender_identifier, body_text, sent_at, is_own \
                  FROM messages WHERE thread_id = ?1 ORDER BY sent_at, id",
             )?;
             let rows = stmt.query_map([&thread_id], |r| {
@@ -272,6 +272,7 @@ impl Store {
                     sender_identifier: r.get(5)?,
                     body_text: r.get(6)?,
                     sent_at: r.get(7)?,
+                    is_own: r.get(8)?,
                 })
             })?;
             Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -692,6 +693,7 @@ mod tests {
             sender_identifier: Some("who@x".into()),
             body_text: "hello".into(),
             sent_at: 5,
+            is_own: false,
         };
         let stored = s.upsert_message(&m).unwrap();
         s.upsert_message(&m).unwrap();

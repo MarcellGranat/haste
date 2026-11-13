@@ -82,6 +82,10 @@ pub struct Message {
     pub sender_identifier: Option<String>,
     pub body_text: String,
     pub sent_at: i64,
+    /// Written by the human themselves (known for chats; mail compares the sender with the
+    /// account's own address instead).
+    #[serde(default)]
+    pub is_own: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

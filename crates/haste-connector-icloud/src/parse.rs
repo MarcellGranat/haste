@@ -300,6 +300,7 @@ pub fn build_batch(mut parsed: Vec<ParsedMessage>) -> Batch {
             sender_identifier: m.from.clone(),
             body_text: body,
             sent_at: m.date,
+            is_own: false,
         });
     }
     Batch {

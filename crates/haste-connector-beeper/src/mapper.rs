@@ -109,6 +109,7 @@ pub fn map_message(chat_id: &str, source: &Source, wire: &WireMessage) -> Option
             sender_identifier: (!wire.sender_id.is_empty()).then(|| wire.sender_id.clone()),
             body_text: body,
             sent_at: timestamp,
+            is_own: wire.is_sender,
         },
         sort_key,
         timestamp,

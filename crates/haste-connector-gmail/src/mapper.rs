@@ -110,6 +110,7 @@ fn map_message(message: &ApiMessage, thread_external_id: &str) -> Message {
         sender_identifier,
         body_text,
         sent_at,
+        is_own: false,
     }
 }
 

@@ -16,6 +16,8 @@ pub const RECENT_LABELS_MAX: usize = 50;
 pub enum ComposeKind {
     /// A note about a thread, appended to the notes folder.
     Note { thread_id: String },
+    /// A reply to a thread (becomes a draft; only the human sends it).
+    Reply { thread_id: String },
     /// A TODO: a new one, or an edit of an existing reminder.
     Todo { reminder_id: Option<String> },
 }
@@ -58,6 +60,23 @@ impl Compose {
             heading: format!("Note · {subject}"),
             fields: vec![Field {
                 label: "Note",
+                area: TextArea::new("", true),
+            }],
+            focus: 0,
+            attachments: Vec::new(),
+            picker: None,
+        }
+    }
+
+    #[must_use]
+    pub fn reply(thread_id: &str, subject: &str) -> Self {
+        Self {
+            kind: ComposeKind::Reply {
+                thread_id: thread_id.to_owned(),
+            },
+            heading: format!("Reply · {subject}"),
+            fields: vec![Field {
+                label: "Note: your reply (nothing is sent until you send it from Approvals)",
                 area: TextArea::new("", true),
             }],
             focus: 0,

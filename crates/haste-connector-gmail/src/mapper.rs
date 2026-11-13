@@ -85,15 +85,42 @@ fn plain_text(part: &ApiPart) -> Option<String> {
     part.parts.iter().find_map(plain_text)
 }
 
+/// `[attachment: name (type, N bytes)]` for every attachment part, in the one format the readers
+/// know. Only the metadata: the file itself is never fetched.
+fn attachment_lines(part: &ApiPart, out: &mut Vec<String>) {
+    if !part.filename.trim().is_empty() {
+        let name: String = part
+            .filename
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(120)
+            .collect();
+        out.push(format!(
+            "[attachment: {name} ({}, {} bytes)]",
+            part.mime_type.to_lowercase(),
+            part.body.size
+        ));
+    }
+    for p in &part.parts {
+        attachment_lines(p, out);
+    }
+}
+
 fn map_message(message: &ApiMessage, thread_external_id: &str) -> Message {
     let payload = message.payload.clone().unwrap_or_default();
-    let body_text = match plain_text(&payload) {
+    let mut body_text = match plain_text(&payload) {
         Some(text) => truncate_utf8(&text, MAX_BODY_BYTES).to_owned(),
         None => format!(
             "{BODY_UNAVAILABLE_MARKER}{}",
             truncate_utf8(&message.snippet, MAX_BODY_BYTES)
         ),
     };
+    let mut files = Vec::new();
+    attachment_lines(&payload, &mut files);
+    for line in files {
+        body_text.push('\n');
+        body_text.push_str(&line);
+    }
     let sender_identifier = header(&payload, "From").and_then(|f| addresses(f).into_iter().next());
     let sent_at = message
         .internal_date
@@ -188,6 +215,34 @@ mod tests {
             "messages": [{ "id": "m", "labelIds": labels }]
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn attachments_become_metadata_lines_and_are_never_fetched() {
+        let thread: ApiThread = serde_json::from_value(serde_json::json!({
+            "id": "t",
+            "messages": [{
+                "id": "m",
+                "labelIds": ["INBOX"],
+                "payload": {
+                    "mimeType": "multipart/mixed",
+                    "headers": [{ "name": "From", "value": "a@x.org" }],
+                    "parts": [
+                        { "mimeType": "text/plain", "body": { "data": "SGVsbG8", "size": 5 } },
+                        { "mimeType": "application/pdf", "filename": "granatz pótdíj.pdf",
+                          "body": { "attachmentId": "A1", "size": 20480 } }
+                    ]
+                }
+            }]
+        }))
+        .unwrap();
+        let mapped = map_thread(&thread);
+        let body = &mapped.messages[0].body_text;
+        assert!(body.starts_with("Hello"), "{body}");
+        assert!(
+            body.ends_with("[attachment: granatz pótdíj.pdf (application/pdf, 20480 bytes)]"),
+            "{body}"
+        );
     }
 
     #[test]

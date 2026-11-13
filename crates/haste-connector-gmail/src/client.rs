@@ -64,6 +64,9 @@ pub struct ApiHeader {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ApiBody {
     pub data: Option<String>,
+    /// Size in bytes of the part (attachments are listed by this and `filename`, never fetched).
+    #[serde(default)]
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -71,6 +74,9 @@ pub struct ApiBody {
 pub struct ApiPart {
     #[serde(default)]
     pub mime_type: String,
+    /// Non-empty for an attachment.
+    #[serde(default)]
+    pub filename: String,
     #[serde(default)]
     pub headers: Vec<ApiHeader>,
     #[serde(default)]

@@ -519,6 +519,9 @@ fn thread_line(t: &ThreadView, now: i64) -> ListItem<'static> {
                 .map(|s| format!("{s}: "))
                 .unwrap_or_default()
         };
+        if last.has_attachment {
+            spans.push(Span::styled(" ◫", Style::new().fg(theme::PEACH)));
+        }
         spans.push(Span::styled(
             format!("  {aside}{who}{}", inbox::sanitize(&last.snippet)),
             Style::new().fg(theme::MUTED),

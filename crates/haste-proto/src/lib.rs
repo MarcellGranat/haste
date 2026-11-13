@@ -333,6 +333,9 @@ pub struct ThreadView {
 pub struct LastMessage {
     pub sender: Option<String>,
     pub snippet: String,
+    /// Some message of the thread has a file attached.
+    #[serde(default)]
+    pub has_attachment: bool,
 }
 
 /// One herdr machine as the daemon sees it.

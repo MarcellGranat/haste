@@ -287,6 +287,7 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             let tags = state.store.all_thread_tags().unwrap_or_default();
             let machine_labels = machine_labels_for(state, principal);
             let lasts = state.store.last_messages().unwrap_or_default();
+            let with_files = state.store.threads_with_attachments().unwrap_or_default();
             match state.store.list_threads(&filter) {
                 Ok(rows) => Response::Threads {
                     threads: rows
@@ -300,6 +301,7 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
                                         haste_proto::LastMessage {
                                             sender: sender.clone(),
                                             snippet: snippet(body),
+                                            has_attachment: with_files.contains(&thread.id),
                                         }
                                     }),
                                     thread,

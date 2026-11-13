@@ -302,6 +302,20 @@ impl Store {
         })
     }
 
+    /// Threads with a message that carries an attachment line (`[attachment…]`).
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn threads_with_attachments(&self) -> StoreResult<std::collections::HashSet<String>> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT thread_id FROM messages WHERE body_text LIKE '%[attachment%'",
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            Ok(rows.collect::<Result<std::collections::HashSet<_>, _>>()?)
+        })
+    }
+
     /// Unified listing across sources, newest first. Archived and snoozed are hidden by default.
     ///
     /// # Errors

@@ -85,20 +85,15 @@ fn plain_text(part: &ApiPart) -> Option<String> {
     part.parts.iter().find_map(plain_text)
 }
 
-/// `[attachment: name (type, N bytes)]` for every attachment part, in the one format the readers
-/// know. Only the metadata: the file itself is never fetched.
+/// One stored line per attachment part (see [`haste_core::attachment`]), carrying Gmail's
+/// attachment id so the human can fetch the file later. Only metadata is read now.
 fn attachment_lines(part: &ApiPart, out: &mut Vec<String>) {
     if !part.filename.trim().is_empty() {
-        let name: String = part
-            .filename
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(120)
-            .collect();
-        out.push(format!(
-            "[attachment: {name} ({}, {} bytes)]",
-            part.mime_type.to_lowercase(),
-            part.body.size
+        out.push(haste_core::attachment::format_line(
+            &part.filename,
+            &part.mime_type.to_lowercase(),
+            part.body.size,
+            part.body.attachment_id.as_deref(),
         ));
     }
     for p in &part.parts {
@@ -240,7 +235,7 @@ mod tests {
         let body = &mapped.messages[0].body_text;
         assert!(body.starts_with("Hello"), "{body}");
         assert!(
-            body.ends_with("[attachment: granatz pótdíj.pdf (application/pdf, 20480 bytes)]"),
+            body.ends_with("[attachment: granatz pótdíj.pdf (application/pdf, 20480 bytes) #A1]"),
             "{body}"
         );
     }

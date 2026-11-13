@@ -77,6 +77,7 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::ConnectorRelease { .. }
         | RequestBody::ConnectorEngage { .. }
         | RequestBody::ConnectorResync { .. }
+        | RequestBody::AttachmentSave { .. }
         | RequestBody::ConnectorAuthorized { .. }
         | RequestBody::TagAdd { .. }
         | RequestBody::TagRemove { .. }
@@ -114,6 +115,7 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::ConnectorRelease { .. } => "connector_release",
         RequestBody::ConnectorEngage { .. } => "connector_engage",
         RequestBody::ConnectorResync { .. } => "connector_resync",
+        RequestBody::AttachmentSave { .. } => "attachment_save",
         RequestBody::ConnectorAuthorized { .. } => "connector_authorized",
         RequestBody::RegisterPrincipal { .. } => "register_principal",
         RequestBody::RevokeToken { .. } => "revoke_token",
@@ -598,6 +600,11 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
         RequestBody::ConnectorStatus => connector_status(state),
         RequestBody::ConnectorRelease { source } => set_switch(state, principal, &source, false),
         RequestBody::ConnectorResync { source } => connector_resync(state, principal, &source),
+        RequestBody::AttachmentSave {
+            message_id,
+            index,
+            dir,
+        } => attachment_save(state, principal, &message_id, index, dir.as_deref()),
         RequestBody::ConnectorEngage { source } => set_switch(state, principal, &source, true),
         RequestBody::ConnectorAuthorized { source } => {
             state.audit(
@@ -1531,6 +1538,147 @@ fn connector_status(state: &State) -> Response {
 }
 
 /// Engage or release a kill switch. Releasing keeps the stored cursor.
+/// Fetch one attachment of a stored message from its provider and write it as a plain file: into
+/// `dir` (an absolute folder the human picked) or into the private preview folder. Never
+/// overwrites. The audit has the source and the size, never a file name.
+fn attachment_save(
+    state: &State,
+    actor: &Principal,
+    message_id: &str,
+    index: usize,
+    dir: Option<&str>,
+) -> Response {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let fail = |code: ErrorCode, msg: &str| err(code, msg);
+    let message = match state.store.get_message(message_id) {
+        Ok(Some(m)) => m,
+        Ok(None) => return fail(ErrorCode::NotFound, "message not found"),
+        Err(e) => return map_store(&e),
+    };
+    let lines = haste_core::attachment::lines_of(&message.body_text);
+    let Some(line) = lines.get(index) else {
+        return fail(ErrorCode::NotFound, "attachment not found");
+    };
+    let thread = match state.store.get_thread(&message.thread_id) {
+        Ok(Some((t, _))) => t,
+        _ => return fail(ErrorCode::NotFound, "thread not found"),
+    };
+    let Some(connector) = state.connector_for(&message.source) else {
+        return fail(
+            ErrorCode::Validation,
+            "no connector is registered for this source",
+        );
+    };
+    // where the file goes, checked before anything is fetched
+    let (target_dir, preview) = match dir {
+        Some(d) => {
+            let path = std::path::PathBuf::from(d);
+            if !path.is_absolute() || !path.is_dir() {
+                return fail(ErrorCode::Validation, "choose an existing folder");
+            }
+            (path, false)
+        }
+        None => {
+            let path = state.config.data_dir.join("preview");
+            let made = std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&path);
+            if made.is_err() {
+                return fail(ErrorCode::Internal, "cannot create the preview folder");
+            }
+            (path, true)
+        }
+    };
+    let request = haste_core::connector::AttachmentRequest {
+        message_external_id: message.external_id.clone(),
+        thread_external_id: thread.external_id.clone(),
+        reference: line.reference.clone().unwrap_or_default(),
+        bytes: line.bytes,
+    };
+    let guard = Guarded {
+        connector: connector.as_ref(),
+        hooks: state,
+    };
+    let bytes = match tokio::runtime::Handle::current().block_on(guard.fetch_attachment(&request)) {
+        Ok(b) => b,
+        Err(e) => {
+            let reason = match &e {
+                CallError::KillSwitchEngaged => {
+                    "the connector is stopped; release it to download".to_owned()
+                }
+                CallError::Connector(ConnectorError::Other(m)) => m.chars().take(200).collect(),
+                CallError::Connector(ConnectorError::Authorization(m)) => {
+                    m.chars().take(200).collect()
+                }
+                CallError::Connector(ConnectorError::Transient(_)) => {
+                    "the provider could not be reached".to_owned()
+                }
+                _ => "the provider refused the download".to_owned(),
+            };
+            state.audit(
+                &actor.id,
+                "attachment.save",
+                "failed",
+                Some(message_id),
+                Some(&format!("source={}", message.source.as_name())),
+            );
+            return fail(ErrorCode::Internal, &reason);
+        }
+    };
+    // a name that cannot collide and cannot escape the folder; never an overwrite
+    let base = haste_core::attachment::safe_file_name(&line.name);
+    let (stem, ext) = match base.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_owned(), format!(".{e}")),
+        _ => (base.clone(), String::new()),
+    };
+    let mut written = None;
+    for n in 0..100 {
+        let name = match (preview, n) {
+            (true, n) => format!("{}-{n}-{base}", haste_core::time::now_secs()),
+            (false, 0) => base.clone(),
+            (false, n) => format!("{stem} ({n}){ext}"),
+        };
+        let path = target_dir.join(&name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                if std::io::Write::write_all(&mut file, &bytes).is_err() {
+                    let _ = std::fs::remove_file(&path);
+                    return fail(ErrorCode::Internal, "could not write the file");
+                }
+                written = Some((path, name));
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return fail(ErrorCode::Internal, "could not create the file"),
+        }
+    }
+    let Some((path, name)) = written else {
+        return fail(ErrorCode::Internal, "too many files with this name");
+    };
+    state.audit(
+        &actor.id,
+        "attachment.save",
+        if preview { "previewed" } else { "saved" },
+        Some(message_id),
+        Some(&format!(
+            "source={} bytes={}",
+            message.source.as_name(),
+            bytes.len()
+        )),
+    );
+    Response::AttachmentSaved {
+        path: path.to_string_lossy().into_owned(),
+        name,
+        bytes: bytes.len(),
+    }
+}
+
 /// Forget the local copy of a mail source and read it again from the start. Only mail sources
 /// (chats keep their own history cursor); nothing is changed at the provider. The audit has the
 /// source and a count, never a subject.

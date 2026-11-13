@@ -189,13 +189,13 @@ mod tests {
     }
 
     impl MailSession for Fake {
-        fn move_messages(
-            &mut self,
-            _folder: &str,
-            _uid_validity: u32,
-            _uids: &[u32],
-            _target: &str,
-        ) -> Result<(), ImapFailure> {
+        fn select(&mut self, _folder: &str) -> Result<FolderInfo, ImapFailure> {
+            Err(ImapFailure::Protocol("not used".into()))
+        }
+        fn uid_search_message_id(&mut self, _id: &str) -> Result<Vec<u32>, ImapFailure> {
+            Err(ImapFailure::Protocol("not used".into()))
+        }
+        fn uid_move(&mut self, _uids: &[u32], _target: &str) -> Result<(), ImapFailure> {
             Err(ImapFailure::Protocol("not used".into()))
         }
         fn examine(&mut self, folder: &str) -> Result<FolderInfo, ImapFailure> {

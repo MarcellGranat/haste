@@ -93,8 +93,9 @@ fn sender_label(wire: &WireMessage) -> Option<String> {
 }
 
 /// Map one wire message. `None` when it cannot be placed (no usable timestamp or sort key): such a
-/// message is skipped and counted, never guessed. Non-text messages store a fixed label, never an
-/// attachment's name.
+/// message is skipped and counted, never guessed. A message with attachments stores one line per
+/// file (name, type, size and Beeper's asset id, see [`haste_core::attachment`]); a media message
+/// Beeper gives no list for stores a fixed label.
 #[must_use]
 pub fn map_message(chat_id: &str, source: &Source, wire: &WireMessage) -> Option<Mapped> {
     // Reactions, notices (state events), deleted and hidden messages are not conversation text
@@ -112,10 +113,32 @@ pub fn map_message(chat_id: &str, source: &Source, wire: &WireMessage) -> Option
         .kind
         .as_deref()
         .is_none_or(|k| k.eq_ignore_ascii_case("text") || k.is_empty());
-    let body = match (&wire.text, is_text) {
+    let mut body = match (&wire.text, is_text) {
         (Some(t), true) if !t.is_empty() => truncate_body(t, BEEPER_BODY_MAX_BYTES),
+        _ if !wire.attachments.is_empty() => String::new(),
         _ => ATTACHMENT_LABEL.to_owned(),
     };
+    for a in wire.attachments.iter().filter(|a| !a.id.is_empty()) {
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(&haste_core::attachment::format_line(
+            a.file_name.as_deref().unwrap_or("attachment"),
+            a.mime_type.as_deref().unwrap_or(""),
+            // sizes are whole bytes; a missing or odd one is shown as 0
+            a.file_size.map_or(0, |s| {
+                if s.is_finite() && s > 0.0 {
+                    s as u64
+                } else {
+                    0
+                }
+            }),
+            Some(&a.id),
+        ));
+    }
+    if body.is_empty() {
+        body = ATTACHMENT_LABEL.to_owned();
+    }
     Some(Mapped {
         message: Message {
             id: String::new(),
@@ -191,6 +214,40 @@ mod tests {
             .chars()
             .all(|c| c == 'é'));
         assert!(cut.len() <= 11 + TRUNCATED_MARKER.len());
+    }
+
+    #[test]
+    fn listed_attachments_become_lines_with_the_asset_to_fetch() {
+        let m = map_message(
+            "c1",
+            &Source::Whatsapp,
+            &wire(
+                r#"{"id":"m1","senderID":"u1","text":"here","timestamp":"2026-11-09T10:00:00Z","sortKey":"005",
+                    "attachments":[{"id":"mxc://beeper.local/abc","fileName":"menu.pdf","mimeType":"application/pdf","fileSize":2048}]}"#,
+            ),
+        )
+        .unwrap();
+        let lines = haste_core::attachment::lines_of(&m.message.body_text);
+        assert!(m.message.body_text.starts_with("here\n"));
+        assert_eq!(
+            (
+                lines[0].name.as_str(),
+                lines[0].bytes,
+                lines[0].reference.as_deref()
+            ),
+            ("menu.pdf", 2048, Some("mxc://beeper.local/abc"))
+        );
+        // a media message with a list but no text is just the lines
+        let media = map_message(
+            "c1",
+            &Source::Whatsapp,
+            &wire(
+                r#"{"id":"m2","senderID":"u1","type":"IMAGE","timestamp":"2026-11-09T10:00:00Z","sortKey":"006",
+                    "attachments":[{"id":"mxc://x/y","fileName":"a.png"}]}"#,
+            ),
+        )
+        .unwrap();
+        assert!(media.message.body_text.starts_with("[attachment: a.png"));
     }
 
     #[test]

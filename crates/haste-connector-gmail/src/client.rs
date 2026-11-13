@@ -67,6 +67,9 @@ pub struct ApiBody {
     /// Size in bytes of the part (attachments are listed by this and `filename`, never fetched).
     #[serde(default)]
     pub size: u64,
+    /// Gmail's id for fetching an attachment's content later.
+    #[serde(default, rename = "attachmentId")]
+    pub attachment_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -202,6 +205,40 @@ impl GmailClient {
             &[("format", "full".to_owned())],
         )
         .await
+    }
+
+    /// One attachment's bytes (`messages.attachments.get`), refused above `max` bytes.
+    ///
+    /// # Errors
+    /// `Other` when it is gone or too big; otherwise a classified [`ConnectorError`].
+    pub async fn get_attachment(
+        &self,
+        message_id: &str,
+        attachment_id: &str,
+        max: usize,
+    ) -> Result<Vec<u8>, ConnectorError> {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        #[derive(Deserialize)]
+        struct Part {
+            #[serde(default)]
+            size: u64,
+            data: Option<String>,
+        }
+        let path = format!("/gmail/v1/users/me/messages/{message_id}/attachments/{attachment_id}");
+        let part: Part = self
+            .get(&path, &[])
+            .await?
+            .ok_or_else(|| ConnectorError::Other("attachment not found".into()))?;
+        if part.size > max as u64 {
+            return Err(ConnectorError::Other("attachment is too big".into()));
+        }
+        let data = part
+            .data
+            .ok_or_else(|| ConnectorError::Other("attachment had no content".into()))?;
+        URL_SAFE_NO_PAD
+            .decode(data.trim_end_matches('='))
+            .map_err(|_| ConnectorError::Other("attachment could not be decoded".into()))
     }
 
     /// Take a thread out of the inbox: `threads.modify` removing the `INBOX` label, nothing else.

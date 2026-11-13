@@ -90,6 +90,22 @@ pub struct WireMessage {
     pub is_deleted: bool,
     #[serde(default, rename = "isHidden")]
     pub is_hidden: bool,
+    #[serde(default)]
+    pub attachments: Vec<WireAttachment>,
+}
+
+/// One attachment of a message, as Beeper lists it (metadata only).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WireAttachment {
+    /// Usually an `mxc://` URL: what the download endpoint takes.
+    #[serde(default)]
+    pub id: String,
+    #[serde(default, alias = "fileName")]
+    pub file_name: Option<String>,
+    #[serde(default, alias = "mimeType")]
+    pub mime_type: Option<String>,
+    #[serde(default, alias = "fileSize")]
+    pub file_size: Option<f64>,
 }
 
 /// A list answer: `{items, hasMore, cursor}` or a bare array.

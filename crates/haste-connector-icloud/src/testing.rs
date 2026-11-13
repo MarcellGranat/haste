@@ -281,7 +281,36 @@ fn handle(stream: TcpStream, state: &Arc<Mutex<FakeState>>) {
                     .and_then(|n| st.folders.get(n))
                     .map(|f| f.messages.iter().map(|m| m.uid).collect())
                     .unwrap_or_default();
-                let query = rest[6..].trim().to_uppercase();
+                let raw_query = rest[6..].trim().to_owned();
+                let query = raw_query.to_uppercase();
+                if query.starts_with("HEADER MESSAGE-ID ") {
+                    // `HEADER Message-ID "<needle>"`: messages whose headers contain the needle
+                    let needle = raw_query.split('"').nth(1).unwrap_or("").to_lowercase();
+                    let hits: Vec<u32> = selected
+                        .as_ref()
+                        .and_then(|n| st.folders.get(n))
+                        .map(|f| {
+                            f.messages
+                                .iter()
+                                .filter(|m| {
+                                    m.headers.to_lowercase().lines().any(|l| {
+                                        l.starts_with("message-id:") && l.contains(&needle)
+                                    })
+                                })
+                                .map(|m| m.uid)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let list = hits
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let _ = writer.write_all(
+                        format!("* SEARCH {list}\r\n{tag} OK SEARCH completed\r\n").as_bytes(),
+                    );
+                    continue;
+                }
                 let hits = match query.strip_prefix("UID ") {
                     Some(set) => select_uids(set, &present),
                     None => present,

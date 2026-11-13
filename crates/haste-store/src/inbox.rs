@@ -253,6 +253,36 @@ impl Store {
         })
     }
 
+    /// One stored message by its haste id.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn get_message(&self, id: &str) -> StoreResult<Option<Message>> {
+        let id = id.to_owned();
+        self.read(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT id, thread_id, source, external_id, sender_person_id, sender_identifier, body_text, sent_at, is_own \
+                     FROM messages WHERE id = ?1",
+                    [&id],
+                    |r| {
+                        Ok(Message {
+                            id: r.get(0)?,
+                            thread_id: r.get(1)?,
+                            source: Source::from(r.get::<_, String>(2)?),
+                            external_id: r.get(3)?,
+                            sender_person_id: r.get(4)?,
+                            sender_identifier: r.get(5)?,
+                            body_text: r.get(6)?,
+                            sent_at: r.get(7)?,
+                            is_own: r.get(8)?,
+                        })
+                    },
+                )
+                .optional()?)
+        })
+    }
+
     /// # Errors
     /// Database errors.
     pub fn messages_for_thread(&self, thread_id: &str) -> StoreResult<Vec<Message>> {

@@ -257,32 +257,22 @@ pub fn links(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// An attachment as the stored text records it: iCloud writes
-/// `[attachment: name (type, N bytes)]`, Beeper a bare `[attachment]` (no name is stored).
+/// An attachment line as the reader shows it: `name · type · size`. Older Beeper rows are a
+/// bare `[attachment]` with no name.
 #[must_use]
 pub fn attachment_of(line: &str) -> Option<String> {
-    let line = line.trim();
-    if line == "[attachment]" {
+    if line.trim() == "[attachment]" {
         return Some("attachment (name not stored)".to_owned());
     }
-    let inner = line.strip_prefix("[attachment: ")?.strip_suffix(']')?;
-    let (name, rest) = match inner.rsplit_once(" (") {
-        Some((n, r)) => (n, r.trim_end_matches(')')),
-        None => (inner, ""),
-    };
-    let mut parts = rest.split(", ");
-    let kind = parts.next().unwrap_or("");
-    let size = parts
-        .next()
-        .and_then(|s| s.strip_suffix(" bytes"))
-        .and_then(|n| n.parse::<u64>().ok())
-        .map(human_size);
-    let mut out = name.to_owned();
-    for extra in [Some(kind.to_owned()), size].into_iter().flatten() {
-        if !extra.is_empty() {
-            out.push_str(" · ");
-            out.push_str(&extra);
-        }
+    let a = haste_core::attachment::parse_line(line)?;
+    let mut out = a.name;
+    if !a.mime.is_empty() {
+        out.push_str(" · ");
+        out.push_str(&a.mime);
+    }
+    if a.bytes > 0 {
+        out.push_str(" · ");
+        out.push_str(&human_size(a.bytes));
     }
     Some(out)
 }

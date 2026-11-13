@@ -153,9 +153,11 @@ async fn archiving_moves_the_threads_inbox_messages_to_the_archive_folder_and_no
         .await
         .is_err());
     assert_eq!(uids(&r, "INBOX"), vec![1, 2, 3]);
-    // the thread's two messages move; the third stays
+    // a message without a Message-ID is named by its UID: `INBOX:<uidvalidity>:<uid>`
+    // (checked at the end); the thread's two messages move, the third stays
+    // real mail is named by its Message-ID header
     r.connector
-        .archive_thread(&target(&["INBOX:42:1", "INBOX:42:2"]))
+        .archive_thread(&target(&["m1@example.org", "<m2@example.org>"]))
         .await
         .unwrap();
     assert_eq!(uids(&r, "INBOX"), vec![3]);
@@ -178,6 +180,52 @@ async fn archiving_moves_the_threads_inbox_messages_to_the_archive_folder_and_no
             .messages
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn an_attachment_is_listed_with_its_part_and_fetched_on_demand_with_peek_only() {
+    use haste_core::connector::AttachmentRequest;
+    let mut with_file = TestMessage::simple(1, "Report", "", "see the file");
+    with_file.parts.push(TestPart::pdf("scan.pdf", 8));
+    let r = rig_with(
+        state(vec![("INBOX", 42, vec![with_file])], PASSWORD),
+        |_| {},
+    );
+    let batch = r.connector.fetch(None).await.unwrap();
+    let body = &batch.messages[0].body_text;
+    let lines = haste_core::attachment::lines_of(body);
+    assert_eq!(lines.len(), 1, "{body}");
+    assert_eq!(lines[0].name, "scan.pdf");
+    assert_eq!(lines[0].reference.as_deref(), Some("2|base64"));
+    let before = commands(&r).len();
+    let bytes = r
+        .connector
+        .fetch_attachment(&AttachmentRequest {
+            message_external_id: batch.messages[0].external_id.clone(),
+            thread_external_id: String::new(),
+            reference: lines[0].reference.clone().unwrap(),
+            bytes: lines[0].bytes,
+        })
+        .await
+        .unwrap();
+    // eight base64 characters ("AAAAAAAA") decode to six zero bytes
+    assert_eq!(bytes, vec![0_u8; 6]);
+    let cmds = commands(&r)[before..].join("\n");
+    assert!(
+        cmds.contains("EXAMINE") && cmds.contains("BODY.PEEK[2]"),
+        "{cmds}"
+    );
+    assert!(!cmds.contains("SELECT") && !cmds.contains("STORE") && !cmds.contains("MOVE"));
+    // an old line without a reference says what to do
+    let none = r
+        .connector
+        .fetch_attachment(&AttachmentRequest::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&none, ConnectorError::Other(m) if m.contains("resync")),
+        "{none:?}"
     );
 }
 
@@ -247,7 +295,7 @@ async fn a_cycle_sends_only_read_commands_and_always_uses_body_peek() {
     assert!(report.body_text.contains("see attached"));
     assert!(report
         .body_text
-        .contains("[attachment: q3.pdf (application/pdf, 5000 bytes)]"));
+        .contains("[attachment: q3.pdf (application/pdf, 5000 bytes) #"));
     let newsletter = batch
         .messages
         .iter()
@@ -593,7 +641,9 @@ async fn plain_text_wins_and_html_is_fetched_only_when_there_is_no_plain_part() 
         "neither part: {}",
         body("m3@example.org")
     );
-    assert!(body("m3@example.org").contains("[attachment: scan.pdf (application/pdf, 4000 bytes)]"));
+    assert!(
+        body("m3@example.org").contains("[attachment: scan.pdf (application/pdf, 4000 bytes) #")
+    );
 
     let cmds = commands(&r);
     // Message 1 has both parts: only part 1 (plain) is fetched, never part 2 (html).

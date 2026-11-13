@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use haste_core::connector::{
-    ArchiveTarget, Batch, BoxFuture, Capabilities, Connector, ConnectorError, Cursor, DraftToSend,
-    SendReceipt,
+    ArchiveTarget, AttachmentRequest, Batch, BoxFuture, Capabilities, Connector, ConnectorError,
+    Cursor, DraftToSend, SendReceipt,
 };
 use haste_core::model::Source;
 
@@ -90,6 +90,52 @@ fn failure_class(error: &ConnectorError) -> (&'static str, String) {
     }
 }
 
+/// Undo a MIME transfer encoding on a fetched part: base64 and quoted-printable; anything else
+/// is already the file.
+fn decode_transfer(raw: &[u8], encoding: &str) -> Result<Vec<u8>, ConnectorError> {
+    use base64::Engine;
+    match encoding.to_ascii_lowercase().as_str() {
+        "base64" => {
+            let clean: Vec<u8> = raw
+                .iter()
+                .copied()
+                .filter(|b| !b.is_ascii_whitespace())
+                .collect();
+            base64::engine::general_purpose::STANDARD
+                .decode(clean)
+                .map_err(|_| ConnectorError::Other("attachment could not be decoded".into()))
+        }
+        "quoted-printable" => {
+            let mut out = Vec::with_capacity(raw.len());
+            let mut i = 0;
+            while i < raw.len() {
+                if raw[i] == b'=' {
+                    if raw.get(i + 1) == Some(&b'\r') && raw.get(i + 2) == Some(&b'\n') {
+                        i += 3;
+                        continue;
+                    }
+                    if raw.get(i + 1) == Some(&b'\n') {
+                        i += 2;
+                        continue;
+                    }
+                    let hex = raw
+                        .get(i + 1..i + 3)
+                        .and_then(|h| std::str::from_utf8(h).ok());
+                    if let Some(b) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                        out.push(b);
+                        i += 3;
+                        continue;
+                    }
+                }
+                out.push(raw[i]);
+                i += 1;
+            }
+            Ok(out)
+        }
+        _ => Ok(raw.to_vec()),
+    }
+}
+
 fn run_cycle(
     config: &IcloudConfig,
     secrets: &dyn SecretStore,
@@ -166,6 +212,92 @@ impl Connector for IcloudConnector {
         Some(self.config.address.clone())
     }
 
+    /// Fetch one attachment for the human: find the message in the inbox by its `Message-ID`, read
+    /// only that MIME part (`BODY.PEEK`, read-only `EXAMINE`) and decode its transfer encoding.
+    fn fetch_attachment<'a>(
+        &'a self,
+        request: &'a AttachmentRequest,
+    ) -> BoxFuture<'a, Result<Vec<u8>, ConnectorError>> {
+        Box::pin(async move {
+            let Some((section, encoding)) = request.reference.split_once('|') else {
+                return Err(ConnectorError::Other(
+                    "this attachment was stored before it could be fetched: run `haste connector resync icloud`".into(),
+                ));
+            };
+            let section: Vec<u32> = section.split('.').filter_map(|n| n.parse().ok()).collect();
+            if section.is_empty() {
+                return Err(ConnectorError::Other(
+                    "unusable attachment reference".into(),
+                ));
+            }
+            let password = match self.secrets.get(&self.config.address) {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    return Err(ConnectorError::Checkpoint(
+                        "no app-specific password stored; run the iCloud auth verb".into(),
+                    ))
+                }
+                Err(_) => return Err(ConnectorError::Other("keychain unavailable".into())),
+            };
+            let (config, opener) = (self.config.clone(), Arc::clone(&self.opener));
+            let message_id = request.message_external_id.clone();
+            let encoding = encoding.to_owned();
+            let max = haste_core::connector::MAX_FETCH_ATTACHMENT_BYTES;
+            let octets = u32::try_from(if request.bytes == 0 {
+                max as u64
+            } else {
+                request.bytes.min(max as u64)
+            })
+            .unwrap_or(u32::MAX);
+            tokio::task::spawn_blocking(move || {
+                let mut session = opener
+                    .open(&config, &password)
+                    .map_err(to_connector_error)?;
+                let result = (|| {
+                    let folder = crate::config::DEFAULT_FOLDER;
+                    let info = session.examine(folder).map_err(to_connector_error)?;
+                    let mut parts = message_id.rsplitn(3, ':');
+                    let direct = match (parts.next(), parts.next(), parts.next()) {
+                        (Some(u), Some(v), Some(n)) if n == folder => {
+                            u.parse::<u32>().ok().zip(v.parse::<u32>().ok())
+                        }
+                        _ => None,
+                    };
+                    let uid = match direct {
+                        Some((uid, validity)) if validity == info.uid_validity => Some(uid),
+                        Some(_) => None,
+                        None => session
+                            .uid_search_message_id(message_id.trim_matches(['<', '>']))
+                            .map_err(to_connector_error)?
+                            .first()
+                            .copied(),
+                    };
+                    let uid = uid.ok_or_else(|| {
+                        ConnectorError::Other(
+                            "the message is not in the inbox any more (archived or moved)".into(),
+                        )
+                    })?;
+                    let part = crate::session::TextPart {
+                        html: false,
+                        section,
+                        charset: "utf-8".into(),
+                        encoding: encoding.clone(),
+                        octets,
+                    };
+                    let raw = session
+                        .fetch_text_part(uid, &part, u32::try_from(max).unwrap_or(u32::MAX))
+                        .map_err(to_connector_error)?
+                        .ok_or_else(|| ConnectorError::Other("the attachment is empty".into()))?;
+                    decode_transfer(&raw, &encoding)
+                })();
+                session.logout();
+                result
+            })
+            .await
+            .unwrap_or_else(|_| Err(ConnectorError::Other("attachment task failed".into())))
+        })
+    }
+
     /// The human's archive: `UID MOVE` the thread's INBOX messages into the Archive folder, one
     /// session, one attempt. Messages of other folders and ids that do not parse are left alone.
     fn archive_thread<'a>(
@@ -185,44 +317,47 @@ impl Connector for IcloudConnector {
             let (config, opener) = (self.config.clone(), Arc::clone(&self.opener));
             let ids = target.message_external_ids.clone();
             tokio::task::spawn_blocking(move || {
-                // ids look like `INBOX:<uidvalidity>:<uid>`
-                let mut by_validity: std::collections::BTreeMap<u32, Vec<u32>> =
-                    std::collections::BTreeMap::new();
-                for id in &ids {
-                    let mut parts = id.rsplitn(3, ':');
-                    let (uid, validity, folder) = (parts.next(), parts.next(), parts.next());
-                    if let (Some(uid), Some(validity), Some(folder)) = (
-                        uid.and_then(|u| u.parse::<u32>().ok()),
-                        validity.and_then(|v| v.parse::<u32>().ok()),
-                        folder,
-                    ) {
-                        if folder == crate::config::DEFAULT_FOLDER {
-                            by_validity.entry(validity).or_default().push(uid);
-                        }
-                    }
-                }
-                if by_validity.is_empty() {
-                    return Err(ConnectorError::Other(
-                        "no inbox messages of this thread to archive".into(),
-                    ));
-                }
                 let mut session = opener
                     .open(&config, &password)
                     .map_err(to_connector_error)?;
-                let mut result = Ok(());
-                for (validity, uids) in &by_validity {
-                    result = session
-                        .move_messages(
-                            crate::config::DEFAULT_FOLDER,
-                            *validity,
-                            uids,
-                            &config.archive_folder,
-                        )
-                        .map_err(to_connector_error);
-                    if result.is_err() {
-                        break;
+                let result = (|| {
+                    let folder = crate::config::DEFAULT_FOLDER;
+                    let info = session.select(folder).map_err(to_connector_error)?;
+                    // a message is found by its Message-ID header; an id of the form
+                    // `INBOX:<uidvalidity>:<uid>` (a message without one) names its UID directly
+                    let mut uids: Vec<u32> = Vec::new();
+                    for id in &ids {
+                        let mut parts = id.rsplitn(3, ':');
+                        let (uid, validity, name) = (parts.next(), parts.next(), parts.next());
+                        let direct = match (uid, validity, name) {
+                            (Some(u), Some(v), Some(n)) if n == folder => {
+                                u.parse::<u32>().ok().zip(v.parse::<u32>().ok())
+                            }
+                            _ => None,
+                        };
+                        match direct {
+                            Some((uid, validity)) if validity == info.uid_validity => {
+                                uids.push(uid)
+                            }
+                            Some(_) => {}
+                            None => uids.extend(
+                                session
+                                    .uid_search_message_id(id.trim_matches(['<', '>']))
+                                    .map_err(to_connector_error)?,
+                            ),
+                        }
                     }
-                }
+                    uids.sort_unstable();
+                    uids.dedup();
+                    if uids.is_empty() {
+                        return Err(ConnectorError::Other(
+                            "no inbox messages of this thread to archive".into(),
+                        ));
+                    }
+                    session
+                        .uid_move(&uids, &config.archive_folder)
+                        .map_err(to_connector_error)
+                })();
                 session.logout();
                 result
             })

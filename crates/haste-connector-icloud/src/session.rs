@@ -43,6 +43,10 @@ pub struct AttachmentMeta {
     pub name: Option<String>,
     pub content_type: String,
     pub size: u32,
+    /// The IMAP section of the part (`2`, `2.1`) and its transfer encoding, enough to fetch the
+    /// file again: written into the stored line as `#<section>|<encoding>`.
+    pub section: String,
+    pub encoding: String,
 }
 
 /// Where a text body lives (`text/plain`, else `text/html`), taken from BODYSTRUCTURE so no
@@ -94,20 +98,22 @@ pub trait MailSession {
     /// # Errors
     /// See [`ImapFailure`].
     fn append(&mut self, folder: &str, message: &[u8]) -> Result<(), ImapFailure>;
-    /// Move messages out of `folder` into `target` (`UID MOVE`: nothing is deleted, the messages
-    /// land in `target`). Opens `folder` read-write, and refuses when its UIDVALIDITY is not
-    /// `uid_validity`, so a recycled UID can never move the wrong message. The only other write
-    /// besides [`Self::append`]; only the human's archive uses it.
+    /// Open `folder` read-write (for the human's archive only; sync always uses `examine`).
     ///
     /// # Errors
     /// See [`ImapFailure`].
-    fn move_messages(
-        &mut self,
-        folder: &str,
-        uid_validity: u32,
-        uids: &[u32],
-        target: &str,
-    ) -> Result<(), ImapFailure>;
+    fn select(&mut self, folder: &str) -> Result<FolderInfo, ImapFailure>;
+    /// UIDs of the messages in the open folder whose `Message-ID` header contains `id`. The id
+    /// is refused when it holds a quote, a backslash or a control character.
+    ///
+    /// # Errors
+    /// See [`ImapFailure`].
+    fn uid_search_message_id(&mut self, id: &str) -> Result<Vec<u32>, ImapFailure>;
+    /// Move messages of the open folder into `target` (`UID MOVE`: nothing is deleted).
+    ///
+    /// # Errors
+    /// See [`ImapFailure`].
+    fn uid_move(&mut self, uids: &[u32], target: &str) -> Result<(), ImapFailure>;
     fn logout(&mut self);
 }
 
@@ -247,6 +253,8 @@ fn summarize(bs: &BodyStructure<'_>, path: &[u32], found: &mut Found) {
                         .or_else(|| param(&common.ty.params, "name")),
                     content_type: ty,
                     size: other.octets,
+                    section: section_of(path),
+                    encoding: encoding_of(&other.transfer_encoding),
                 });
             }
         }
@@ -258,8 +266,31 @@ fn summarize(bs: &BodyStructure<'_>, path: &[u32], found: &mut Found) {
                 common.ty.subtype.to_lowercase()
             ),
             size: other.octets,
+            section: section_of(path),
+            encoding: "7bit".to_owned(),
         }),
     }
+}
+
+/// `2.1` for the part path `[2, 1]`; a single-part message's part is `1`.
+fn section_of(path: &[u32]) -> String {
+    if path.is_empty() {
+        "1".to_owned()
+    } else {
+        path.iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+}
+
+fn encoding_of(e: &imap_proto::types::ContentEncoding<'_>) -> String {
+    match e {
+        imap_proto::types::ContentEncoding::Base64 => "base64",
+        imap_proto::types::ContentEncoding::QuotedPrintable => "quoted-printable",
+        _ => "7bit",
+    }
+    .to_owned()
 }
 
 fn uid_set(uids: &[u32]) -> String {
@@ -361,24 +392,36 @@ impl<T: Read + Write> MailSession for Imap<T> {
         Ok(())
     }
 
-    fn move_messages(
-        &mut self,
-        folder: &str,
-        uid_validity: u32,
-        uids: &[u32],
-        target: &str,
-    ) -> Result<(), ImapFailure> {
-        if uids.is_empty() {
-            return Ok(());
-        }
+    fn select(&mut self, folder: &str) -> Result<FolderInfo, ImapFailure> {
         let mailbox = self
             .session
             .select(folder)
             .map_err(|e| classify(&e, Stage::Move))?;
-        if mailbox.uid_validity != Some(uid_validity) {
-            return Err(ImapFailure::Protocol(
-                "move: the folder changed since the last sync; sync again first".into(),
-            ));
+        Ok(FolderInfo {
+            uid_validity: mailbox
+                .uid_validity
+                .ok_or_else(|| ImapFailure::Protocol("no UIDVALIDITY".into()))?,
+            exists: mailbox.exists,
+        })
+    }
+
+    fn uid_search_message_id(&mut self, id: &str) -> Result<Vec<u32>, ImapFailure> {
+        if id.is_empty() || id.chars().any(|c| c.is_control() || c == '"' || c == '\\') {
+            return Err(ImapFailure::Protocol("search: unusable message id".into()));
+        }
+        let mut uids: Vec<u32> = self
+            .session
+            .uid_search(format!("HEADER Message-ID \"{id}\""))
+            .map_err(|e| classify(&e, Stage::Search))?
+            .into_iter()
+            .collect();
+        uids.sort_unstable();
+        Ok(uids)
+    }
+
+    fn uid_move(&mut self, uids: &[u32], target: &str) -> Result<(), ImapFailure> {
+        if uids.is_empty() {
+            return Ok(());
         }
         self.session
             .uid_mv(uid_set(uids), target)

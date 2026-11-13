@@ -281,11 +281,12 @@ pub fn build_batch(mut parsed: Vec<ParsedMessage>) -> Batch {
 
         let mut body = m.body_text.clone();
         for a in &m.attachments {
-            body.push_str(&format!(
-                "\n[attachment: {} ({}, {} bytes)]",
+            body.push('\n');
+            body.push_str(&haste_core::attachment::format_line(
                 a.name.as_deref().unwrap_or("unnamed"),
-                a.content_type,
-                a.size
+                &a.content_type,
+                u64::from(a.size),
+                Some(&format!("{}|{}", a.section, a.encoding)),
             ));
         }
         messages.push(Message {
@@ -543,12 +544,14 @@ mod tests {
             name: Some("q3.pdf".into()),
             content_type: "application/pdf".into(),
             size: 120_000,
+            section: "2".into(),
+            encoding: "base64".into(),
         }];
         let m = parse_message("INBOX", 1, &f, Some(b"see attached")).unwrap();
         let batch = build_batch(vec![m]);
         assert!(batch.messages[0]
             .body_text
-            .contains("[attachment: q3.pdf (application/pdf, 120000 bytes)]"));
+            .contains("[attachment: q3.pdf (application/pdf, 120000 bytes) #2|base64]"));
     }
 
     #[test]

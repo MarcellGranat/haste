@@ -91,6 +91,28 @@ pub struct Reader {
     pub expanded: std::collections::HashSet<String>,
 }
 
+/// The attachment menu: the files of one message, one selected; and, while choosing where to
+/// save, the folder picker with the files it will save.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachMenu {
+    pub message_id: String,
+    pub files: Vec<haste_core::attachment::AttachmentLine>,
+    pub selected: usize,
+    /// Choosing a folder to save into: the picker and which files (by index) go there.
+    pub picker: Option<(editor::FilePicker, Vec<usize>)>,
+}
+
+/// An attachment's text in a popup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preview {
+    pub name: String,
+    pub lines: Vec<String>,
+    pub scroll: usize,
+}
+
+/// Lines a preview scrolls on a page key.
+pub const PREVIEW_PAGE: usize = 15;
+
 /// Lines a page key moves in the reader.
 pub const READER_PAGE: isize = 4;
 
@@ -172,6 +194,17 @@ pub enum Effect {
     /// Complete these reminders in Reminders (propose, approve and run, as the human).
     CompleteReminders {
         ids: Vec<String>,
+    },
+    /// Save attachments of a message (by index) into a folder.
+    SaveAttachments {
+        message_id: String,
+        indices: Vec<usize>,
+        dir: std::path::PathBuf,
+    },
+    /// Fetch one attachment for a text preview.
+    PreviewAttachment {
+        message_id: String,
+        index: usize,
     },
     /// Open the editor for a reply to a thread; the text becomes a draft proposal (never sent).
     Reply {
@@ -273,6 +306,10 @@ pub enum Mode {
     Compose,
     /// Choosing a label (see [`App::labeler`]).
     Label,
+    /// The attachments of one message: preview, download, download all (see [`App::attach`]).
+    Attachments,
+    /// A text preview of an attachment in a popup (see [`App::preview`]).
+    Preview,
     /// Typing a snooze (`3h`, `2d`).
     Snooze {
         thread_id: String,
@@ -331,6 +368,10 @@ pub struct App {
     pub compose: Option<Box<Compose>>,
     /// The open label picker.
     pub labeler: Option<LabelPicker>,
+    /// The attachment menu of the message under the reader's cursor.
+    pub attach: Option<AttachMenu>,
+    /// The text preview of an attachment.
+    pub preview: Option<Preview>,
     /// Muted senders (`.haste_ignore`), applied to the Today and Channels lists only.
     pub ignore: IgnoreList,
     pub ignore_errors: Vec<String>,
@@ -465,6 +506,8 @@ impl App {
             reader: None,
             compose: None,
             labeler: None,
+            attach: None,
+            preview: None,
             ignore: IgnoreList::default(),
             ignore_errors: Vec::new(),
             todo_marked: BTreeSet::new(),
@@ -930,6 +973,8 @@ impl App {
             Mode::Read => self.key_read(key),
             Mode::Compose => self.key_compose(key),
             Mode::Label => self.key_label(key),
+            Mode::Attachments => self.key_attachments(key),
+            Mode::Preview => self.key_preview(key),
             Mode::Snooze { thread_id, input } => self.key_snooze(key, thread_id, input),
             Mode::Remind {
                 thread_id,
@@ -1394,6 +1439,96 @@ impl App {
         reader.messages = messages;
     }
 
+    /// Keys in the attachment menu: move, `p` preview, Enter or `d` download the one, `D` or `A`
+    /// download them all (each asks for a folder first), Esc closes.
+    fn key_attachments(&mut self, key: Key) -> Option<Effect> {
+        let menu = self.attach.as_mut()?;
+        if let Some((picker, indices)) = menu.picker.as_mut() {
+            match picker.handle(key) {
+                editor::PickerOutcome::Open => {}
+                editor::PickerOutcome::Closed => menu.picker = None,
+                editor::PickerOutcome::Chosen(dir) => {
+                    let effect = Effect::SaveAttachments {
+                        message_id: menu.message_id.clone(),
+                        indices: indices.clone(),
+                        dir,
+                    };
+                    self.attach = None;
+                    self.mode = Mode::Read;
+                    return Some(effect);
+                }
+            }
+            return None;
+        }
+        let last = menu.files.len().saturating_sub(1);
+        match key {
+            Key::Esc | Key::Char('q') | Key::Char('a') => {
+                self.attach = None;
+                self.mode = Mode::Read;
+            }
+            Key::Char('j') | Key::Down => menu.selected = (menu.selected + 1).min(last),
+            Key::Char('k') | Key::Up => menu.selected = menu.selected.saturating_sub(1),
+            Key::Char('p') | Key::Char(' ') => {
+                return Some(Effect::PreviewAttachment {
+                    message_id: menu.message_id.clone(),
+                    index: menu.selected,
+                });
+            }
+            Key::Enter | Key::Char('d') => {
+                menu.picker = Some((
+                    editor::FilePicker::for_folders(editor::scan_dirs(&download_roots())),
+                    vec![menu.selected],
+                ));
+            }
+            Key::Char('D' | 'A') => {
+                menu.picker = Some((
+                    editor::FilePicker::for_folders(editor::scan_dirs(&download_roots())),
+                    (0..menu.files.len()).collect(),
+                ));
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// The text of an attachment arrived: show it in a popup.
+    pub fn show_preview(&mut self, name: &str, text: &str) {
+        let lines: Vec<String> = inbox::sanitize(text)
+            .lines()
+            .map(|l| l.trim_end().to_owned())
+            .collect();
+        self.preview = Some(Preview {
+            name: inbox::sanitize(name).replace('\n', " "),
+            lines,
+            scroll: 0,
+        });
+        self.mode = Mode::Preview;
+    }
+
+    /// Keys in the preview: scroll, Esc back to the menu.
+    fn key_preview(&mut self, key: Key) -> Option<Effect> {
+        let p = self.preview.as_mut()?;
+        let last = p.lines.len().saturating_sub(1);
+        match key {
+            Key::Esc | Key::Char('q' | 'p') | Key::Enter => {
+                self.preview = None;
+                self.mode = if self.attach.is_some() {
+                    Mode::Attachments
+                } else {
+                    Mode::Read
+                };
+            }
+            Key::Char('j') | Key::Down => p.scroll = (p.scroll + 1).min(last),
+            Key::Char('k') | Key::Up => p.scroll = p.scroll.saturating_sub(1),
+            Key::Char(' ' | 'd') => p.scroll = (p.scroll + PREVIEW_PAGE).min(last),
+            Key::Char('b' | 'u') => p.scroll = p.scroll.saturating_sub(PREVIEW_PAGE),
+            Key::Char('g') => p.scroll = 0,
+            Key::Char('G') => p.scroll = last,
+            _ => {}
+        }
+        None
+    }
+
     fn close_reader(&mut self) {
         self.reader = None;
         self.mode = Mode::Normal;
@@ -1416,6 +1551,26 @@ impl App {
             Key::Char('b' | 'u') => reader.selected = step(reader.selected, -READER_PAGE),
             Key::Char('g' | '0') => reader.selected = 0,
             Key::Char('G') => reader.selected = last,
+            Key::Char('a') => {
+                let found = reader.messages.get(reader.selected).map(|m| {
+                    (
+                        m.id.clone(),
+                        haste_core::attachment::lines_of(&inbox::sanitize(&m.body_text)),
+                    )
+                });
+                match found {
+                    Some((id, files)) if !files.is_empty() => {
+                        self.attach = Some(AttachMenu {
+                            message_id: id,
+                            files,
+                            selected: 0,
+                            picker: None,
+                        });
+                        self.mode = Mode::Attachments;
+                    }
+                    _ => self.status = "no attachment on this message".into(),
+                }
+            }
             Key::Char('x') => {
                 if let Some(id) = reader.messages.get(reader.selected).map(|m| m.id.clone()) {
                     if !reader.expanded.remove(&id) {
@@ -2001,6 +2156,21 @@ impl App {
 }
 
 /// Where the file picker looks for files to attach.
+/// Where a download can go: Downloads first, then Desktop, Documents, projects, and the current
+/// folder.
+fn download_roots() -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        for d in ["Downloads", "Desktop", "Documents", "projects"] {
+            roots.push(home.join(d));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    roots
+}
+
 fn attach_roots() -> Vec<std::path::PathBuf> {
     let mut roots = Vec::new();
     if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
@@ -2569,6 +2739,100 @@ mod tests {
         app.open_reply_form("t2");
         assert_eq!(app.mode, Mode::Compose);
         assert_eq!(app.reader.as_ref().unwrap().selected, 1);
+    }
+
+    #[test]
+    fn the_attachment_menu_previews_downloads_one_or_all_into_a_chosen_folder() {
+        let mut app = inbox_app();
+        let view = app.threads[1].clone();
+        app.show_thread(
+            view,
+            vec![
+                message("m1", "a@x.com", "no files here", 10),
+                message(
+                    "m2",
+                    "b@x.com",
+                    "see attached\n[attachment: a.pdf (application/pdf, 100 bytes) #R1]\n[attachment: b.png (image/png, 50 bytes) #R2]",
+                    20,
+                ),
+            ],
+            None,
+        );
+        // the newest message has two files
+        press(&mut app, "a");
+        assert_eq!(app.mode, Mode::Attachments);
+        assert_eq!(app.attach.as_ref().unwrap().files.len(), 2);
+        // p asks for a preview of the selected file
+        assert_eq!(
+            app.handle_key(Key::Char('p')),
+            Some(Effect::PreviewAttachment {
+                message_id: "m2".into(),
+                index: 0
+            })
+        );
+        // D picks a folder for all of them; typing narrows, Enter chooses
+        press(&mut app, "j");
+        press(&mut app, "D");
+        let dir = std::path::PathBuf::from("/Users/x/Downloads");
+        {
+            let (picker, indices) = app.attach.as_mut().unwrap().picker.as_mut().unwrap();
+            assert_eq!(indices, &vec![0, 1]);
+            *picker = editor::FilePicker::for_folders(vec![dir.clone()]);
+        }
+        assert_eq!(
+            app.handle_key(Key::Enter),
+            Some(Effect::SaveAttachments {
+                message_id: "m2".into(),
+                indices: vec![0, 1],
+                dir: dir.clone(),
+            })
+        );
+        assert_eq!(app.mode, Mode::Read);
+        // Enter on one file downloads just that one; Esc in the picker goes back to the list
+        press(&mut app, "a");
+        press(&mut app, "j");
+        app.handle_key(Key::Enter);
+        assert_eq!(
+            app.attach.as_ref().unwrap().picker.as_ref().unwrap().1,
+            vec![1]
+        );
+        app.handle_key(Key::Esc);
+        assert!(app.attach.as_ref().unwrap().picker.is_none());
+        app.handle_key(Key::Esc);
+        assert_eq!(app.mode, Mode::Read);
+        // a message without files says so
+        press(&mut app, "k");
+        press(&mut app, "a");
+        assert_eq!(app.mode, Mode::Read);
+        assert!(app.status.contains("no attachment"));
+    }
+
+    #[test]
+    fn the_preview_scrolls_and_closes_back_to_the_menu() {
+        let mut app = inbox_app();
+        let view = app.threads[1].clone();
+        app.show_thread(
+            view,
+            vec![message(
+                "m1",
+                "a@x.com",
+                "[attachment: a.pdf (application/pdf, 1 bytes) #R]",
+                10,
+            )],
+            None,
+        );
+        press(&mut app, "a");
+        let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        app.show_preview("a.pdf", &text);
+        assert_eq!(app.mode, Mode::Preview);
+        press(&mut app, "j");
+        assert_eq!(app.preview.as_ref().unwrap().scroll, 1);
+        press(&mut app, " ");
+        assert_eq!(app.preview.as_ref().unwrap().scroll, 1 + PREVIEW_PAGE);
+        press(&mut app, "G");
+        assert_eq!(app.preview.as_ref().unwrap().scroll, 99);
+        app.handle_key(Key::Esc);
+        assert_eq!(app.mode, Mode::Attachments);
     }
 
     #[test]

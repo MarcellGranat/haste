@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use haste_core::connector::{
-    Batch, BoxFuture, Capabilities, Connector, ConnectorError, Cursor, DraftToSend, SendReceipt,
+    AttachmentRequest, Batch, BoxFuture, Capabilities, Connector, ConnectorError, Cursor,
+    DraftToSend, SendReceipt,
 };
 use haste_core::model::{Message, Source, Thread};
 use serde::{Deserialize, Serialize};
@@ -39,7 +40,7 @@ pub struct BeeperCursor {
 }
 
 /// Bump when the stored message fields change and old chats should be read again.
-pub const CURSOR_VERSION: u32 = 2;
+pub const CURSOR_VERSION: u32 = 3;
 
 impl BeeperCursor {
     #[must_use]
@@ -481,5 +482,24 @@ impl Connector for BeeperConnector {
         draft: &'a DraftToSend,
     ) -> BoxFuture<'a, Result<SendReceipt, ConnectorError>> {
         Box::pin(self.send_text(draft))
+    }
+
+    fn fetch_attachment<'a>(
+        &'a self,
+        request: &'a AttachmentRequest,
+    ) -> BoxFuture<'a, Result<Vec<u8>, ConnectorError>> {
+        Box::pin(async move {
+            if request.reference.is_empty() {
+                return Err(ConnectorError::Other(
+                    "this attachment was stored before it could be fetched".into(),
+                ));
+            }
+            self.client
+                .download_asset(
+                    &request.reference,
+                    haste_core::connector::MAX_FETCH_ATTACHMENT_BYTES,
+                )
+                .await
+        })
     }
 }

@@ -51,6 +51,10 @@ async fn boot() -> Harness {
             ("GET", "/gmail/v1/users/me/threads") => (200, r#"{"threads":[{"id":"t100"}]}"#.into()),
             ("GET", "/gmail/v1/users/me/threads/t100") => (200, THREAD_FULL.into()),
             ("GET", "/gmail/v1/users/me/history") => (200, r#"{"historyId":"900"}"#.into()),
+            ("GET", "/gmail/v1/users/me/messages/m-att/attachments/ATT1") => {
+                // "hello" as base64url
+                (200, r#"{"size":5,"data":"aGVsbG8"}"#.into())
+            }
             ("POST", "/gmail/v1/users/me/threads/t100/modify") => {
                 if no_modify_flag.load(Ordering::SeqCst) {
                     (403, r#"{"error":{"message":"insufficient authentication scopes","errors":[{"reason":"insufficientPermissions"}]}}"#.into())
@@ -620,6 +624,81 @@ async fn a_resync_forgets_the_local_mail_and_reads_the_inbox_again() {
     );
     assert_eq!(store.list_threads(&Default::default()).unwrap().len(), 1);
     assert!(audit(&h).contains(r#""action":"connector.resync","outcome":"purged""#));
+    h.daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn only_the_human_can_save_an_attachment_and_it_never_overwrites() {
+    let h = boot().await;
+    let thread = synced_thread(&h).await;
+    let agent = register(&h, "agent-a", PrincipalKind::Agent).await;
+    let store = &h.daemon.state.store;
+    let stored = store
+        .upsert_message(&haste_core::model::Message {
+            id: String::new(),
+            thread_id: thread.clone(),
+            source: Source::Gmail,
+            external_id: "m-att".into(),
+            sender_person_id: None,
+            sender_identifier: Some("ana@example.org".into()),
+            body_text: "see attached\n[attachment: report.pdf (application/pdf, 5 bytes) #ATT1]"
+                .into(),
+            sent_at: 1_700_000_000,
+            is_own: false,
+        })
+        .unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let save = |dir: Option<&std::path::Path>, index: usize| RequestBody::AttachmentSave {
+        message_id: stored.id.clone(),
+        index,
+        dir: dir.map(|d| d.to_string_lossy().into_owned()),
+    };
+    // an agent cannot
+    assert_eq!(
+        code(&call_with(&h, &agent, save(Some(out.path()), 0)).await),
+        Some(ErrorCode::Denied)
+    );
+    // the human is refused a missing or relative folder and an attachment that is not there
+    assert_eq!(
+        code(&human(&h, save(Some(std::path::Path::new("/no/such/dir")), 0)).await),
+        Some(ErrorCode::Validation)
+    );
+    assert_eq!(
+        code(&human(&h, save(Some(std::path::Path::new("relative")), 0)).await),
+        Some(ErrorCode::Validation)
+    );
+    assert_eq!(
+        code(&human(&h, save(Some(out.path()), 3)).await),
+        Some(ErrorCode::NotFound)
+    );
+    // the file is written, then a second save of the same name gets a new one
+    for expect in ["report.pdf", "report (1).pdf"] {
+        let Response::AttachmentSaved { name, bytes, .. } =
+            human(&h, save(Some(out.path()), 0)).await
+        else {
+            panic!("not saved")
+        };
+        assert_eq!((name.as_str(), bytes), (expect, 5));
+        assert_eq!(std::fs::read(out.path().join(expect)).unwrap(), b"hello");
+    }
+    // a preview goes to the private folder inside the data directory
+    let Response::AttachmentSaved { path, .. } = human(&h, save(None, 0)).await else {
+        panic!("no preview file")
+    };
+    assert!(path.starts_with(
+        h.daemon
+            .state
+            .config
+            .data_dir
+            .join("preview")
+            .to_str()
+            .unwrap()
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+    // the audit counts bytes and never names the file
+    let log = audit(&h);
+    assert!(log.contains(r#""action":"attachment.save","outcome":"saved""#));
+    assert!(!log.contains("report"));
     h.daemon.shutdown().await;
 }
 

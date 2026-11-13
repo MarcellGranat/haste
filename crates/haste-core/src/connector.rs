@@ -69,6 +69,20 @@ pub struct ArchiveTarget {
     pub message_external_ids: Vec<String>,
 }
 
+/// Which attachment to fetch: the provider ids of its message and thread, the opaque reference
+/// the connector wrote into the stored line, and the size ceiling.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AttachmentRequest {
+    pub message_external_id: String,
+    pub thread_external_id: String,
+    pub reference: String,
+    /// The size the stored line says (a hint for the fetch; the cap below always applies).
+    pub bytes: u64,
+}
+
+/// The biggest attachment fetched for saving or previewing.
+pub const MAX_FETCH_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
+
 /// The most attachments one send may carry (chats take one), and the most bytes in all.
 pub const MAX_SEND_ATTACHMENTS: usize = 5;
 pub const MAX_SEND_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
@@ -201,6 +215,15 @@ pub trait Connector: Send + Sync {
         _target: &'a ArchiveTarget,
     ) -> BoxFuture<'a, Result<(), ConnectorError>> {
         Box::pin(async { Err(ConnectorError::Unsupported("archive".into())) })
+    }
+
+    /// Fetch one attachment's bytes (read-only; at most [`MAX_FETCH_ATTACHMENT_BYTES`]). The
+    /// human asks for it from the reader. Default: unsupported.
+    fn fetch_attachment<'a>(
+        &'a self,
+        _request: &'a AttachmentRequest,
+    ) -> BoxFuture<'a, Result<Vec<u8>, ConnectorError>> {
+        Box::pin(async { Err(ConnectorError::Unsupported("attachments".into())) })
     }
 
     /// Create a draft at the provider without sending it. `draft.thread_id` carries the
@@ -492,6 +515,31 @@ impl Guarded<'_> {
             }
             Err(e) => {
                 self.hooks.audit("draft.create", &source, "error");
+                Err(CallError::Connector(e))
+            }
+        }
+    }
+
+    /// Fetch an attachment for the human (read-only, one attempt).
+    ///
+    /// # Errors
+    /// See [`CallError`].
+    pub async fn fetch_attachment(
+        &self,
+        request: &AttachmentRequest,
+    ) -> Result<Vec<u8>, CallError> {
+        self.precheck(self.connector.capabilities().read, "attachment.fetch")?;
+        let source = self.connector.source();
+        match self.connector.fetch_attachment(request).await {
+            Ok(bytes) => {
+                self.hooks.audit("attachment.fetch", &source, "ok");
+                Ok(bytes)
+            }
+            Err(e @ (ConnectorError::Challenge(_) | ConnectorError::Checkpoint(_))) => {
+                Err(self.trip("attachment.fetch", e))
+            }
+            Err(e) => {
+                self.hooks.audit("attachment.fetch", &source, "error");
                 Err(CallError::Connector(e))
             }
         }

@@ -10,7 +10,7 @@ use haste_core::policy::PrincipalKind;
 use haste_core::proposal::{Payload, Proposal, ProposalState};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 /// Largest frame either side accepts.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
@@ -163,6 +163,15 @@ pub enum RequestBody {
     },
     ConnectorEngage {
         source: String,
+    },
+    /// Human-only: fetch one attachment of a stored message from its provider and write it to
+    /// `dir` (an absolute folder), or, with no `dir`, to the daemon's private preview folder.
+    AttachmentSave {
+        message_id: String,
+        /// Which attachment line of the message (0 is the first).
+        index: usize,
+        #[serde(default)]
+        dir: Option<String>,
     },
     /// Human-only: record that a connector was (re)authorized out of band, for the audit log.
     ConnectorAuthorized {
@@ -468,6 +477,12 @@ pub struct AuditLine {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
+    /// An attachment was written: where, under what name, and how big.
+    AttachmentSaved {
+        path: String,
+        name: String,
+        bytes: usize,
+    },
     Threads {
         threads: Vec<ThreadView>,
     },

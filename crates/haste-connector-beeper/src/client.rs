@@ -332,6 +332,68 @@ impl BeeperClient {
             .ok_or_else(|| ConnectorError::Other("upload gave no id".into()))
     }
 
+    /// Download an attachment through the local Beeper service and read it: the service writes the
+    /// file and answers with its local path, which is read here (a regular file, at most `max`
+    /// bytes). Read-only for the chat: nothing is sent to anyone.
+    ///
+    /// # Errors
+    /// `Authorization` when Beeper is not running or the token is rejected, else `Other`.
+    pub async fn download_asset(&self, url: &str, max: usize) -> Result<Vec<u8>, ConnectorError> {
+        let token = self.token()?;
+        let response = self
+            .http
+            .post(self.url(&["v1", "assets", "download"]))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "url": url }))
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_connect() {
+                    ConnectorError::Authorization(NOT_RUNNING.into())
+                } else {
+                    ConnectorError::Other("download failed".into())
+                }
+            })?;
+        let status = response.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            self.forget();
+            return Err(ConnectorError::Authorization(TOKEN_REJECTED.into()));
+        }
+        if !status.is_success() {
+            return Err(ConnectorError::Other(format!(
+                "download refused: http {}",
+                status.as_u16()
+            )));
+        }
+        let text = response.text().await.unwrap_or_default();
+        let src = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| {
+                v.get("srcURL")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .ok_or_else(|| ConnectorError::Other("Beeper gave no file".into()))?;
+        let path = file_url_to_path(&src)
+            .ok_or_else(|| ConnectorError::Other("Beeper gave an unusable file location".into()))?;
+        tokio::task::spawn_blocking(move || {
+            let meta = std::fs::metadata(&path)
+                .map_err(|_| ConnectorError::Other("the downloaded file is missing".into()))?;
+            if !meta.is_file() {
+                return Err(ConnectorError::Other(
+                    "the downloaded file is not a file".into(),
+                ));
+            }
+            if meta.len() > max as u64 {
+                return Err(ConnectorError::Other("attachment is too big".into()));
+            }
+            std::fs::read(&path)
+                .map_err(|_| ConnectorError::Other("the downloaded file is unreadable".into()))
+        })
+        .await
+        .unwrap_or_else(|_| Err(ConnectorError::Other("download task failed".into())))
+    }
+
     /// Like [`Self::send_message`], with one uploaded file (`(upload id, file name)`).
     ///
     /// # Errors
@@ -430,6 +492,29 @@ impl BeeperClient {
     }
 }
 
+/// `file:///Users/me/a%20b.pdf` to `/Users/me/a b.pdf`; `None` for anything but an absolute
+/// `file://` path.
+fn file_url_to_path(url: &str) -> Option<std::path::PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    if !rest.starts_with('/') {
+        return None;
+    }
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = rest.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok().map(std::path::PathBuf::from)
+}
+
 /// `v1/chats/:id/messages` from `["v1", "chats", <id>, "messages"]`: the chat id is never logged.
 fn route_of(segments: &[&str]) -> String {
     segments
@@ -455,6 +540,18 @@ fn encode(segment: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_urls_become_local_paths_and_nothing_else_does() {
+        use super::file_url_to_path;
+        assert_eq!(
+            file_url_to_path("file:///Users/me/a%20b.pdf").unwrap(),
+            std::path::PathBuf::from("/Users/me/a b.pdf")
+        );
+        assert!(file_url_to_path("https://x/y").is_none());
+        assert!(file_url_to_path("file://host/x").is_none());
+        assert!(file_url_to_path("file:///bad%zz").is_none());
+    }
+
     use super::*;
     use haste_google_oauth::keychain::MemoryStore;
 

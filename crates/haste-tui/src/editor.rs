@@ -173,6 +173,46 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<(std::time::SystemTime, PathBuf)
     }
 }
 
+/// Folders to pick a destination from: the roots first (in the order given), then the folders
+/// under them, shallow ones before deep ones. Hidden and build folders are skipped.
+#[must_use]
+pub fn scan_dirs(roots: &[PathBuf]) -> Vec<PathBuf> {
+    const MAX_DIRS: usize = 5000;
+    const MAX_DEPTH: usize = 3;
+    let mut out: Vec<PathBuf> = roots.iter().filter(|r| r.is_dir()).cloned().collect();
+    let mut level: Vec<PathBuf> = out.clone();
+    for _ in 0..MAX_DEPTH {
+        let mut next = Vec::new();
+        for dir in &level {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            let mut subs: Vec<PathBuf> = entries
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .filter(|e| {
+                    let name = e.file_name();
+                    let name = name.to_string_lossy();
+                    !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_ref())
+                })
+                .map(|e| e.path())
+                .collect();
+            subs.sort();
+            next.extend(subs);
+        }
+        for d in &next {
+            if out.len() >= MAX_DIRS {
+                break;
+            }
+            if !out.contains(d) {
+                out.push(d.clone());
+            }
+        }
+        level = next;
+    }
+    out
+}
+
 /// Does `query` match `text` as a case-insensitive subsequence (the way fzf matches)? Every
 /// whitespace-separated term must match.
 #[must_use]
@@ -190,6 +230,8 @@ pub struct FilePicker {
     files: Vec<PathBuf>,
     pub query: String,
     pub selected: usize,
+    /// Choosing a folder (a typed absolute path must then be a folder, not a file).
+    pub folders: bool,
 }
 
 /// What a key did to the picker.
@@ -207,6 +249,16 @@ impl FilePicker {
             files,
             query: String::new(),
             selected: 0,
+            folders: false,
+        }
+    }
+
+    /// A picker over folders.
+    #[must_use]
+    pub fn for_folders(dirs: Vec<PathBuf>) -> Self {
+        Self {
+            folders: true,
+            ..Self::new(dirs)
         }
     }
 
@@ -226,7 +278,12 @@ impl FilePicker {
             Key::Enter => {
                 // a typed absolute path wins, so a file outside the scanned folders can be attached
                 let typed = self.query.trim();
-                if typed.starts_with('/') && Path::new(typed).is_file() {
+                let exists = if self.folders {
+                    Path::new(typed).is_dir()
+                } else {
+                    Path::new(typed).is_file()
+                };
+                if typed.starts_with('/') && exists {
                     return PickerOutcome::Chosen(PathBuf::from(typed));
                 }
                 if let Some(p) = self.matches().get(self.selected) {

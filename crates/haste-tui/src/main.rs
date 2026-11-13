@@ -384,6 +384,39 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
             notes,
             attachments,
         } => save_todo(app, client, reminder_id, title, due, notes, attachments),
+        Effect::SaveAttachments {
+            message_id,
+            indices,
+            dir,
+        } => {
+            let total = indices.len();
+            let mut saved = 0;
+            let mut failure = None;
+            for index in indices {
+                match client.call(RequestBody::AttachmentSave {
+                    message_id: message_id.clone(),
+                    index,
+                    dir: Some(dir.to_string_lossy().into_owned()),
+                }) {
+                    Ok(Response::AttachmentSaved { .. }) => saved += 1,
+                    other => {
+                        failure = describe(other).err();
+                    }
+                }
+            }
+            let home = std::env::var("HOME").unwrap_or_default();
+            let shown = dir.to_string_lossy().replacen(&home, "~", 1);
+            app.status = match failure {
+                None => format!(
+                    "saved {saved} file{} to {shown}",
+                    if saved == 1 { "" } else { "s" }
+                ),
+                Some(e) => format!("saved {saved} of {total} to {shown}; {e}"),
+            };
+        }
+        Effect::PreviewAttachment { message_id, index } => {
+            preview_attachment(app, client, &message_id, index);
+        }
         Effect::OpenUrl { url } => {
             // only plain web links, so nothing but a page can be opened from message text
             let ok = (url.starts_with("https://") || url.starts_with("http://"))
@@ -685,6 +718,40 @@ fn edit_external(terminal: &mut ratatui::DefaultTerminal, app: &mut App, text: &
 
 /// A reply written in the form becomes a draft proposal, approved right away because the human
 /// wrote it. Sending is still its own step in Approvals, with the recipient check and countdown.
+/// Fetch one attachment into the daemon's private preview folder, read its text with the system
+/// tools (PDF and Word only), show it in a popup, and delete the file again.
+fn preview_attachment(app: &mut App, client: &Client, message_id: &str, index: usize) {
+    let Some(file) = app
+        .attach
+        .as_ref()
+        .and_then(|menu| menu.files.get(index).cloned())
+    else {
+        return;
+    };
+    let Some(kind) = haste_tui::extract::kind_of(&file.name, &file.mime) else {
+        app.status = "no preview for this type (PDF and Word only): d downloads it".into();
+        return;
+    };
+    let saved = client.call(RequestBody::AttachmentSave {
+        message_id: message_id.to_owned(),
+        index,
+        dir: None,
+    });
+    let Ok(Response::AttachmentSaved { path, .. }) = saved else {
+        app.status = describe(saved)
+            .err()
+            .unwrap_or_else(|| "could not fetch the attachment".into());
+        return;
+    };
+    let path = std::path::PathBuf::from(path);
+    let text = haste_tui::extract::extract_text(&path, kind);
+    let _ = std::fs::remove_file(&path);
+    match text {
+        Ok(text) => app.show_preview(&file.name, &text),
+        Err(e) => app.status = e,
+    }
+}
+
 fn save_reply(
     app: &mut App,
     client: &Client,

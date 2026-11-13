@@ -133,6 +133,18 @@ threads and messages, with their triage marks) and reads the inbox again from th
 changes at the provider. Use it after changing what is loaded, for example to drop the
 Promotions that were read before only the primary inbox was kept.
 
+### Attachments: preview and save (human only)
+
+In the reader, `a` opens the attachments of the message under the cursor. `p` previews the
+selected file as text in a popup (PDF with `pdftotext`, Word with macOS `textutil`; other types
+are not previewed), `Enter` or `d` saves it, `D` saves all of them. Saving opens a fuzzy folder
+picker (type to narrow, Enter chooses); a file never overwrites another one (`name (1).ext`).
+The file is fetched from the provider only now: Gmail `attachments.get`, an IMAP
+`BODY.PEEK` of that one part for iCloud, and Beeper's local download endpoint for chats. Files
+are limited to 25 MB. A preview is written to a private folder in the data directory and deleted
+right after the text is read. Messages stored before this feature have no fetch reference:
+run `haste connector resync gmail` (or `icloud`); chats are re-read once by themselves.
+
 ### Archiving (human only)
 
 `e` archives a thread for real. Gmail: the thread leaves the inbox (`threads.modify` removes the

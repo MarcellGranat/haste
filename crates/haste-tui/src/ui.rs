@@ -34,8 +34,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     if let Mode::Detail(id) = &app.mode {
         draw_detail(frame, app, id, body);
     }
-    if app.mode == Mode::Read {
+    if matches!(app.mode, Mode::Read | Mode::Attachments | Mode::Preview) {
         draw_reader(frame, app, body);
+    }
+    if matches!(app.mode, Mode::Attachments | Mode::Preview) {
+        draw_attachments(frame, app, frame.area());
+    }
+    if app.mode == Mode::Preview {
+        draw_preview(frame, app, frame.area());
     }
     if app.mode == Mode::Compose {
         let replying = app
@@ -244,6 +250,129 @@ fn draw_compose(frame: &mut Frame<'_>, app: &App, area: Rect, docked: bool) {
             q.y,
         ));
     }
+}
+
+/// The attachments of the message under the cursor; while choosing where to save, the folder
+/// picker on top.
+fn draw_attachments(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let Some(menu) = &app.attach else {
+        return;
+    };
+    let height = u16::try_from(menu.files.len().min(12)).unwrap_or(12) + 4;
+    let rect = centered(area, 84, height.min(area.height));
+    frame.render_widget(Clear, rect);
+    let block = theme::panel(" Attachments · p preview · Enter/d download · D all · Esc ")
+        .border_style(pane_border(true));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let items: Vec<ListItem<'_>> = menu
+        .files
+        .iter()
+        .map(|f| {
+            let mut text = inbox::sanitize(&f.name).replace('\n', " ");
+            if !f.mime.is_empty() {
+                text.push_str(&format!(" · {}", inbox::sanitize(&f.mime)));
+            }
+            if f.bytes > 0 {
+                text.push_str(&format!(" · {}", crate::chat::human_size(f.bytes)));
+            }
+            let can_preview = crate::extract::kind_of(&f.name, &f.mime).is_some();
+            ListItem::new(Line::from(vec![
+                Span::styled("◫ ", Style::new().fg(theme::PEACH)),
+                Span::styled(text, Style::new().fg(theme::TEXT)),
+                Span::styled(
+                    if can_preview { "  (preview)" } else { "" },
+                    Style::new().fg(theme::MUTED),
+                ),
+            ]))
+        })
+        .collect();
+    let mut st = ListState::default().with_selected(Some(menu.selected));
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_style(theme::selected())
+            .highlight_symbol("▌ "),
+        inner,
+        &mut st,
+    );
+    if let Some((picker, indices)) = &menu.picker {
+        let prect = centered(area, 80, area.height.saturating_sub(8).max(8));
+        frame.render_widget(Clear, prect);
+        let matches = picker.matches();
+        let what = if indices.len() == 1 {
+            "1 file".to_owned()
+        } else {
+            format!("{} files", indices.len())
+        };
+        let title = format!(
+            " Save {what} to a folder · {} found · Enter chooses, Esc back ",
+            matches.len()
+        );
+        let block = theme::panel(&title).border_style(pane_border(true));
+        let pinner = block.inner(prect);
+        frame.render_widget(block, prect);
+        let [q, list] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(pinner);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("> ", Style::new().fg(theme::MAUVE)),
+                Span::styled(picker.query.clone(), Style::new().fg(theme::TEXT)),
+            ])),
+            q,
+        );
+        let home = std::env::var("HOME").unwrap_or_default();
+        let rows: Vec<ListItem<'_>> = matches
+            .iter()
+            .map(|p| {
+                let shown = p.to_string_lossy().replacen(&home, "~", 1);
+                ListItem::new(Span::styled(
+                    inbox::sanitize(&shown),
+                    Style::new().fg(theme::TEXT),
+                ))
+            })
+            .collect();
+        let mut pst =
+            ListState::default().with_selected((!rows.is_empty()).then_some(picker.selected));
+        frame.render_stateful_widget(
+            List::new(rows)
+                .highlight_style(theme::selected())
+                .highlight_symbol("▌ "),
+            list,
+            &mut pst,
+        );
+        frame.set_cursor_position((
+            q.x + 2 + u16::try_from(picker.query.chars().count()).unwrap_or(0),
+            q.y,
+        ));
+    }
+}
+
+/// An attachment's text in a large popup.
+fn draw_preview(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let Some(p) = &app.preview else {
+        return;
+    };
+    let w = area.width.saturating_sub(8).max(30);
+    let h = area.height.saturating_sub(4).max(8);
+    let rect = centered(area, w, h);
+    frame.render_widget(Clear, rect);
+    let title = format!(
+        " {} · line {}/{} · j/k scroll · Space/b page · Esc closes ",
+        p.name,
+        p.scroll + 1,
+        p.lines.len().max(1)
+    );
+    let block = theme::panel(&title).border_style(pane_border(true));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let rows = usize::from(inner.height);
+    let lines: Vec<Line<'_>> = p
+        .lines
+        .iter()
+        .skip(p.scroll)
+        .take(rows)
+        .map(|l| Line::from(Span::styled(l.clone(), Style::new().fg(theme::TEXT))))
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_labels(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -836,7 +965,7 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
         None => 0,
     };
     reader.scroll.set(scroll);
-    let hint = " j/k message · x fold/unfold · o open link · r reply · n note · l label · e archive · Esc close ";
+    let hint = " j/k message · a attachments · x fold · o link · r reply · n note · l label · e archive · Esc ";
     frame.render_widget(
         Paragraph::new(lines)
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))

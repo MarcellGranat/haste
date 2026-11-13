@@ -5,6 +5,7 @@ pub mod chat;
 pub mod client;
 pub mod compose;
 pub mod editor;
+pub mod extract;
 pub mod inbox;
 pub mod theme;
 pub mod ui;

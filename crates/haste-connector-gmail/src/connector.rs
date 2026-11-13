@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use haste_core::connector::{
-    ArchiveTarget, Batch, BoxFuture, Capabilities, Connector, ConnectorError, Cursor, DraftReceipt,
-    DraftToSend, SendReceipt,
+    ArchiveTarget, AttachmentRequest, Batch, BoxFuture, Capabilities, Connector, ConnectorError,
+    Cursor, DraftReceipt, DraftToSend, SendReceipt,
 };
 use haste_core::model::Source;
 use serde::{Deserialize, Serialize};
@@ -221,6 +221,21 @@ impl GmailConnector {
     /// A human send: the recipient, subject and body the human confirmed, exactly. One
     /// `messages.send` request, never retried; the approval-time draft is removed afterwards
     /// (best effort, once).
+    async fn attachment(&self, request: &AttachmentRequest) -> Result<Vec<u8>, ConnectorError> {
+        if request.reference.is_empty() {
+            return Err(ConnectorError::Other(
+                "this attachment was stored before it could be fetched: run `haste connector resync gmail`".into(),
+            ));
+        }
+        self.client
+            .get_attachment(
+                &request.message_external_id,
+                &request.reference,
+                haste_core::connector::MAX_FETCH_ATTACHMENT_BYTES,
+            )
+            .await
+    }
+
     async fn archive(&self, target: &ArchiveTarget) -> Result<(), ConnectorError> {
         self.client.archive_thread(&target.thread_external_id).await
     }
@@ -366,6 +381,13 @@ impl Connector for GmailConnector {
                 Some(c) => self.delta(c).await,
             }
         })
+    }
+
+    fn fetch_attachment<'a>(
+        &'a self,
+        request: &'a AttachmentRequest,
+    ) -> BoxFuture<'a, Result<Vec<u8>, ConnectorError>> {
+        Box::pin(self.attachment(request))
     }
 
     fn archive_thread<'a>(

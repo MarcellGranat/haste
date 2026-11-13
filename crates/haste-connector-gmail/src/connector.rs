@@ -16,7 +16,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::{OAuthClient, TokenSource};
 use crate::client::{ApiPart, GmailClient};
-use crate::consts::{API_BASE, BACKFILL_DAYS, BACKFILL_MAX_THREADS, HTTP_TIMEOUT, TOKEN_URL};
+use crate::consts::{
+    API_BASE, BACKFILL_DAYS, BACKFILL_MAX_THREADS, HTTP_TIMEOUT, THREAD_GET_PACING, THREAD_RETRIES,
+    THREAD_RETRY_BASE, TOKEN_URL,
+};
 use crate::keychain::TokenStore;
 use crate::mapper::{addresses, map_thread};
 use crate::mime::{build_plain_text, build_send_message, encode_raw, reply_subject};
@@ -128,14 +131,33 @@ impl GmailConnector {
         Ok(batch)
     }
 
+    /// Read one thread, waiting and retrying when Gmail says to slow down.
+    async fn get_thread_patiently(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::client::ApiThread>, ConnectorError> {
+        let mut wait = THREAD_RETRY_BASE;
+        for _ in 0..THREAD_RETRIES {
+            match self.client.get_thread(id).await {
+                Err(ConnectorError::Transient(_)) => {
+                    tokio::time::sleep(wait).await;
+                    wait *= 2;
+                }
+                other => return other,
+            }
+        }
+        self.client.get_thread(id).await
+    }
+
     async fn fetch_threads<'a>(
         &self,
         ids: impl Iterator<Item = &'a str>,
     ) -> Result<Batch, ConnectorError> {
         let mut batch = Batch::default();
         for id in ids {
+            tokio::time::sleep(THREAD_GET_PACING).await;
             // A thread deleted since it was listed is simply skipped.
-            if let Some(api) = self.client.get_thread(id).await? {
+            if let Some(api) = self.get_thread_patiently(id).await? {
                 let mapped = map_thread(&api);
                 batch.threads.push(mapped.thread);
                 batch.messages.extend(mapped.messages);

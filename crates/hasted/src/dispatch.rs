@@ -1311,6 +1311,7 @@ fn archive_upstream(
             Ok(())
         }
         Err(e) => {
+            let mut detail: Option<String> = None;
             let (code, reason) = match &e {
                 CallError::KillSwitchEngaged => (
                     ErrorCode::Denied,
@@ -1328,6 +1329,13 @@ fn archive_upstream(
                 CallError::Connector(ConnectorError::Transient(_)) => {
                     (ErrorCode::Internal, "the mail server could not be reached")
                 }
+                // iCloud's failure labels are fixed strings (the IMAP step and kind), safe to show
+                CallError::Connector(ConnectorError::Other(m))
+                    if thread.source.as_name() == "icloud" =>
+                {
+                    detail = Some(m.clone());
+                    (ErrorCode::Internal, "the mailbox refused the archive")
+                }
                 _ => (ErrorCode::Internal, "the mailbox refused the archive"),
             };
             state.audit(
@@ -1335,9 +1343,18 @@ fn archive_upstream(
                 "thread.archive",
                 "failed",
                 Some(thread_id),
-                Some(&format!("source={}", thread.source.as_name())),
+                Some(&format!(
+                    "source={}{}",
+                    thread.source.as_name(),
+                    detail
+                        .as_deref()
+                        .map_or(String::new(), |d| format!(" step={d}"))
+                )),
             );
-            Err(fail(code, reason))
+            Err(fail(
+                code,
+                &detail.map_or_else(|| reason.to_owned(), |d| format!("{reason} ({d})")),
+            ))
         }
     }
 }

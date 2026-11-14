@@ -134,6 +134,7 @@ enum Stage {
     Greeting,
     Login,
     Examine,
+    Select,
     Search,
     FetchHeaders,
     FetchBody,
@@ -147,6 +148,7 @@ impl Stage {
             Self::Greeting => "greeting",
             Self::Login => "login",
             Self::Examine => "examine",
+            Self::Select => "select",
             Self::Search => "uid search",
             Self::FetchHeaders => "fetch headers",
             Self::FetchBody => "fetch body",
@@ -396,7 +398,7 @@ impl<T: Read + Write> MailSession for Imap<T> {
         let mailbox = self
             .session
             .select(folder)
-            .map_err(|e| classify(&e, Stage::Move))?;
+            .map_err(|e| classify(&e, Stage::Select))?;
         Ok(FolderInfo {
             uid_validity: mailbox
                 .uid_validity

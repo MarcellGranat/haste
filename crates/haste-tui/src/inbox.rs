@@ -40,6 +40,19 @@ const ROBOT_LOCAL_PARTS: [&str; 12] = [
     "bounce",
 ];
 
+/// Is this local part a robot's (`noreply`, `no-reply-qwrphp-k3x…`, `notifications+abc`)? It is
+/// when it is one of the names or starts with one followed by a separator.
+fn is_robot_local(local: &str) -> bool {
+    let local = local.to_lowercase();
+    ROBOT_LOCAL_PARTS.iter().any(|p| {
+        local == *p
+            || local
+                .strip_prefix(p)
+                .and_then(|rest| rest.chars().next())
+                .is_some_and(|c| matches!(c, '-' | '_' | '.' | '+'))
+    })
+}
+
 /// The name of an address's domain without its ending: `accounts.google.com` is `google`,
 /// `news.shop.co.uk` is `shop`. Empty when the address has no domain.
 fn domain_name(address: &str) -> String {
@@ -76,7 +89,7 @@ pub fn short_sender(id: &str) -> String {
     }
     let bare = id.trim_matches(|c| c == '<' || c == '>');
     let local = bare.split('@').next().unwrap_or(bare);
-    if bare.contains('@') && ROBOT_LOCAL_PARTS.contains(&local.to_lowercase().as_str()) {
+    if bare.contains('@') && is_robot_local(local) {
         let domain = domain_name(bare);
         if !domain.is_empty() {
             return domain;
@@ -92,7 +105,7 @@ pub fn short_sender_or_address(id: &str) -> String {
     let short = short_sender(id);
     let bare = id.trim().trim_matches(|c| c == '<' || c == '>');
     let local = bare.split('@').next().unwrap_or(bare);
-    if bare.contains('@') && ROBOT_LOCAL_PARTS.contains(&local.to_lowercase().as_str()) {
+    if bare.contains('@') && is_robot_local(local) {
         short
     } else {
         id.to_owned()
@@ -561,6 +574,17 @@ mod tests {
         assert_eq!(short_sender("<donotreply@bank.hu>"), "bank");
         assert_eq!(short_sender("notifications@github.com"), "github");
         assert_eq!(short_sender("ana@x.org"), "ana");
+        // a robot name with a unique tail is still a robot
+        assert_eq!(
+            short_sender("no-reply-qwrphp-krvoryje8moywcw@mail.claude.com"),
+            "claude"
+        );
+        assert_eq!(short_sender("notifications+abc123@github.com"), "github");
+        assert_eq!(short_sender("noreplyfan@x.org"), "noreplyfan");
+        assert_eq!(
+            short_sender_or_address("no-reply-ab-cd@mail.claude.com"),
+            "claude"
+        );
     }
 
     #[test]

@@ -229,6 +229,9 @@ pub struct Laid {
     /// First line of the message's frame within the whole thread.
     pub start: usize,
     pub end: usize,
+    /// `(shown text, full address)` for every link in the message. A long address is shown
+    /// shortened; the full one is what a click opens.
+    pub links: Vec<(String, String)>,
 }
 
 /// Everything the layout needs besides the messages.
@@ -243,18 +246,86 @@ pub struct Layout<'a> {
     pub expanded: &'a std::collections::HashSet<String>,
 }
 
+/// Trim a word to the web address inside it: leading brackets and trailing punctuation dropped.
+fn web_address(word: &str) -> Option<&str> {
+    let w = word.trim_start_matches(['(', '<', '"', '\'', '[']);
+    let w = w.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '>', '"', '\'', ']']);
+    (w.starts_with("https://") || w.starts_with("http://"))
+        .then_some(w)
+        .filter(|u| u.len() > 8 && !u.chars().any(char::is_control))
+}
+
 /// A link in a message: `http://` or `https://` up to whitespace, trailing punctuation dropped.
 #[must_use]
 pub fn links(text: &str) -> Vec<String> {
     text.split_whitespace()
-        .filter_map(|w| {
-            let w = w.trim_start_matches(['(', '<', '"', '\'', '[']);
-            let w = w.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '>', '"', '\'', ']']);
-            (w.starts_with("https://") || w.starts_with("http://"))
-                .then(|| w.to_owned())
-                .filter(|u| u.len() > 8 && !u.chars().any(char::is_control))
-        })
+        .filter_map(|w| web_address(w).map(str::to_owned))
         .collect()
+}
+
+/// Longest address shown in full; longer ones are shown as `https://host/…`.
+const LINK_SHOWN: usize = 40;
+
+/// What is shown for an address: itself when short, else its scheme and host with `/…`, cut to
+/// `max` columns. Two different addresses never share a shown text (a number is added).
+fn shown_link(url: &str, max: usize, taken: &[(String, String)]) -> String {
+    let max = max.max(12);
+    let base = if url.chars().count() <= LINK_SHOWN.min(max) {
+        url.to_owned()
+    } else {
+        let host_end = url.find("://").map_or(url.len(), |i| {
+            url[i + 3..]
+                .find(['/', '?', '#'])
+                .map_or(url.len(), |j| i + 3 + j)
+        });
+        let host: String = url[..host_end]
+            .chars()
+            .take(max.saturating_sub(2))
+            .collect();
+        format!("{host}/…")
+    };
+    let mut shown = base.clone();
+    let mut n = 1;
+    while taken.iter().any(|(s, u)| *s == shown && u != url) {
+        n += 1;
+        shown = format!("{base}{n}");
+    }
+    shown
+}
+
+/// Replace every long address in `text` by its shown form, recording the pairs in `out`.
+fn shorten_links(text: &str, max: usize, out: &mut Vec<(String, String)>) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut word = String::new();
+    let mut flush = |word: &mut String, result: &mut String| {
+        if let Some(url) = web_address(word) {
+            let at = word.find(url).unwrap_or(0);
+            let shown = shown_link(url, max, out);
+            if !out.iter().any(|(_, u)| u == url) {
+                out.push((shown.clone(), url.to_owned()));
+            }
+            let shown = out
+                .iter()
+                .find(|(_, u)| u == url)
+                .map_or(shown, |(s, _)| s.clone());
+            result.push_str(&word[..at]);
+            result.push_str(&shown);
+            result.push_str(&word[at + url.len()..]);
+        } else {
+            result.push_str(word);
+        }
+        word.clear();
+    };
+    for c in text.chars() {
+        if c.is_whitespace() {
+            flush(&mut word, &mut result);
+            result.push(c);
+        } else {
+            word.push(c);
+        }
+    }
+    flush(&mut word, &mut result);
+    result
 }
 
 /// An attachment line as the reader shows it: `name · type · size`. Older Beeper rows are a
@@ -323,7 +394,8 @@ fn styled(line: &str, base: Style) -> Vec<Span<'static>> {
                     spans.push(Span::styled(rest[..i].to_owned(), base));
                 }
                 let tail = &rest[i..];
-                let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
+                let word_end = tail.find(char::is_whitespace).unwrap_or(tail.len());
+                let end = web_address(&tail[..word_end]).map_or(word_end, str::len);
                 spans.push(Span::styled(tail[..end].to_owned(), link));
                 rest = &tail[end..];
             }
@@ -362,10 +434,12 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
         let pieces = fold(&text, l.expanded.contains(&m.id));
         // each row: the text, and whether it is a fold marker
         let mut body: Vec<(String, bool)> = Vec::new();
+        let mut message_links: Vec<(String, String)> = Vec::new();
         for piece in &pieces {
             match piece {
                 Piece::Text(t) => {
-                    body.extend(inbox::wrap(t, max_inner).into_iter().map(|s| (s, false)))
+                    let t = shorten_links(t, max_inner, &mut message_links);
+                    body.extend(inbox::wrap(&t, max_inner).into_iter().map(|s| (s, false)))
                 }
                 Piece::Fold(t) => body.push((t.clone(), true)),
             }
@@ -448,6 +522,7 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
         laid.push(Laid {
             start,
             end: lines.len(),
+            links: message_links,
         });
     }
     (lines, laid)
@@ -486,6 +561,62 @@ mod tests {
 
     fn text_of(l: &Line<'_>) -> String {
         l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn long_addresses_are_shown_short_and_keep_their_full_form() {
+        let long =
+            "https://click.example.com/ls/click?upn=u001.AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+        let other =
+            "https://click.example.com/ls/click?upn=u001.ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ";
+        let mut map = Vec::new();
+        let text = format!("go ({long}), or {other}. short: https://a.org/x and {long} again");
+        let shown = shorten_links(&text, 60, &mut map);
+        assert_eq!(
+            shown,
+            "go (https://click.example.com/…), or https://click.example.com/…2. \
+             short: https://a.org/x and https://click.example.com/… again"
+        );
+        assert_eq!(
+            map,
+            vec![
+                ("https://click.example.com/…".to_owned(), long.to_owned()),
+                ("https://click.example.com/…2".to_owned(), other.to_owned()),
+                ("https://a.org/x".to_owned(), "https://a.org/x".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_layout_records_the_links_of_each_message() {
+        let long =
+            "https://click.example.com/ls/click?upn=u001.AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+        let messages = [m(
+            "m1",
+            "Ana",
+            &format!("Aktiválás ({long})"),
+            1_700_000_000,
+            false,
+        )];
+        let (lines, laid) = layout(
+            &messages,
+            &Layout {
+                width: 60,
+                selected: 0,
+                own: None,
+                tz_offset: 0,
+                expanded: &std::collections::HashSet::new(),
+            },
+        );
+        assert_eq!(
+            laid[0].links,
+            vec![("https://click.example.com/…".to_owned(), long.to_owned())]
+        );
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(text.contains("https://click.example.com/…") && !text.contains("upn="));
     }
 
     #[test]
@@ -644,7 +775,11 @@ mod tests {
 
     #[test]
     fn scrolling_keeps_the_selected_message_visible() {
-        let laid = Laid { start: 30, end: 40 };
+        let laid = Laid {
+            start: 30,
+            end: 40,
+            links: Vec::new(),
+        };
         assert_eq!(scroll_to(0, &laid, 20, 100), 20);
         assert_eq!(scroll_to(35, &laid, 20, 100), 30);
         assert_eq!(scroll_to(25, &laid, 20, 100), 25);

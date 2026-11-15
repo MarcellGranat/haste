@@ -526,7 +526,7 @@ On a thread (Today, or inside a channel), only you can use these keys:
 
 | Key | Does |
 |---|---|
-| `Enter` | open the thread and read it: every message in a chat-style frame (yours on the right, links underlined, attachment names shown), oldest first, starting at the newest. `j`/`k` move between messages, `g`/`G` first and last, `o` opens the first link of the message in the browser, `r` reply, `n` note, `l` label, `e` archive, `Esc` closes. Message text is cleaned of terminal control and bidirectional characters before it is drawn, and is never written to the logs |
+| `Enter` | open the thread and read it: every message in a chat-style frame (yours on the right, links underlined, attachment names shown), oldest first, starting at the newest. `j`/`k` move between messages, `g`/`G` first and last, links are clickable (Cmd-click in a terminal with hyperlink support; a long address is shown as `https://host/…` and the full one is opened), and HTML mail keeps each link's address next to its text, `r` reply, `n` note, `l` label, `e` archive, `Esc` closes. Message text is cleaned of terminal control and bidirectional characters before it is drawn, and is never written to the logs |
 | `e` | archive, **in haste only**: the thread leaves the inbox, nothing changes in Gmail, iCloud or the chat app |
 | `r` | write a reply in `$VISUAL`/`$EDITOR`; the text becomes a draft proposal (approve it in Approvals, then send as usual). A mail thread with several people asks first; **reply-all is not available yet** because sending addresses one recipient |
 | `g` | put aside / bring back (aside threads leave Today and show with `◌` in Channels) |

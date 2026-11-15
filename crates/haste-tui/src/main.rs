@@ -417,21 +417,6 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
         Effect::PreviewAttachment { message_id, index } => {
             preview_attachment(app, client, &message_id, index);
         }
-        Effect::OpenUrl { url } => {
-            // only plain web links, so nothing but a page can be opened from message text
-            let ok = (url.starts_with("https://") || url.starts_with("http://"))
-                && !url.chars().any(|c| c.is_control() || c.is_whitespace());
-            app.status = if ok
-                && std::process::Command::new("open")
-                    .arg(&url)
-                    .status()
-                    .is_ok_and(|s| s.success())
-            {
-                "opened in the browser".into()
-            } else {
-                "could not open the link".into()
-            };
-        }
         Effect::ExternalEdit { .. } => {} // needs the terminal; handled in the loop
         Effect::OpenLabels { thread_id } => {
             let workspace = match client.call(RequestBody::TagList) {
@@ -854,7 +839,20 @@ fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
     let result = (|| -> io::Result<()> {
         loop {
-            terminal.draw(|f| draw(f, &app))?;
+            let done = terminal.draw(|f| draw(f, &app))?;
+            // message links become clickable (OSC 8) once the frame is on screen
+            let escape = match (&app.reader, &app.mode) {
+                (Some(reader), haste_tui::app::Mode::Read) => haste_tui::ui::link_escape(
+                    &haste_tui::ui::link_runs(done.buffer, &reader.links.borrow()),
+                ),
+                _ => String::new(),
+            };
+            if !escape.is_empty() {
+                use std::io::Write;
+                let out = terminal.backend_mut();
+                out.write_all(escape.as_bytes())?;
+                out.flush()?;
+            }
             if event::poll(POLL)? {
                 if let TermEvent::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {

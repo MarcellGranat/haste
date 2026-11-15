@@ -1,7 +1,7 @@
 //! Drawing. All state lives in [`crate::app::App`]. Colours come from [`crate::theme`].
 
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
@@ -470,7 +470,6 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
     if app.mode == Mode::Read {
         return vec![
             ("j/k", "message"),
-            ("o", "open link"),
             ("g/G", "first/last"),
             ("r", "reply"),
             ("e", "archive"),
@@ -965,7 +964,9 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
         None => 0,
     };
     reader.scroll.set(scroll);
-    let hint = " j/k message · a attachments · x fold · o link · r reply · n note · l label · e archive · Esc ";
+    *reader.links.borrow_mut() = laid.iter().flat_map(|l| l.links.clone()).collect();
+    let hint =
+        " j/k message · a attachments · x fold · r reply · n note · l label · e archive · Esc ";
     frame.render_widget(
         Paragraph::new(lines)
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
@@ -1316,5 +1317,121 @@ mod tests {
         let text = render(&app);
         assert!(text.contains("body-number-00"), "g goes to the top");
         assert!(!text.contains("body-number-39"));
+    }
+}
+
+/// One run of link text on screen that the terminal should make clickable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkRun {
+    pub x: u16,
+    pub y: u16,
+    pub url: String,
+    /// The cells' symbols and background colours, left to right.
+    pub cells: Vec<(String, Color)>,
+}
+
+/// Find the drawn link text (blue and underlined) that equals a shown link, and say which
+/// address each run opens. Only addresses of the message text are ever returned.
+#[must_use]
+pub fn link_runs(buf: &ratatui::buffer::Buffer, links: &[(String, String)]) -> Vec<LinkRun> {
+    let mut out = Vec::new();
+    if links.is_empty() {
+        return out;
+    }
+    let is_link = |c: &ratatui::buffer::Cell| {
+        c.fg == theme::BLUE && c.modifier.contains(ratatui::style::Modifier::UNDERLINED)
+    };
+    for y in 0..buf.area.height {
+        let mut x = 0;
+        while x < buf.area.width {
+            if !is_link(&buf[(x, y)]) {
+                x += 1;
+                continue;
+            }
+            let start = x;
+            let mut shown = String::new();
+            let mut cells = Vec::new();
+            while x < buf.area.width && is_link(&buf[(x, y)]) {
+                let cell = &buf[(x, y)];
+                shown.push_str(cell.symbol());
+                cells.push((cell.symbol().to_owned(), cell.bg));
+                x += 1;
+            }
+            if let Some((_, url)) = links.iter().find(|(s, _)| *s == shown) {
+                out.push(LinkRun {
+                    x: start,
+                    y,
+                    url: url.clone(),
+                    cells,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The terminal commands that turn `runs` into OSC 8 hyperlinks: the same characters are
+/// printed again, wrapped in the hyperlink start and end. The cursor is put back afterwards.
+#[must_use]
+pub fn link_escape(runs: &[LinkRun]) -> String {
+    let rgb = |c: Color| match c {
+        Color::Rgb(r, g, b) => format!("\x1b[48;2;{r};{g};{b}m"),
+        _ => "\x1b[49m".to_owned(),
+    };
+    let Color::Rgb(r, g, b) = theme::BLUE else {
+        return String::new();
+    };
+    let mut out = String::from("\x1b7");
+    for run in runs {
+        // never put a control character into the escape: only plain web addresses get here
+        if run.url.chars().any(char::is_control) {
+            continue;
+        }
+        out.push_str(&format!("\x1b[{};{}H", run.y + 1, run.x + 1));
+        out.push_str(&format!(
+            "\x1b]8;;{}\x1b\\\x1b[38;2;{r};{g};{b}m\x1b[4m",
+            run.url
+        ));
+        for (symbol, bg) in &run.cells {
+            out.push_str(&rgb(*bg));
+            out.push_str(symbol);
+        }
+        out.push_str("\x1b]8;;\x1b\\\x1b[0m");
+    }
+    out.push_str("\x1b8");
+    out
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+    use ratatui::buffer::Buffer;
+
+    #[test]
+    fn drawn_link_text_becomes_a_hyperlink_to_the_full_address() {
+        let area = Rect::new(0, 0, 30, 2);
+        let mut buf = Buffer::empty(area);
+        let link = Style::new()
+            .fg(theme::BLUE)
+            .add_modifier(Modifier::UNDERLINED);
+        buf.set_string(2, 1, "https://a.org/…", link);
+        buf.set_string(0, 0, "https://plain.org", Style::new());
+        let links = vec![(
+            "https://a.org/…".to_owned(),
+            "https://a.org/full?x=1".to_owned(),
+        )];
+        let runs = link_runs(&buf, &links);
+        assert_eq!(runs.len(), 1);
+        assert_eq!((runs[0].x, runs[0].y), (2, 1));
+        assert_eq!(runs[0].url, "https://a.org/full?x=1");
+        let escape = link_escape(&runs);
+        assert!(
+            escape.contains("\x1b]8;;https://a.org/full?x=1\x1b\\"),
+            "{escape:?}"
+        );
+        assert!(escape.contains("\x1b]8;;\x1b\\"));
+        assert!(escape.contains("\x1b[2;3H"), "{escape:?}");
+        // blue text that is not a link of the message is left alone
+        assert!(link_runs(&buf, &[]).is_empty());
     }
 }

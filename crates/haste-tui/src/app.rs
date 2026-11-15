@@ -89,6 +89,9 @@ pub struct Reader {
     pub own: Option<String>,
     /// Messages (by id) opened in full: their quoted history and recipient lists are shown.
     pub expanded: std::collections::HashSet<String>,
+    /// `(shown text, address)` of the links on screen, set while drawing; the terminal makes
+    /// them clickable after the frame is drawn.
+    pub links: std::cell::RefCell<Vec<(String, String)>>,
 }
 
 /// The attachment menu: the files of one message, one selected; and, while choosing where to
@@ -232,9 +235,6 @@ pub enum Effect {
         attachments: Vec<std::path::PathBuf>,
     },
     /// Open a link from a message in the browser.
-    OpenUrl {
-        url: String,
-    },
     /// `Ctrl-G` in a form: edit this text in `$EDITOR`, then call [`App::compose_replace_text`].
     ExternalEdit {
         text: String,
@@ -1414,6 +1414,7 @@ impl App {
             selected,
             own,
             expanded: std::collections::HashSet::new(),
+            links: std::cell::RefCell::new(Vec::new()),
         });
         self.mode = Mode::Read;
     }
@@ -1576,17 +1577,6 @@ impl App {
                     if !reader.expanded.remove(&id) {
                         reader.expanded.insert(id);
                     }
-                }
-            }
-            Key::Char('o') => {
-                let url = reader.messages.get(reader.selected).and_then(|m| {
-                    crate::chat::links(&inbox::sanitize(&m.body_text))
-                        .into_iter()
-                        .next()
-                });
-                match url {
-                    Some(url) => return Some(Effect::OpenUrl { url }),
-                    None => self.status = "no link in this message".into(),
                 }
             }
             Key::Char('n') => {
@@ -2866,9 +2856,6 @@ mod tests {
         assert_eq!(app.reader.as_ref().unwrap().selected, 1);
         press(&mut app, "g");
         assert_eq!(app.reader.as_ref().unwrap().selected, 0);
-        // o opens the first link of the selected message, and says so when there is none
-        assert!(press(&mut app, "o").is_empty());
-        assert!(app.status.contains("no link"));
         // reply keeps the reader open
         assert_eq!(
             press(&mut app, "r"),
@@ -2927,28 +2914,6 @@ mod tests {
                 body: "thanks".into(),
                 attachments: vec![std::path::PathBuf::from("/a/report.pdf")],
             })
-        );
-    }
-
-    #[test]
-    fn o_opens_the_first_link_of_the_selected_message() {
-        let mut app = inbox_app();
-        let view = app.threads[1].clone();
-        app.show_thread(
-            view,
-            vec![message(
-                "m1",
-                "a@x.com",
-                "see https://example.org/a. thanks",
-                10,
-            )],
-            None,
-        );
-        assert_eq!(
-            press(&mut app, "o"),
-            vec![Effect::OpenUrl {
-                url: "https://example.org/a".into()
-            }]
         );
     }
 

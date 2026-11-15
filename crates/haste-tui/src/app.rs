@@ -277,6 +277,10 @@ pub enum Effect {
         message_id: String,
         index: usize,
     },
+    /// `r` on a thread in a list: open the thread, with the reply block below it.
+    OpenAndReply {
+        thread_id: String,
+    },
     /// Open the editor for a reply to a thread; the text becomes a draft proposal (never sent).
     Reply {
         thread_id: String,
@@ -1296,7 +1300,6 @@ impl App {
             Key::Enter if thread_view => return self.open_selected(),
             Key::Enter if self.on_todos() => self.start_todo(false),
             Key::Char('c') if self.on_todos() => self.start_todo(true),
-            Key::Char('n') if thread_view => self.start_note(),
             Key::Char('l') if thread_view => return self.start_labels(),
             Key::Char('f') if matches!(self.view, View::Today | View::Channels) => {
                 self.cycle_filter();
@@ -1835,7 +1838,7 @@ impl App {
         let last = reader.messages.len().saturating_sub(1);
         let first = reader.first_visible();
         // a batch of attachment-only messages is one item: moving lands on its last message
-        if reader.blocked && matches!(key, Key::Char('r' | 'e' | 'n' | 'l' | '+')) {
+        if reader.blocked && matches!(key, Key::Char('r' | 'e' | 'l' | '+')) {
             self.status = "this sender is blocked: b unblocks it, Esc leaves it".into();
             return None;
         }
@@ -1974,10 +1977,6 @@ impl App {
                     }
                 }
             }
-            Key::Char('n') => {
-                let subject = reader.view.thread.subject.clone();
-                self.start_note_for(&thread_id, subject);
-            }
             Key::Char('l') => return Some(Effect::OpenLabels { thread_id }),
             Key::Char('r') => return Some(Effect::Reply { thread_id }),
             Key::Char('e') => {
@@ -2030,20 +2029,6 @@ impl App {
     }
 
     /// `n`: a note about the thread under the cursor (or the open one).
-    fn start_note(&mut self) {
-        if let Some((id, subject)) = self.thread_under_cursor() {
-            let subject = inbox::sanitize(&subject).replace('\n', " ");
-            self.compose = Some(Box::new(Compose::note(&id, &subject)));
-            self.mode = Mode::Compose;
-        }
-    }
-
-    fn start_note_for(&mut self, thread_id: &str, subject: String) {
-        let subject = inbox::sanitize(&subject).replace('\n', " ");
-        self.compose = Some(Box::new(Compose::note(thread_id, &subject)));
-        self.mode = Mode::Compose;
-    }
-
     /// `l`: ask for the candidate labels of the thread under the cursor.
     fn start_labels(&mut self) -> Option<Effect> {
         let (thread_id, _) = self.thread_under_cursor()?;
@@ -2394,7 +2379,7 @@ impl App {
             self.mode = Mode::ReplyChoice { thread_id };
             None
         } else {
-            Some(Effect::Reply { thread_id })
+            Some(Effect::OpenAndReply { thread_id })
         }
     }
 
@@ -2500,7 +2485,7 @@ impl App {
         match key {
             Key::Char('r') | Key::Enter => {
                 self.mode = Mode::Normal;
-                return Some(Effect::Reply { thread_id });
+                return Some(Effect::OpenAndReply { thread_id });
             }
             Key::Char('a') => {
                 // The send path addresses exactly one recipient (v1), so a reply to everyone
@@ -3642,14 +3627,14 @@ mod tests {
         press(&mut app, "r");
         assert_eq!(
             press(&mut app, "r"),
-            vec![Effect::Reply {
+            vec![Effect::OpenAndReply {
                 thread_id: "t2".into()
             }]
         );
-        press(&mut app, "j"); // t1: one other person, straight to the editor
+        press(&mut app, "j"); // t1: one other person, straight to the thread and the reply
         assert_eq!(
             press(&mut app, "r"),
-            vec![Effect::Reply {
+            vec![Effect::OpenAndReply {
                 thread_id: "t1".into()
             }]
         );
@@ -3729,24 +3714,11 @@ mod tests {
     }
 
     #[test]
-    fn n_writes_a_note_l_opens_labels_and_enter_edits_a_todo() {
+    fn n_is_not_a_thread_key_l_opens_labels_and_enter_edits_a_todo() {
         let mut app = App::new();
         app.set_threads(vec![mail_thread("t1", "Budget", &["a@x.org"], 100)]);
-        // n: a form; Ctrl-S saves the note as an effect, with no approval step
+        // notes belong to TODO items now: n does nothing on a thread
         assert!(press(&mut app, "n").is_empty());
-        assert_eq!(app.mode, Mode::Compose);
-        assert!(
-            app.handle_key(Key::Ctrl('s')).is_none(),
-            "empty notes are refused"
-        );
-        press(&mut app, "call back");
-        let Some(Effect::SaveNote {
-            thread_id, text, ..
-        }) = app.handle_key(Key::Ctrl('s'))
-        else {
-            panic!("expected SaveNote")
-        };
-        assert_eq!((thread_id.as_str(), text.as_str()), ("t1", "call back"));
         assert_eq!(app.mode, Mode::Normal);
         // l: the daemon-side candidates are asked for, then picked
         assert_eq!(

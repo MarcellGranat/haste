@@ -411,6 +411,13 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
             return true;
         }
         Effect::CompleteReminders { ids } => complete_all(app, client, ids),
+        Effect::OpenAndReply { thread_id } => {
+            let id = thread_id.clone();
+            run_effect(app, client, Effect::OpenThread { thread_id });
+            if app.reader.as_ref().is_some_and(|r| r.view.thread.id == id) {
+                app.open_reply_form(&id);
+            }
+        }
         Effect::OpenThread { thread_id } => {
             match client.call(RequestBody::ThreadShow { thread_id }) {
                 Ok(Response::Thread {

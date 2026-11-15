@@ -569,7 +569,6 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         ("Enter", "open"),
         ("e", "archive"),
         ("r", "reply"),
-        ("n", "note"),
         ("l", "label"),
         ("g", "aside"),
         ("p", "priority"),
@@ -1179,7 +1178,7 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
     reader.view_height.set(height);
     *reader.links.borrow_mut() = laid.iter().flat_map(|l| l.links.clone()).collect();
     let hint =
-        " j/k message · C-d/C-u scroll · a attachments · + react · x fold · o older · r reply · n note · l label · e archive · Esc ";
+        " j/k message · C-d/C-u scroll · a attachments · + react · x fold · o older · r reply · l label · e archive · Esc ";
     frame.render_widget(
         Paragraph::new(lines)
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))

@@ -306,6 +306,40 @@ struct Imap<T: Read + Write> {
     session: imap::Session<T>,
 }
 
+impl<T: Read + Write> Imap<T> {
+    /// UIDs of the open folder's messages whose `Message-ID` equals `id` (case-insensitive),
+    /// found by reading the headers. Slower than SEARCH; used only when SEARCH finds nothing.
+    fn scan_message_id(&mut self, id: &str) -> Result<Vec<u32>, ImapFailure> {
+        let fetches = self
+            .session
+            .uid_fetch("1:*", "(UID BODY.PEEK[HEADER])")
+            .map_err(|e| classify(&e, Stage::Search))?;
+        let want = id.trim_matches(['<', '>']);
+        let mut found = Vec::new();
+        for f in fetches.iter() {
+            let (Some(uid), Some(header)) = (f.uid, f.header()) else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(header)
+                .replace("\r\n ", " ")
+                .replace("\r\n\t", " ");
+            let hit = text.lines().any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.trim().eq_ignore_ascii_case("message-id")
+                        && value
+                            .trim()
+                            .trim_matches(['<', '>'])
+                            .eq_ignore_ascii_case(want)
+                })
+            });
+            if hit {
+                found.push(uid);
+            }
+        }
+        Ok(found)
+    }
+}
+
 impl<T: Read + Write> MailSession for Imap<T> {
     fn examine(&mut self, folder: &str) -> Result<FolderInfo, ImapFailure> {
         // EXAMINE opens read-only, so no flag can change even by accident.
@@ -417,6 +451,11 @@ impl<T: Read + Write> MailSession for Imap<T> {
             .map_err(|e| classify(&e, Stage::Search))?
             .into_iter()
             .collect();
+        if uids.is_empty() {
+            // some servers answer a HEADER search with nothing for ids they hold: read the
+            // inbox headers and compare the Message-ID here instead
+            uids = self.scan_message_id(id)?;
+        }
         uids.sort_unstable();
         Ok(uids)
     }

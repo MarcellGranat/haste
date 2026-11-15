@@ -954,7 +954,7 @@ fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(form) = &app.remind else {
         return;
     };
-    let rect = centered(area, 76.min(area.width.saturating_sub(4)), 12);
+    let rect = centered(area, 76.min(area.width.saturating_sub(4)), 13);
     frame.render_widget(Clear, rect);
     let block = theme::panel(" New reminder · Tab next · Enter saves · Esc cancels ")
         .border_style(pane_border(true));
@@ -1016,7 +1016,10 @@ fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
             when.push(Span::styled(":", dim));
             when.push(part(minute, DatePart::Minute));
             if form.field == Field::Date {
-                when.push(Span::styled("  ←→ part  ↑↓ change  ⌫ no date", dim));
+                when.push(Span::styled(
+                    "  ←→ part  ↑↓ change  type a number  ⌫ no date",
+                    dim,
+                ));
             } else if form.due_from_title {
                 when.push(Span::styled("  ← from the title", dim));
             }
@@ -1027,6 +1030,15 @@ fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
         )),
     }
     lines.push(Line::from(when));
+    let mut length = vec![label("Length", Field::Duration)];
+    length.extend(duration_spans(
+        &form.duration,
+        form.field == Field::Duration,
+    ));
+    if form.field == Field::Duration {
+        length.push(Span::styled("  ↑↓ steps · ←→ unit · type a number", dim));
+    }
+    lines.push(Line::from(length));
     let mut repeat = vec![label("Repeat", Field::Repeat)];
     repeat.push(match form.repeat {
         Some(r) => Span::styled(
@@ -1858,37 +1870,53 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// The popup that sets how long a task takes: 30 minutes up to 4 hours.
+/// A length of time as it is edited: its text, then the unit digits are typed in (the picked
+/// one lit while the field has the cursor).
+fn duration_spans(edit: &crate::durfield::DurationEdit, focused: bool) -> Vec<Span<'static>> {
+    use crate::durfield::Unit;
+    let text = Style::new().fg(theme::TEXT);
+    let dim = Style::new().fg(theme::OVERLAY0);
+    let picked = Style::new()
+        .fg(theme::BASE)
+        .bg(theme::MAUVE)
+        .add_modifier(Modifier::BOLD);
+    let chip = |name: &str, unit: Unit| {
+        Span::styled(
+            format!(" {name} "),
+            if focused && edit.unit == unit {
+                picked
+            } else {
+                dim
+            },
+        )
+    };
+    vec![
+        Span::styled(
+            format!(" {} ", edit.text()),
+            if focused { picked } else { text },
+        ),
+        Span::raw("  "),
+        chip("h", Unit::Hours),
+        chip("min", Unit::Minutes),
+    ]
+}
+
+/// The popup that sets how long a task takes: 5 minutes up to 4 hours.
 fn draw_task_duration(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let Some((_, title, minutes)) = &app.task_duration else {
+    let Some((_, title, edit)) = &app.task_duration else {
         return;
     };
-    let rect = centered(area, 58.min(area.width.saturating_sub(4)), 7);
+    let rect = centered(area, 66.min(area.width.saturating_sub(4)), 8);
     frame.render_widget(Clear, rect);
     let block =
         theme::panel(" How long does it take? · here only ").border_style(pane_border(true));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
-    let picked = Style::new()
-        .fg(theme::BASE)
-        .bg(theme::MAUVE)
-        .add_modifier(Modifier::BOLD);
-    let mut steps = vec![Span::raw("  ")];
-    for m in haste_proto::TASK_MINUTES {
-        let text = if m < 60 {
-            format!(" {m} min ")
-        } else {
-            format!(" {} h ", m / 60)
-        };
-        steps.push(Span::styled(
-            text,
-            if m == *minutes {
-                picked
-            } else {
-                Style::new().fg(theme::SUBTEXT0)
-            },
-        ));
-        steps.push(Span::raw(" "));
+    let dim = Style::new().fg(theme::OVERLAY0);
+    let mut row = vec![Span::raw("  ")];
+    row.extend(duration_spans(edit, true));
+    if !edit.typed().is_empty() {
+        row.push(Span::styled(format!("  typed {}", edit.typed()), dim));
     }
     let lines = vec![
         Line::from(Span::styled(
@@ -1896,11 +1924,15 @@ fn draw_task_duration(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Style::new().fg(theme::PEACH).add_modifier(Modifier::BOLD),
         )),
         Line::default(),
-        Line::from(steps),
+        Line::from(row),
         Line::default(),
         Line::from(Span::styled(
-            "  ↑↓ longer or shorter (4 h at most) · Enter keeps it · Esc cancels",
-            Style::new().fg(theme::OVERLAY0),
+            "  ↑↓ steps: 10 min, 30 min, 1-4 h (the most) · ←→ unit",
+            dim,
+        )),
+        Line::from(Span::styled(
+            "  type a number · Enter keeps it · Esc cancels",
+            dim,
         )),
     ];
     frame.render_widget(Paragraph::new(lines), inner);
@@ -1955,21 +1987,18 @@ fn draw_event_edit(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Span::styled(":", dim),
             part(minute, Part::Minute),
         ]),
-        Line::from(vec![
-            label("Lasts", form.field == Field::Duration),
-            Span::styled(
-                format!(" {} ", form.duration_text()),
-                if form.field == Field::Duration {
-                    picked
-                } else {
-                    text
-                },
-            ),
-            Span::styled(format!("  ends {}", &end[11..]), dim),
-        ]),
+        {
+            let mut row = vec![label("Lasts", form.field == Field::Duration)];
+            row.extend(duration_spans(
+                &form.duration,
+                form.field == Field::Duration,
+            ));
+            row.push(Span::styled(format!("  ends {}", &end[11..]), dim));
+            Line::from(row)
+        },
         Line::default(),
         Line::from(Span::styled(
-            "  Tab start/duration · ←→ part · ↑↓ change · Enter saves · Esc cancels",
+            "  Tab start/duration · ←→ part or unit · ↑↓ change · type a number · Enter saves",
             dim,
         )),
         Line::from(Span::styled(
@@ -2660,20 +2689,22 @@ mod tests {
     }
 
     #[test]
-    fn the_duration_popup_offers_30_minutes_to_4_hours() {
+    fn the_duration_popup_shows_the_length_and_how_to_change_it() {
         let mut app = App::new();
-        app.task_duration = Some(("r1".into(), "Pay rent".into(), 120));
+        app.task_duration = Some((
+            "r1".into(),
+            "Pay rent".into(),
+            crate::durfield::DurationEdit::new(120, 5, 240, true),
+        ));
         app.mode = Mode::TaskDuration;
         let text = render(&app);
         for needle in [
             "How long",
             "Pay rent",
-            "30 min",
-            "1 h",
             "2 h",
-            "3 h",
-            "4 h",
-            "4 h at most",
+            "10 min",
+            "1-4 h (the most)",
+            "type a number",
         ] {
             assert!(text.contains(needle), "{needle}: {text}");
         }

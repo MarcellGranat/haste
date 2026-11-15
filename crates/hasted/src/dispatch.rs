@@ -682,6 +682,7 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             repeat,
             tags,
             thread_id,
+            minutes,
         } => reminder_write(
             state,
             principal,
@@ -692,6 +693,7 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
                 repeat,
                 tags,
                 thread_id,
+                minutes,
             },
         ),
         RequestBody::ReminderEdit {
@@ -856,6 +858,7 @@ enum ReminderWrite {
         repeat: Option<haste_core::model::RepeatRule>,
         tags: Vec<String>,
         thread_id: Option<String>,
+        minutes: Option<u32>,
     },
     Edit {
         reminder_id: String,
@@ -878,9 +881,16 @@ fn reminder_write(state: &State, actor: &Principal, write: ReminderWrite) -> Res
     };
     let valid = match &write {
         ReminderWrite::New {
-            title, notes, tags, ..
+            title,
+            notes,
+            tags,
+            minutes,
+            ..
         } => {
-            title_ok(title) && notes.as_ref().is_none_or(|n| n.len() <= 20_000) && tags.len() <= 20
+            title_ok(title)
+                && notes.as_ref().is_none_or(|n| n.len() <= 20_000)
+                && tags.len() <= 20
+                && minutes.is_none_or(haste_proto::valid_task_minutes)
         }
         ReminderWrite::Edit {
             title,
@@ -907,6 +917,7 @@ fn reminder_write(state: &State, actor: &Principal, write: ReminderWrite) -> Res
             repeat,
             tags,
             thread_id,
+            minutes,
         } => handle
             .block_on(guard.create_reminder(&NewReminder {
                 title: title.clone(),
@@ -935,6 +946,12 @@ fn reminder_write(state: &State, actor: &Principal, write: ReminderWrite) -> Res
                     thread_id.as_deref(),
                     repeat,
                 );
+                // how long it takes on the calendar, when not the default
+                if let Some(m) = minutes.filter(|m| *m != haste_proto::DEFAULT_TASK_MINUTES) {
+                    let _ = state
+                        .store
+                        .set_reminder_duration(&created.external_id, Some(m));
+                }
             }),
         ReminderWrite::Edit {
             reminder_id,
@@ -1036,10 +1053,10 @@ fn reminder_duration(
     reminder_id: &str,
     minutes: u32,
 ) -> Response {
-    if !haste_proto::TASK_MINUTES.contains(&minutes) {
+    if !haste_proto::valid_task_minutes(minutes) {
         return err(
             ErrorCode::Validation,
-            "a task takes 30 minutes, or 1 to 4 hours",
+            "a task takes 5 minutes to 4 hours, in steps of 5 minutes",
         );
     }
     let external = match state.store.get_reminder(reminder_id) {

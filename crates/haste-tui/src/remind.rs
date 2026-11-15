@@ -21,6 +21,7 @@ const MAX_EVERY: u32 = 99;
 pub enum Field {
     Title,
     Date,
+    Duration,
     Repeat,
     Notes,
     Labels,
@@ -28,9 +29,10 @@ pub enum Field {
 }
 
 impl Field {
-    const ORDER: [Self; 6] = [
+    const ORDER: [Self; 7] = [
         Self::Title,
         Self::Date,
+        Self::Duration,
         Self::Repeat,
         Self::Notes,
         Self::Labels,
@@ -63,6 +65,10 @@ pub struct Task {
     pub title: String,
     pub due: Option<i64>,
     pub repeat: Option<RepeatRule>,
+    /// How long it takes on the calendar, in minutes.
+    pub minutes: u32,
+    /// How long it took before an edit (the same as `minutes` for a new one).
+    pub minutes_before: u32,
     pub notes: String,
     pub tags: Vec<String>,
     pub attachments: Vec<PathBuf>,
@@ -89,6 +95,12 @@ pub struct RemindForm {
     pub part: DatePart,
     pub due: Option<i64>,
     pub repeat: Option<RepeatRule>,
+    /// How long it takes on the calendar: Left and Right pick the unit, Up and Down step,
+    /// digits type it.
+    pub duration: crate::durfield::DurationEdit,
+    minutes_before: u32,
+    /// The digits typed into the picked part of the date.
+    date_typed: String,
     pub notes: String,
     /// Known project labels, and whether each is on.
     pub labels: Vec<(String, bool)>,
@@ -140,6 +152,14 @@ impl RemindForm {
             part: DatePart::Day,
             due: None,
             repeat: None,
+            duration: crate::durfield::DurationEdit::new(
+                haste_proto::DEFAULT_TASK_MINUTES,
+                haste_proto::MIN_TASK_MINUTES,
+                haste_proto::MAX_TASK_MINUTES,
+                true,
+            ),
+            minutes_before: haste_proto::DEFAULT_TASK_MINUTES,
+            date_typed: String::new(),
             notes: String::new(),
             labels: labels.iter().map(|l| (l.clone(), on.contains(l))).collect(),
             label_cursor: 0,
@@ -181,6 +201,13 @@ impl RemindForm {
         form.tags_before = todo.tags.clone();
         form.title = todo.reminder.title.clone();
         form.original = Some((todo.reminder.due_at, todo.repeat));
+        form.duration = crate::durfield::DurationEdit::new(
+            todo.minutes,
+            haste_proto::MIN_TASK_MINUTES,
+            haste_proto::MAX_TASK_MINUTES,
+            true,
+        );
+        form.minutes_before = todo.minutes;
         // the words of the title set the date and the repeat (also as it opens); without
         // words the TODO keeps what it has, until it is changed by hand
         form.reread();
@@ -249,6 +276,8 @@ impl RemindForm {
             title: self.effective_title().trim().to_owned(),
             due: self.due,
             repeat: self.repeat,
+            minutes: self.duration.minutes,
+            minutes_before: self.minutes_before,
             notes: self.notes.trim().to_owned(),
             tags: self
                 .labels
@@ -313,6 +342,22 @@ impl RemindForm {
             DatePart::Minute => MINUTE_STEP * 60,
         };
         self.due = Some(base + sign * by);
+        self.date_touched = true;
+    }
+
+    /// A typed digit goes into the picked part of the date; the rest of the date stays.
+    fn type_into_date(&mut self, digit: char) {
+        let part = match self.part {
+            DatePart::Day => crate::datefield::Part::Day,
+            DatePart::Hour => crate::datefield::Part::Hour,
+            DatePart::Minute => crate::datefield::Part::Minute,
+        };
+        self.date_typed = crate::datefield::push_digit(&self.date_typed, digit, part);
+        let value: i64 = self.date_typed.parse().unwrap_or(0);
+        let base = self
+            .due
+            .unwrap_or_else(|| inbox::tomorrow_morning(self.now, self.off));
+        self.due = Some(crate::datefield::set_part(base, self.off, part, value));
         self.date_touched = true;
     }
 
@@ -401,6 +446,7 @@ impl RemindForm {
                     self.reread();
                 }
                 self.field = self.field.next();
+                self.date_typed.clear();
                 return Outcome::Continue;
             }
             _ => {}
@@ -424,15 +470,28 @@ impl RemindForm {
                     DatePart::Minute => DatePart::Hour,
                     _ => DatePart::Day,
                 };
+                self.date_typed.clear();
             }
             (Field::Date, Key::Right) => {
                 self.part = match self.part {
                     DatePart::Day => DatePart::Hour,
                     _ => DatePart::Minute,
                 };
+                self.date_typed.clear();
             }
-            (Field::Date, Key::Up) => self.step_date(true),
-            (Field::Date, Key::Down) => self.step_date(false),
+            (Field::Date, Key::Up) => {
+                self.date_typed.clear();
+                self.step_date(true);
+            }
+            (Field::Date, Key::Down) => {
+                self.date_typed.clear();
+                self.step_date(false);
+            }
+            // digits set the picked part: the day of the month, the hour or the minute
+            (Field::Date, Key::Char(c)) if c.is_ascii_digit() => self.type_into_date(c),
+            (Field::Duration, k) => {
+                self.duration.handle(k);
+            }
             (Field::Date, Key::Backspace) => {
                 self.due = None;
                 self.date_touched = true;
@@ -774,11 +833,60 @@ mod tests {
             panic!("expected a task")
         };
         assert_eq!(task.reminder_id.as_deref(), Some("r1"));
+        assert_eq!(task.minutes, 30, "the length it has now");
         assert_eq!(task.tags_before, vec!["work".to_owned()]);
         assert_eq!(task.title, "Pay rent tomorrow");
         assert_eq!(task.due, Some(at(16, 10, 0)));
         assert_eq!(task.notes, "bring ID");
         assert!(task.thread_id.is_none());
+    }
+
+    #[test]
+    fn digits_type_the_picked_part_of_the_date() {
+        let mut f = form("Mail"); // tomorrow, Mon 16 Nov, 10:00
+        f.handle(Key::Tab); // title taken, on the date
+        assert_eq!(f.field, Field::Date);
+        // the day: 2 then 4 is the 24th
+        f.handle(Key::Char('2'));
+        f.handle(Key::Char('4'));
+        let (day, _, _) = f.date_parts().unwrap();
+        assert!(day.contains("24 Nov"), "{day}");
+        // the hour: 1 then 4; the minute: 3 then 0
+        f.handle(Key::Right);
+        f.handle(Key::Char('1'));
+        f.handle(Key::Char('4'));
+        f.handle(Key::Right);
+        f.handle(Key::Char('3'));
+        f.handle(Key::Char('0'));
+        let (day, h, m) = f.date_parts().unwrap();
+        assert!(day.contains("24 Nov"));
+        assert_eq!((h.as_str(), m.as_str()), ("14", "30"));
+        // typing in the title afterwards does not move what was set by hand
+        f.field = Field::Title;
+        type_text(&mut f, " tomorrow");
+        assert_eq!(f.date_parts().unwrap().1, "14");
+    }
+
+    #[test]
+    fn the_length_is_a_field_of_its_own_stepped_or_typed() {
+        let mut f = form("Mail");
+        f.handle(Key::Tab); // date
+        f.handle(Key::Tab); // length
+        assert_eq!(f.field, Field::Duration);
+        assert_eq!(f.duration.minutes, 30, "30 minutes by default");
+        f.handle(Key::Up);
+        assert_eq!(f.duration.minutes, 60);
+        f.handle(Key::Down);
+        f.handle(Key::Down);
+        assert_eq!(f.duration.minutes, 10, "10 minutes is possible");
+        for c in "25".chars() {
+            f.handle(Key::Char(c));
+        }
+        assert_eq!(f.duration.minutes, 25);
+        let Outcome::Save(task) = f.handle(Key::Enter) else {
+            panic!("expected a task")
+        };
+        assert_eq!((task.minutes, task.minutes_before), (25, 30));
     }
 
     #[test]

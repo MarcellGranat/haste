@@ -5,6 +5,8 @@ pub mod art;
 pub mod chat;
 pub mod client;
 pub mod compose;
+pub mod datefield;
+pub mod durfield;
 pub mod editor;
 pub mod emoji;
 pub mod eventedit;

@@ -486,7 +486,7 @@ pub struct App {
     /// The event popup, while `Mode::EventEdit`.
     pub event_form: Option<Box<crate::eventedit::EventForm>>,
     /// The duration popup while `Mode::TaskDuration`: reminder id, title, minutes.
-    pub task_duration: Option<(String, String, u32)>,
+    pub task_duration: Option<(String, String, crate::durfield::DurationEdit)>,
     /// Every known project label, offered in the reminder popup.
     pub known_labels: Vec<String>,
     /// The open label picker.
@@ -2721,27 +2721,25 @@ impl App {
         self.task_duration = Some((
             t.reminder.id.clone(),
             inbox::sanitize(&t.reminder.title).replace('\n', " "),
-            t.minutes,
+            crate::durfield::DurationEdit::new(
+                t.minutes,
+                haste_proto::MIN_TASK_MINUTES,
+                haste_proto::MAX_TASK_MINUTES,
+                true,
+            ),
         ));
         self.mode = Mode::TaskDuration;
     }
 
-    /// Up and Down walk through 30 minutes, 1, 2, 3 and 4 hours (no more); Enter keeps it.
+    /// The duration popup: Up and Down walk 10 minutes, 30 minutes, 1, 2, 3, 4 hours, Left and
+    /// Right pick the unit digits are typed in, Enter keeps it, Esc cancels.
     fn key_task_duration(&mut self, key: Key) -> Option<Effect> {
-        let (id, _, minutes) = self.task_duration.as_mut()?;
-        let steps = haste_proto::TASK_MINUTES;
-        let at = steps.iter().position(|m| m == minutes).unwrap_or(0);
+        let (id, _, edit) = self.task_duration.as_mut()?;
         match key {
-            Key::Up | Key::Char('k' | '+') | Key::Right | Key::Char('l') => {
-                *minutes = steps[(at + 1).min(steps.len() - 1)];
-            }
-            Key::Down | Key::Char('j' | '-') | Key::Left | Key::Char('h') => {
-                *minutes = steps[at.saturating_sub(1)];
-            }
             Key::Enter => {
                 let effect = Effect::SetDuration {
                     reminder_id: id.clone(),
-                    minutes: *minutes,
+                    minutes: edit.minutes,
                 };
                 self.task_duration = None;
                 self.mode = Mode::Normal;
@@ -2751,7 +2749,9 @@ impl App {
                 self.task_duration = None;
                 self.mode = Mode::Normal;
             }
-            _ => {}
+            other => {
+                edit.handle(other);
+            }
         }
         None
     }
@@ -3392,8 +3392,8 @@ mod tests {
     fn ctrl_g_in_the_notes_field_hands_the_notes_to_the_editor_and_takes_them_back() {
         let mut app = inbox_app();
         press(&mut app, "t");
-        // Tab: title -> date -> repeat -> notes
-        for _ in 0..3 {
+        // Tab: title -> date -> length -> repeat -> notes
+        for _ in 0..4 {
             app.handle_key(Key::Tab);
         }
         press(&mut app, "first");
@@ -4573,8 +4573,8 @@ mod tests {
         // a day later, half an hour longer
         app.handle_key(Key::Up);
         app.handle_key(Key::Tab);
-        for _ in 0..6 {
-            app.handle_key(Key::Right);
+        for c in "90".chars() {
+            app.handle_key(Key::Char(c));
         }
         let Some(Effect::ShiftEvent { event_id, times }) = app.handle_key(Key::Enter) else {
             panic!("expected the shift")
@@ -4617,7 +4617,7 @@ mod tests {
         assert_eq!(app.mode, Mode::EventEdit);
         let form = app.event_form.as_ref().unwrap();
         assert_eq!(form.start, date + 10 * 3_600, "10:00 on its day");
-        assert_eq!(form.minutes, 120);
+        assert_eq!(form.duration.minutes, 120);
         // an hour later: the end follows
         app.handle_key(Key::Right);
         app.handle_key(Key::Up);
@@ -4668,7 +4668,7 @@ mod tests {
     }
 
     #[test]
-    fn d_sets_how_long_a_task_takes_from_30_minutes_to_4_hours() {
+    fn d_sets_how_long_a_task_takes_stepped_or_typed_up_to_4_hours() {
         let mut app = App::new();
         let now = haste_core::time::now_secs();
         app.set_reminder_list(vec![reminder_view("rent", Some(on_a_weekday(now, 3_600)))]);
@@ -4677,22 +4677,29 @@ mod tests {
         assert!(app.on_todos());
         press(&mut app, "d");
         assert_eq!(app.mode, Mode::TaskDuration);
-        assert_eq!(
-            app.task_duration.as_ref().unwrap().2,
-            30,
-            "30 minutes at first"
-        );
+        let minutes = |app: &App| app.task_duration.as_ref().unwrap().2.minutes;
+        assert_eq!(minutes(&app), 30, "30 minutes at first");
         for expected in [60, 120, 180, 240, 240] {
             app.handle_key(Key::Up);
-            assert_eq!(app.task_duration.as_ref().unwrap().2, expected);
+            assert_eq!(minutes(&app), expected);
         }
-        app.handle_key(Key::Down);
-        assert_eq!(app.task_duration.as_ref().unwrap().2, 180);
+        for expected in [180, 120, 60, 30, 10, 10] {
+            app.handle_key(Key::Down);
+            assert_eq!(minutes(&app), expected, "10 minutes is the shortest step");
+        }
+        // typed: 45 minutes, then 2 hours with the other unit
+        for c in "45".chars() {
+            app.handle_key(Key::Char(c));
+        }
+        assert_eq!(minutes(&app), 45);
+        app.handle_key(Key::Right);
+        app.handle_key(Key::Char('2'));
+        assert_eq!(minutes(&app), 120);
         assert_eq!(
             app.handle_key(Key::Enter),
             Some(Effect::SetDuration {
                 reminder_id: "rent".into(),
-                minutes: 180
+                minutes: 120
             })
         );
         assert_eq!(app.mode, Mode::Normal);

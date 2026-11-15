@@ -2,16 +2,16 @@
 //! a duration. Google keeps its own times. Pure state: keys in, a decision out.
 
 use crate::app::Key;
+use crate::durfield::DurationEdit;
 use crate::inbox;
 
 const DAY: i64 = 86_400;
 const HOUR: i64 = 3_600;
-/// Minutes a press changes the minute field, and the duration.
+/// Minutes a press changes the minute field.
 const MINUTE_STEP: i64 = 5;
-const DURATION_STEP: i64 = 15;
 /// Shortest and longest an event may be (minutes).
-const MIN_MINUTES: i64 = 5;
-const MAX_MINUTES: i64 = 24 * 60;
+const MIN_MINUTES: u32 = 5;
+const MAX_MINUTES: u32 = 24 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
@@ -45,7 +45,10 @@ pub struct EventForm {
     pub field: Field,
     pub part: Part,
     pub start: i64,
-    pub minutes: i64,
+    /// How long it lasts: Left and Right pick the unit, Up and Down step, digits type it.
+    pub duration: DurationEdit,
+    /// The digits typed into the picked part of the start.
+    typed: String,
     /// It was moved here before, so a reset has something to undo.
     pub shifted: bool,
     off: i64,
@@ -62,7 +65,13 @@ impl EventForm {
             field: Field::Start,
             part: Part::Day,
             start,
-            minutes: ((end - start) / 60).clamp(MIN_MINUTES, MAX_MINUTES),
+            duration: DurationEdit::new(
+                u32::try_from((end - start) / 60).unwrap_or(MIN_MINUTES),
+                MIN_MINUTES,
+                MAX_MINUTES,
+                false,
+            ),
+            typed: String::new(),
             shifted,
             off,
         }
@@ -71,7 +80,7 @@ impl EventForm {
     /// The end the form would save.
     #[must_use]
     pub fn end(&self) -> i64 {
-        self.start + self.minutes * 60
+        self.start + i64::from(self.duration.minutes) * 60
     }
 
     /// The start as three texts: day, hour, minute.
@@ -83,16 +92,6 @@ impl EventForm {
             format!("{h:02}"),
             format!("{m:02}"),
         )
-    }
-
-    /// The duration as `1 h 30 min`.
-    #[must_use]
-    pub fn duration_text(&self) -> String {
-        match (self.minutes / 60, self.minutes % 60) {
-            (0, m) => format!("{m} min"),
-            (h, 0) => format!("{h} h"),
-            (h, m) => format!("{h} h {m} min"),
-        }
     }
 
     /// One key: Tab switches between the start and the duration, the arrows pick and change,
@@ -107,6 +106,7 @@ impl EventForm {
                     Field::Start => Field::Duration,
                     Field::Duration => Field::Start,
                 };
+                self.typed.clear();
             }
             _ => match self.field {
                 Field::Start => self.handle_start(key),
@@ -123,12 +123,14 @@ impl EventForm {
                     Part::Minute => Part::Hour,
                     _ => Part::Day,
                 };
+                self.typed.clear();
             }
             Key::Right | Key::Char('l') => {
                 self.part = match self.part {
                     Part::Day => Part::Hour,
                     _ => Part::Minute,
                 };
+                self.typed.clear();
             }
             Key::Up | Key::Char('k') | Key::Down | Key::Char('j') => {
                 let sign = if matches!(key, Key::Up | Key::Char('k')) {
@@ -136,6 +138,7 @@ impl EventForm {
                 } else {
                     -1
                 };
+                self.typed.clear();
                 self.start += sign
                     * match self.part {
                         Part::Day => DAY,
@@ -143,19 +146,23 @@ impl EventForm {
                         Part::Minute => MINUTE_STEP * 60,
                     };
             }
+            // digits set the picked part: the day of the month, the hour or the minute
+            Key::Char(c) if c.is_ascii_digit() => {
+                let part = match self.part {
+                    Part::Day => crate::datefield::Part::Day,
+                    Part::Hour => crate::datefield::Part::Hour,
+                    Part::Minute => crate::datefield::Part::Minute,
+                };
+                self.typed = crate::datefield::push_digit(&self.typed, c, part);
+                let value: i64 = self.typed.parse().unwrap_or(0);
+                self.start = crate::datefield::set_part(self.start, self.off, part, value);
+            }
             _ => {}
         }
     }
 
     fn handle_duration(&mut self, key: Key) {
-        let step = match key {
-            Key::Up | Key::Char('k') => DURATION_STEP,
-            Key::Down | Key::Char('j') => -DURATION_STEP,
-            Key::Right | Key::Char('l') => MINUTE_STEP,
-            Key::Left | Key::Char('h') => -MINUTE_STEP,
-            _ => return,
-        };
-        self.minutes = (self.minutes + step).clamp(MIN_MINUTES, MAX_MINUTES);
+        self.duration.handle(key);
     }
 }
 
@@ -180,8 +187,8 @@ mod tests {
             (day.as_str(), h.as_str(), m.as_str()),
             ("Wed 18 Nov", "10", "00")
         );
-        assert_eq!(f.minutes, 90);
-        assert_eq!(f.duration_text(), "1 h 30 min");
+        assert_eq!(f.duration.minutes, 90);
+        assert_eq!(f.duration.text(), "1 h 30 min");
         assert_eq!(f.end(), f.start + 90 * 60);
     }
 
@@ -202,23 +209,44 @@ mod tests {
     }
 
     #[test]
-    fn the_duration_changes_in_its_own_field_and_stays_within_bounds() {
+    fn digits_type_the_day_the_hour_or_the_minute_and_the_end_follows() {
+        let mut f = form(); // Wed 18 Nov 10:00, 90 minutes
+                            // the day: 2 then 4 is the 24th
+        f.handle(Key::Char('2'));
+        f.handle(Key::Char('4'));
+        assert_eq!(f.start_parts().0, "Tue 24 Nov");
+        // the hour: 1 then 4 is 14
+        f.handle(Key::Right);
+        f.handle(Key::Char('1'));
+        f.handle(Key::Char('4'));
+        assert_eq!(f.start_parts().1, "14");
+        // the minute: 4 then 5 is 45
+        f.handle(Key::Right);
+        f.handle(Key::Char('4'));
+        f.handle(Key::Char('5'));
+        assert_eq!(f.start_parts().2, "45");
+        assert_eq!(f.end() - f.start, 90 * 60, "the end follows the start");
+        let (_, h, m) = f.start_parts();
+        assert_eq!((h.as_str(), m.as_str()), ("14", "45"));
+    }
+
+    #[test]
+    fn the_duration_is_typed_or_stepped_in_its_own_field() {
         let mut f = form();
         f.handle(Key::Tab);
         assert_eq!(f.field, Field::Duration);
         f.handle(Key::Up);
-        assert_eq!(f.minutes, 105);
-        f.handle(Key::Left);
-        assert_eq!(f.minutes, 100);
-        for _ in 0..200 {
-            f.handle(Key::Down);
-        }
-        assert_eq!(f.minutes, MIN_MINUTES);
-        for _ in 0..200 {
-            f.handle(Key::Up);
-        }
-        assert_eq!(f.minutes, MAX_MINUTES);
-        assert_eq!(f.duration_text(), "24 h");
+        assert_eq!(f.duration.minutes, 95, "minutes: five at a time");
+        f.handle(Key::Left); // hours
+        f.handle(Key::Char('3'));
+        assert_eq!(f.duration.minutes, 180);
+        f.handle(Key::Char('9'));
+        f.handle(Key::Char('9'));
+        assert_eq!(f.duration.minutes, MAX_MINUTES, "a day at most");
+        f.handle(Key::Right); // minutes
+        f.handle(Key::Char('1'));
+        assert_eq!(f.duration.minutes, MIN_MINUTES, "five minutes at least");
+        assert_eq!(f.end(), f.start + 5 * 60);
     }
 
     #[test]

@@ -578,6 +578,7 @@ async fn a_new_reminder_carries_its_repeat_rule_thread_link_and_shows_at_once() 
                 repeat: Some(rule),
                 tags: vec![],
                 thread_id: Some(thread.id.clone()),
+                minutes: Some(45),
             }
         )
         .await,
@@ -604,6 +605,7 @@ async fn a_new_reminder_carries_its_repeat_rule_thread_link_and_shows_at_once() 
         .find(|r| r.reminder.title == "Pay rent")
         .expect("listed at once");
     assert_eq!(made.repeat, Some(rule));
+    assert_eq!(made.minutes, 45, "its length on the calendar was kept");
     assert_eq!(made.reminder.due_at, Some(1_800_000_000));
     rig.daemon.shutdown().await;
 }
@@ -633,6 +635,7 @@ async fn labels_set_in_the_popup_are_saved_for_a_new_todo_and_for_an_edit() {
                 repeat: None,
                 tags: vec!["work".into()],
                 thread_id: None,
+                minutes: None,
             }
         )
         .await,
@@ -666,7 +669,7 @@ async fn labels_set_in_the_popup_are_saved_for_a_new_todo_and_for_an_edit() {
 }
 
 #[tokio::test]
-async fn a_task_takes_30_minutes_to_4_hours_on_the_calendar_set_only_by_the_human() {
+async fn a_task_takes_5_minutes_to_4_hours_on_the_calendar_set_only_by_the_human() {
     let rig = boot().await;
     release_and_sync(&rig).await;
     let id = rig.daemon.state.store.list_reminders(false).unwrap()[0]
@@ -700,8 +703,14 @@ async fn a_task_takes_30_minutes_to_4_hours_on_the_calendar_set_only_by_the_huma
         panic!()
     };
     assert_eq!(reminders[0].minutes, 120);
-    // other lengths are refused: nothing under 30 minutes, nothing over 4 hours
-    for bad in [0, 15, 45, 300, 480] {
+    // 10 minutes, or any whole five minutes up to 4 hours
+    assert!(matches!(human(&rig, set(10)).await, Response::Done));
+    assert_eq!(minutes_of(&rig), 10);
+    assert!(matches!(human(&rig, set(45)).await, Response::Done));
+    assert_eq!(minutes_of(&rig), 45);
+    assert!(matches!(human(&rig, set(120)).await, Response::Done));
+    // others are refused: not on a five, under 5 minutes, over 4 hours
+    for bad in [0, 3, 7, 12, 245, 300, 480] {
         assert_eq!(
             code(&human(&rig, set(bad)).await),
             Some(ErrorCode::Validation),
@@ -815,6 +824,7 @@ async fn the_human_creates_and_edits_reminders_directly_and_an_agent_cannot() {
                 repeat: None,
                 tags: vec![],
                 thread_id: None,
+                minutes: None,
             }
         )
         .await,
@@ -842,6 +852,7 @@ async fn the_human_creates_and_edits_reminders_directly_and_an_agent_cannot() {
                     repeat: None,
                     tags: vec![],
                     thread_id: None,
+                    minutes: None,
                 }
             )
             .await

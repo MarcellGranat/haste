@@ -221,6 +221,9 @@ pub enum RequestBody {
         /// The mail or chat thread it is about (stored as an `about` link).
         #[serde(default)]
         thread_id: Option<String>,
+        /// How long it takes on the calendar (here only), when not the default.
+        #[serde(default)]
+        minutes: Option<u32>,
     },
     /// Human-only: set a reminder's title and due date and append to its notes.
     ReminderEdit {
@@ -479,8 +482,36 @@ pub struct ReminderView {
 
 /// How long a task takes on the calendar until it is set.
 pub const DEFAULT_TASK_MINUTES: u32 = 30;
-/// The durations a task can have, in minutes.
-pub const TASK_MINUTES: [u32; 5] = [30, 60, 120, 180, 240];
+/// The lengths Up and Down step through for a task, in minutes.
+pub const TASK_MINUTES: [u32; 6] = [10, 30, 60, 120, 180, 240];
+/// The shortest and the longest a task may take, in minutes.
+pub const MIN_TASK_MINUTES: u32 = 5;
+pub const MAX_TASK_MINUTES: u32 = 240;
+
+/// The next longer (`up`) or shorter task length after `current`, within the allowed range.
+#[must_use]
+pub fn next_task_minutes(current: u32, up: bool) -> u32 {
+    if up {
+        TASK_MINUTES
+            .iter()
+            .copied()
+            .find(|m| *m > current)
+            .unwrap_or(MAX_TASK_MINUTES)
+    } else {
+        TASK_MINUTES
+            .iter()
+            .rev()
+            .copied()
+            .find(|m| *m < current)
+            .unwrap_or(TASK_MINUTES[0])
+    }
+}
+
+/// Is this a length a task may have: 5 to 240 minutes, in steps of 5.
+#[must_use]
+pub fn valid_task_minutes(minutes: u32) -> bool {
+    (MIN_TASK_MINUTES..=MAX_TASK_MINUTES).contains(&minutes) && minutes.is_multiple_of(5)
+}
 
 fn default_task_minutes() -> u32 {
     DEFAULT_TASK_MINUTES

@@ -292,6 +292,7 @@ fn save_todo(
                 repeat: None,
                 tags: Vec::new(),
                 thread_id: None,
+                minutes: None,
             },
             "TODO created",
         ),
@@ -787,6 +788,12 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                     repeat: task.repeat,
                     set_repeat: true,
                 }));
+                if result.is_ok() && task.minutes != task.minutes_before {
+                    result = describe(client.call(RequestBody::ReminderDuration {
+                        reminder_id: reminder_id.clone(),
+                        minutes: task.minutes,
+                    }));
+                }
                 if result.is_ok() {
                     let added = task.tags.iter().filter(|t| !task.tags_before.contains(t));
                     let removed = task.tags_before.iter().filter(|t| !task.tags.contains(t));
@@ -819,6 +826,7 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 repeat: task.repeat,
                 tags: task.tags,
                 thread_id: task.thread_id,
+                minutes: Some(task.minutes),
             })) {
                 Ok(()) => "reminder created".into(),
                 Err(e) => format!("reminder not created: {e}"),

@@ -96,6 +96,9 @@ pub struct RemindForm {
     pub label_cursor: usize,
     /// Typed in the Labels field: narrows the labels fuzzily, fzf style. Empty = the arrows.
     pub label_query: String,
+    /// The arrows or a query moved the cursor in the Labels field: Enter then picks the
+    /// highlighted label before it saves.
+    label_navigated: bool,
     pub attachments: Vec<PathBuf>,
     pub picker: Option<FilePicker>,
     /// Byte ranges of the title's words that gave the date or the repeat.
@@ -141,6 +144,7 @@ impl RemindForm {
             labels: labels.iter().map(|l| (l.clone(), on.contains(l))).collect(),
             label_cursor: 0,
             label_query: String::new(),
+            label_navigated: false,
             attachments: Vec::new(),
             picker: None,
             marks: Vec::new(),
@@ -369,6 +373,21 @@ impl RemindForm {
                 return Outcome::Continue;
             }
             Key::Esc => return Outcome::Cancel,
+            // in the Labels field, after moving or typing there, Enter picks the highlighted
+            // label first (as in fzf); the next Enter saves
+            Key::Enter
+                if self.field == Field::Labels
+                    && (self.label_navigated || !self.label_query.is_empty()) =>
+            {
+                let shown = self.visible_labels();
+                if let Some(&i) = shown.get(self.label_cursor) {
+                    self.labels[i].1 = true;
+                    self.label_cursor = i;
+                }
+                self.label_query.clear();
+                self.label_navigated = false;
+                return Outcome::Continue;
+            }
             Key::Enter => {
                 if self.effective_title().trim().is_empty() {
                     return Outcome::Continue;
@@ -429,16 +448,19 @@ impl RemindForm {
             }
             (Field::Labels, Key::Left | Key::Up) => {
                 self.label_cursor = self.label_cursor.saturating_sub(1);
+                self.label_navigated = true;
             }
             (Field::Labels, Key::Right | Key::Down) => {
                 let last = self.visible_labels().len().saturating_sub(1);
                 self.label_cursor = (self.label_cursor + 1).min(last);
+                self.label_navigated = true;
             }
             (Field::Labels, Key::Char(' ')) => {
                 let shown = self.visible_labels();
                 if let Some(&i) = shown.get(self.label_cursor) {
                     self.labels[i].1 = !self.labels[i].1;
                 }
+                self.label_navigated = false;
             }
             // typing narrows the labels (fzf); deleting it all goes back to the arrows
             (Field::Labels, Key::Char(c)) if !c.is_control() => {
@@ -655,6 +677,34 @@ mod tests {
         assert_eq!(f.handle(Key::Esc), Outcome::Continue);
         assert!(f.label_query.is_empty());
         assert_eq!(f.handle(Key::Esc), Outcome::Cancel);
+    }
+
+    #[test]
+    fn enter_in_the_labels_field_picks_the_highlighted_label_before_it_saves() {
+        let mut f = form("Mail"); // labels: haste, work (work is on)
+        f.field = Field::Labels;
+        // untouched: Enter just saves, nothing is picked on the way
+        let Outcome::Save(task) = f.handle(Key::Enter) else {
+            panic!("expected a task")
+        };
+        assert_eq!(task.tags, vec!["work".to_owned()]);
+        // typing narrows to haste; Enter picks it, the next Enter saves
+        f.field = Field::Labels;
+        f.handle(Key::Char('h'));
+        assert_eq!(f.handle(Key::Enter), Outcome::Continue);
+        assert!(f.label_query.is_empty(), "the query is done");
+        assert!(f.labels[0].1, "haste is on now");
+        let Outcome::Save(task) = f.handle(Key::Enter) else {
+            panic!("the second Enter saves")
+        };
+        assert_eq!(task.tags, vec!["haste".to_owned(), "work".to_owned()]);
+        // moving with the arrows counts the same way
+        let mut f = form("Mail");
+        f.field = Field::Labels;
+        f.handle(Key::Right); // onto work (already on)
+        f.handle(Key::Left); // onto haste
+        assert_eq!(f.handle(Key::Enter), Outcome::Continue);
+        assert!(f.labels[0].1);
     }
 
     #[test]

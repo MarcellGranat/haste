@@ -609,6 +609,63 @@ async fn a_new_reminder_carries_its_repeat_rule_thread_link_and_shows_at_once() 
 }
 
 #[tokio::test]
+async fn labels_set_in_the_popup_are_saved_for_a_new_todo_and_for_an_edit() {
+    let rig = boot().await;
+    release_and_sync(&rig).await;
+    rig.daemon
+        .state
+        .store
+        .replace_machine_labels(
+            "local",
+            &["haste".to_owned(), "work".to_owned()]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
+    // a new TODO with a label
+    assert!(matches!(
+        human(
+            &rig,
+            RequestBody::ReminderNew {
+                title: "labelled".into(),
+                due: None,
+                notes: None,
+                repeat: None,
+                tags: vec!["work".into()],
+                thread_id: None,
+            }
+        )
+        .await,
+        Response::Done
+    ));
+    let list = |rig: &Rig| rig.daemon.state.store.list_reminders(false).unwrap();
+    let all = rig.daemon.state.store.all_reminder_tags().unwrap();
+    let made = list(&rig)
+        .into_iter()
+        .find(|r| r.title == "labelled")
+        .expect("created");
+    assert_eq!(all.get(&made.id), Some(&vec!["work".to_owned()]));
+    // an edit adds one and takes one away
+    for (tag, add) in [("haste", true), ("work", false)] {
+        let request = if add {
+            RequestBody::ReminderTagAdd {
+                reminder_id: made.id.clone(),
+                tag: tag.into(),
+            }
+        } else {
+            RequestBody::ReminderTagRemove {
+                reminder_id: made.id.clone(),
+                tag: tag.into(),
+            }
+        };
+        assert!(matches!(human(&rig, request).await, Response::Done));
+    }
+    let all = rig.daemon.state.store.all_reminder_tags().unwrap();
+    assert_eq!(all.get(&made.id), Some(&vec!["haste".to_owned()]));
+    rig.daemon.shutdown().await;
+}
+
+#[tokio::test]
 async fn editing_a_reminder_can_set_and_clear_how_it_repeats() {
     use haste_core::model::{RepeatFreq, RepeatRule};
     let rig = boot().await;

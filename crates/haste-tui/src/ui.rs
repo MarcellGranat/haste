@@ -1019,9 +1019,9 @@ fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if form.field == Field::Labels {
         labels.push(Span::styled(
             if form.label_query.is_empty() {
-                " type to search · ←→ move · Space toggles"
+                " type to search · ←→ move · Space or Enter picks"
             } else {
-                " ←→ move · Space toggles · Esc clears"
+                " ←→ move · Space or Enter picks · Esc clears"
             },
             dim,
         ));

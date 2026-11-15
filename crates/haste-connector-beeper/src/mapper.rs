@@ -139,6 +139,12 @@ pub fn map_message(chat_id: &str, source: &Source, wire: &WireMessage) -> Option
     if body.is_empty() {
         body = ATTACHMENT_LABEL.to_owned();
     }
+    if let Some(line) =
+        haste_core::reactions::format_line(wire.reactions.iter().map(|r| r.key.as_str()))
+    {
+        body.push('\n');
+        body.push_str(&line);
+    }
     Some(Mapped {
         message: Message {
             id: String::new(),
@@ -273,6 +279,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(empty.message.body_text, ATTACHMENT_LABEL);
+    }
+
+    #[test]
+    fn reactions_on_a_message_become_one_body_line() {
+        let wire: WireMessage = serde_json::from_str(
+            r#"{"id":"m","type":"TEXT","text":"hi","timestamp":"2026-11-09T10:00:00Z","sortKey":"1",
+                "reactions":[{"id":"a","reactionKey":"👍","participantID":"p1"},
+                             {"id":"b","reactionKey":"👍","participantID":"p2"},
+                             {"id":"c","reactionKey":"❤️","participantID":"p3"}]}"#,
+        )
+        .unwrap();
+        let mapped = map_message("c", &Source::Whatsapp, &wire).unwrap();
+        assert_eq!(mapped.message.body_text, "hi\n[reactions: 👍×2 ❤️]");
     }
 
     #[test]

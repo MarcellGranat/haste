@@ -41,7 +41,7 @@ pub struct BeeperCursor {
 }
 
 /// Bump when the stored message fields change and old chats should be read again.
-pub const CURSOR_VERSION: u32 = 3;
+pub const CURSOR_VERSION: u32 = 4;
 
 impl BeeperCursor {
     #[must_use]
@@ -241,6 +241,7 @@ impl BeeperConnector {
     async fn read_history(&self, request: &HistoryRequest) -> Result<Batch, ConnectorError> {
         let chat_id = request.thread_external_id.as_str();
         let mut found: Vec<Mapped> = Vec::new();
+        let mut older = 0_usize;
         let mut cursor: Option<String> = None;
         for _ in 0..BEEPER_HISTORY_MAX_PAGES {
             let (items, more, next) = self
@@ -249,12 +250,15 @@ impl BeeperConnector {
                 .await?;
             for wire in &items {
                 if let Some(mapped) = map_message(chat_id, &self.which.source(), wire) {
+                    // messages already stored are returned too: they come back with their
+                    // current reactions, and storing them again changes nothing else
                     if request.oldest_known_at == 0 || mapped.timestamp <= request.oldest_known_at {
-                        found.push(mapped);
+                        older += 1;
                     }
+                    found.push(mapped);
                 }
             }
-            if found.len() >= BEEPER_HISTORY_EXTRA {
+            if older >= BEEPER_HISTORY_EXTRA {
                 break;
             }
             match (more, next) {
@@ -266,8 +270,6 @@ impl BeeperConnector {
         if found.is_empty() {
             return Ok(batch);
         }
-        found.sort_by_key(|m| std::cmp::Reverse(m.timestamp));
-        found.truncate(BEEPER_HISTORY_EXTRA);
         let mut participants: Vec<String> = Vec::new();
         for m in &found {
             if let Some(s) = &m.message.sender_identifier {

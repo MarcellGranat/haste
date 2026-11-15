@@ -2876,6 +2876,8 @@ fn send(
 
 /// The first words of a message body on one line (a list preview).
 fn snippet(body: &str) -> String {
-    let one_line: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    // the reactions line is not part of what was said
+    let (text, _) = haste_core::reactions::take(body);
+    let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     one_line.chars().take(160).collect()
 }

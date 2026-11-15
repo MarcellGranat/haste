@@ -92,6 +92,16 @@ pub struct WireMessage {
     pub is_hidden: bool,
     #[serde(default)]
     pub attachments: Vec<WireAttachment>,
+    /// Who reacted with what (`reactions` in the local API).
+    #[serde(default)]
+    pub reactions: Vec<WireReaction>,
+}
+
+/// One person's reaction to a message.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WireReaction {
+    #[serde(default, alias = "reactionKey")]
+    pub key: String,
 }
 
 /// One attachment of a message, as Beeper lists it (metadata only).

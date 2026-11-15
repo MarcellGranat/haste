@@ -105,7 +105,8 @@ pub struct State {
 
 #[derive(Default)]
 struct HistoryQueue {
-    done: HashSet<String>,
+    /// When each thread's history was last asked for.
+    done: HashMap<String, std::time::Instant>,
     waiting: HashMap<Source, Vec<String>>,
 }
 
@@ -128,6 +129,9 @@ impl RefreshGate {
 
 /// The shortest time between two syncs asked for by opening threads of the same source.
 pub const REFRESH_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The shortest time between two history reads of the same thread.
+pub const HISTORY_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
 
 impl State {
     pub(crate) fn new(store: Store, audit: AuditWriter, config: DaemonConfig) -> Self {
@@ -179,16 +183,21 @@ impl State {
         Arc::clone(wakers.entry(source.clone()).or_default())
     }
 
-    /// Ask for the earlier messages of a thread: once per thread per run. Returns whether it
-    /// was queued (false when it was asked for before).
+    /// Ask for the earlier messages of a thread, at most once per [`HISTORY_MIN_INTERVAL`] each
+    /// (chats also come back with their current reactions). Returns whether it was queued.
     pub fn queue_history(&self, source: &Source, thread_id: &str) -> bool {
         let mut q = self
             .history
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !q.done.insert(thread_id.to_owned()) {
+        let now = std::time::Instant::now();
+        if q.done
+            .get(thread_id)
+            .is_some_and(|t| now.duration_since(*t) < HISTORY_MIN_INTERVAL)
+        {
             return false;
         }
+        q.done.insert(thread_id.to_owned(), now);
         q.waiting
             .entry(source.clone())
             .or_default()

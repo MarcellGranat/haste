@@ -445,7 +445,9 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
         }
         let own = is_own(m, l.own);
         let selected = i == l.selected;
-        let (text, files) = split_body(&inbox::sanitize(&decode_entities(&m.body_text)));
+        let (plain, reactions) = haste_core::reactions::take(&m.body_text);
+        let (text, files) = split_body(&inbox::sanitize(&decode_entities(&plain)));
+        let reactions = reactions.map(|r| format!("↳ {}", inbox::sanitize(&r).replace('\n', " ")));
         let pieces = fold(&text, l.expanded.contains(&m.id));
         // each row: the text, and whether it is a fold marker
         let mut body: Vec<(String, bool)> = Vec::new();
@@ -482,6 +484,7 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
             .iter()
             .map(|(s, _)| inbox::width(s))
             .chain(chips.iter().map(|s| inbox::width(s)))
+            .chain(reactions.iter().map(|s| inbox::width(s)))
             .chain([inbox::width(&header).saturating_sub(2)])
             .max()
             .unwrap_or(10)
@@ -530,6 +533,13 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
                 styled(b, Style::new().fg(theme::TEXT))
             };
             lines.push(row(content, len));
+        }
+        if let Some(r) = &reactions {
+            let len = inbox::width(r);
+            lines.push(row(
+                vec![Span::styled(r.clone(), Style::new().fg(theme::YELLOW))],
+                len,
+            ));
         }
         for c in &chips {
             let len = inbox::width(c);
@@ -584,6 +594,36 @@ mod tests {
 
     fn text_of(l: &Line<'_>) -> String {
         l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn reactions_are_shown_under_the_message() {
+        let messages = [m(
+            "1",
+            "Ana",
+            "great news\n[reactions: 👍×2 ❤️]",
+            1_700_000_000,
+            false,
+        )];
+        let (lines, laid) = layout(
+            &messages,
+            &Layout {
+                width: 60,
+                selected: 0,
+                own: None,
+                tz_offset: 0,
+                now: 0,
+                hidden: 0,
+                expanded: &std::collections::HashSet::new(),
+            },
+        );
+        let all: Vec<String> = lines[laid[0].start..laid[0].end]
+            .iter()
+            .map(text_of)
+            .collect();
+        assert!(all.iter().any(|l| l.contains("great news")), "{all:?}");
+        assert!(all.iter().any(|l| l.contains("↳ 👍×2 ❤️")), "{all:?}");
+        assert!(!all.iter().any(|l| l.contains("[reactions")));
     }
 
     #[test]

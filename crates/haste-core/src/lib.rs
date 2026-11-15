@@ -13,6 +13,7 @@ pub mod model;
 pub mod notes;
 pub mod policy;
 pub mod proposal;
+pub mod reactions;
 pub mod send;
 pub mod time;
 

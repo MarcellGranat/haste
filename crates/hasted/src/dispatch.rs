@@ -693,6 +693,8 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             title,
             due,
             append_notes,
+            repeat,
+            set_repeat,
         } => reminder_write(
             state,
             principal,
@@ -701,6 +703,8 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
                 title,
                 due,
                 append_notes,
+                repeat,
+                set_repeat,
             },
         ),
         RequestBody::RemindersList { include_completed } => {
@@ -839,6 +843,8 @@ enum ReminderWrite {
         title: String,
         due: Option<i64>,
         append_notes: Option<String>,
+        repeat: Option<haste_core::model::RepeatRule>,
+        set_repeat: bool,
     },
 }
 
@@ -916,20 +922,29 @@ fn reminder_write(state: &State, actor: &Principal, write: ReminderWrite) -> Res
             title,
             due,
             append_notes,
+            repeat,
+            set_repeat,
         } => {
             let external = match state.store.get_reminder(&reminder_id) {
                 Ok(Some(r)) => r.external_id,
                 Ok(None) => return err(ErrorCode::NotFound, "reminder not found"),
                 Err(e) => return map_store(&e),
             };
-            handle.block_on(guard.update_reminder(
+            let done = handle.block_on(guard.update_reminder(
                 &external,
                 &haste_core::connector::ReminderPatch {
                     title,
                     due,
                     append_notes,
+                    repeat,
+                    set_repeat,
                 },
-            ))
+            ));
+            // the new rule shows at once; the next sync confirms it
+            if done.is_ok() && set_repeat {
+                let _ = state.store.set_reminder_repeats(&[(external, repeat)]);
+            }
+            done
         }
     };
     match result {

@@ -186,6 +186,23 @@ case "update_reminder":
     if let extra = request["append_notes"] as? String, !extra.isEmpty {
         reminder.notes = (reminder.notes ?? "").isEmpty ? extra : reminder.notes! + "\n\n" + extra
     }
+    if (request["set_repeat"] as? Bool) == true {
+        for rule in reminder.recurrenceRules ?? [] { reminder.removeRecurrenceRule(rule) }
+        if let repeatRule = request["repeat"] as? [String: Any], let freqName = repeatRule["freq"] as? String {
+            let every = max((repeatRule["every"] as? Int) ?? 1, 1)
+            let freq: EKRecurrenceFrequency?
+            switch freqName {
+            case "day": freq = .daily
+            case "week": freq = .weekly
+            case "month": freq = .monthly
+            case "year": freq = .yearly
+            default: freq = nil
+            }
+            if let freq = freq {
+                reminder.addRecurrenceRule(EKRecurrenceRule(recurrenceWith: freq, interval: every, end: nil))
+            }
+        }
+    }
     do { try store.save(reminder, commit: true) } catch { fail("failed", "save failed") }
     emit(["op": "update_reminder"])
 

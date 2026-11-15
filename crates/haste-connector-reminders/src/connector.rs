@@ -307,6 +307,8 @@ impl Connector for RemindersConnector {
                 title: patch.title.clone(),
                 due: patch.due,
                 append_notes: patch.append_notes.clone(),
+                repeat: patch.repeat,
+                set_repeat: patch.set_repeat,
             };
             let reply = tokio::task::spawn_blocking(move || helper.call(&request))
                 .await

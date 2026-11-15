@@ -205,6 +205,9 @@ pub struct ReminderPatch {
     pub title: String,
     pub due: Option<i64>,
     pub append_notes: Option<String>,
+    /// The new repeat rule, applied only when `set_repeat` is set (`None` then stops it).
+    pub repeat: Option<crate::model::RepeatRule>,
+    pub set_repeat: bool,
 }
 
 /// A calendar event to create. Attendees are stored on the event but never emailed.

@@ -1420,7 +1420,7 @@ impl App {
             Key::Char('J') if self.view == View::Later => self.later_focus = TodayFocus::Todo,
             Key::Char('K') if self.view == View::Later => self.later_focus = TodayFocus::Inbox,
             Key::Enter if thread_view => return self.open_selected(),
-            Key::Enter if self.on_todos() => self.start_todo(false),
+            Key::Enter if self.on_todos() => self.start_todo(),
             // a new TODO: the same popup as `t` on a mail, with nothing filled in
             Key::Char('c') if self.on_todos() => self.start_new_todo(),
             Key::Char('l') if thread_view => return self.start_labels(),
@@ -2196,22 +2196,19 @@ impl App {
         }
     }
 
-    /// `Enter` on a TODO edits it; `c` starts a new one.
-    fn start_todo(&mut self, new: bool) {
-        let form = if new {
-            Compose::todo(None, "", "")
-        } else {
-            let Some(r) = self.todo_under_cursor().map(|r| r.reminder.clone()) else {
-                return;
-            };
-            let due = r
-                .due_at
-                .map(|d| inbox::stamp(d, self.tz_offset))
-                .unwrap_or_default();
-            Compose::todo(Some(r.id), &r.title, &due)
+    /// `Enter` on a TODO: the same popup as for a new one, filled with what it has now.
+    fn start_todo(&mut self) {
+        let Some(todo) = self.todo_under_cursor() else {
+            return;
         };
-        self.compose = Some(Box::new(form));
-        self.mode = Mode::Compose;
+        let form = crate::remind::RemindForm::editing(
+            todo,
+            &self.known_labels,
+            haste_core::time::now_secs(),
+            self.tz_offset,
+        );
+        self.remind = Some(Box::new(form));
+        self.mode = Mode::RemindForm;
     }
 
     fn key_compose(&mut self, key: Key) -> Option<Effect> {
@@ -3036,9 +3033,22 @@ mod tests {
         app.set_reminder_list(vec![reminder_view("rent", Some(now + 3_600))]);
         press(&mut app, "3");
         assert!(app.on_todos());
-        // Enter opens the TODO form for it
+        // Enter opens the same popup as for a new one, filled with what it has
         app.handle_key(Key::Enter);
-        assert_eq!(app.mode, Mode::Compose);
+        assert_eq!(app.mode, Mode::RemindForm);
+        let form = app.remind.as_ref().unwrap();
+        assert_eq!(form.edit_id.as_deref(), Some("rent"));
+        assert_eq!(form.title, "task rent");
+        assert!(form.due.is_some());
+        // saving gives an edit, not a new TODO
+        let Some(Effect::CreateReminder(task)) = app.handle_key(Key::Enter) else {
+            panic!("expected the edit")
+        };
+        assert_eq!(task.reminder_id.as_deref(), Some("rent"));
+        assert_eq!(app.mode, Mode::Normal);
+        // Esc leaves it as it was
+        app.handle_key(Key::Enter);
+        assert_eq!(app.mode, Mode::RemindForm);
         app.handle_key(Key::Esc);
         assert_eq!(app.mode, Mode::Normal);
         // e marks it done, e again takes it back

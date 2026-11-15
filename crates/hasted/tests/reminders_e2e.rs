@@ -594,6 +594,58 @@ async fn a_new_reminder_carries_its_repeat_rule_thread_link_and_shows_at_once() 
 }
 
 #[tokio::test]
+async fn editing_a_reminder_can_set_and_clear_how_it_repeats() {
+    use haste_core::model::{RepeatFreq, RepeatRule};
+    let rig = boot().await;
+    release_and_sync(&rig).await;
+    let list = |rig: &Rig| {
+        let r = rig.daemon.state.store.list_reminders(false).unwrap();
+        (r[0].id.clone(), r[0].external_id.clone())
+    };
+    let (id, external) = list(&rig);
+    let rule = RepeatRule {
+        freq: RepeatFreq::Week,
+        every: 2,
+    };
+    let edit = |repeat, set_repeat| RequestBody::ReminderEdit {
+        reminder_id: id.clone(),
+        title: "same".into(),
+        due: Some(1_800_000_000),
+        append_notes: None,
+        repeat,
+        set_repeat,
+    };
+    assert!(matches!(
+        human(&rig, edit(Some(rule), true)).await,
+        Response::Done
+    ));
+    assert!(rig.helper.calls.lock().unwrap().iter().any(|c| matches!(
+        c,
+        RemindersRequest::UpdateReminder { repeat: Some(r), set_repeat: true, .. } if *r == rule
+    )));
+    // an edit that does not mention the repeat tells the helper to leave it alone
+    human(&rig, edit(None, false)).await;
+    // and setting it to none tells the helper to stop it
+    human(&rig, edit(None, true)).await;
+    let calls = rig.helper.calls.lock().unwrap().clone();
+    let updates: Vec<(Option<RepeatRule>, bool)> = calls
+        .iter()
+        .filter_map(|c| match c {
+            RemindersRequest::UpdateReminder {
+                repeat, set_repeat, ..
+            } => Some((*repeat, *set_repeat)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        updates,
+        vec![(Some(rule), true), (None, false), (None, true)]
+    );
+    let _ = external;
+    rig.daemon.shutdown().await;
+}
+
+#[tokio::test]
 async fn the_human_creates_and_edits_reminders_directly_and_an_agent_cannot() {
     let rig = boot().await;
     release_and_sync(&rig).await;
@@ -615,6 +667,8 @@ async fn the_human_creates_and_edits_reminders_directly_and_an_agent_cannot() {
         title: "renamed".into(),
         due: Some(1_800_000_000),
         append_notes: Some("see the attached file".into()),
+        repeat: None,
+        set_repeat: false,
     };
     assert!(matches!(human(&rig, edit.clone()).await, Response::Done));
     assert!(matches!(

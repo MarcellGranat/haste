@@ -230,6 +230,11 @@ pub enum RequestBody {
         due: Option<i64>,
         #[serde(default)]
         append_notes: Option<String>,
+        /// With `set_repeat`: the new repeat rule (`None` stops it repeating).
+        #[serde(default)]
+        repeat: Option<haste_core::model::RepeatRule>,
+        #[serde(default)]
+        set_repeat: bool,
     },
     /// Mirrored reminders the caller may see (titles included; never exposed in audit).
     RemindersList {

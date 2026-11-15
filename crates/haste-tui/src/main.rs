@@ -258,6 +258,8 @@ fn save_todo(
                 title,
                 due,
                 append_notes: extra,
+                repeat: None,
+                set_repeat: false,
             },
             "TODO saved",
         ),
@@ -683,6 +685,40 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                     notes.push('\n');
                 }
                 notes.push_str(&line);
+            }
+            if let Some(reminder_id) = task.reminder_id.clone() {
+                // an edit: the title, the date and the repeat are set; the notes are added to
+                // the old ones; the labels change by the difference
+                let mut result = describe(client.call(RequestBody::ReminderEdit {
+                    reminder_id: reminder_id.clone(),
+                    title: task.title.clone(),
+                    due: task.due,
+                    append_notes: (!notes.is_empty()).then_some(notes),
+                    repeat: task.repeat,
+                    set_repeat: true,
+                }));
+                if result.is_ok() {
+                    let added = task.tags.iter().filter(|t| !task.tags_before.contains(t));
+                    let removed = task.tags_before.iter().filter(|t| !task.tags.contains(t));
+                    for tag in added {
+                        result = result.and(describe(client.call(RequestBody::ReminderTagAdd {
+                            reminder_id: reminder_id.clone(),
+                            tag: tag.clone(),
+                        })));
+                    }
+                    for tag in removed {
+                        result =
+                            result.and(describe(client.call(RequestBody::ReminderTagRemove {
+                                reminder_id: reminder_id.clone(),
+                                tag: tag.clone(),
+                            })));
+                    }
+                }
+                app.status = match result {
+                    Ok(()) => "TODO saved".into(),
+                    Err(e) => format!("TODO not saved: {e}"),
+                };
+                return false;
             }
             app.status = match describe(client.call(RequestBody::ReminderNew {
                 title: task.title,

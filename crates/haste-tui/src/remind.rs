@@ -54,6 +54,10 @@ pub enum DatePart {
 /// What the form is ready to create.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Task {
+    /// Set when an existing TODO was edited (it is changed, not created).
+    pub reminder_id: Option<String>,
+    /// The labels the TODO had before the edit.
+    pub tags_before: Vec<String>,
     /// The thread it is about, when it was made from one.
     pub thread_id: Option<String>,
     pub title: String,
@@ -74,6 +78,9 @@ pub enum Outcome {
 
 #[derive(Debug, Clone)]
 pub struct RemindForm {
+    /// The TODO being edited; `None` for a new one.
+    pub edit_id: Option<String>,
+    tags_before: Vec<String>,
     pub thread_id: Option<String>,
     /// Shown dimmed while the title is empty.
     pub suggestion: String,
@@ -119,6 +126,8 @@ impl RemindForm {
     ) -> Self {
         let when = smartdate::parse(suggestion, now, off);
         let mut form = Self {
+            edit_id: None,
+            tags_before: Vec::new(),
             thread_id: thread_id.map(str::to_owned),
             suggestion: suggestion.to_owned(),
             title: String::new(),
@@ -142,6 +151,35 @@ impl RemindForm {
             off,
         };
         form.reread();
+        form
+    }
+
+    /// A form for an existing TODO, filled with what it has now. The notes field is empty:
+    /// what is typed there is added to the notes it already has.
+    #[must_use]
+    pub fn editing(
+        todo: &haste_proto::ReminderView,
+        labels: &[String],
+        now: i64,
+        off: i64,
+    ) -> Self {
+        let mut all: Vec<String> = labels.to_vec();
+        for t in &todo.tags {
+            if !all.contains(t) {
+                all.push(t.clone());
+            }
+        }
+        let mut form = Self::new(None, "", &all, &todo.tags, now, off);
+        form.edit_id = Some(todo.reminder.id.clone());
+        form.tags_before = todo.tags.clone();
+        form.title = todo.reminder.title.clone();
+        form.due = todo.reminder.due_at;
+        form.repeat = todo.repeat;
+        // what it has is kept until it is changed by hand
+        form.date_touched = true;
+        form.repeat_touched = true;
+        form.due_from_title = false;
+        form.repeat_from_title = false;
         form
     }
 
@@ -194,6 +232,8 @@ impl RemindForm {
 
     fn task(&self) -> Task {
         Task {
+            reminder_id: self.edit_id.clone(),
+            tags_before: self.tags_before.clone(),
             thread_id: self.thread_id.clone(),
             title: self.effective_title().trim().to_owned(),
             due: self.due,
@@ -629,6 +669,48 @@ mod tests {
         assert_eq!(task.tags, vec!["haste".to_owned()]);
         assert_eq!(task.notes, "bring the contract");
         assert_eq!(task.attachments.len(), 1);
+    }
+
+    #[test]
+    fn editing_starts_from_what_the_todo_has_and_keeps_it_until_changed() {
+        let todo = haste_proto::ReminderView {
+            reminder: haste_core::model::Reminder {
+                id: "r1".into(),
+                external_id: "x1".into(),
+                title: "Pay rent".into(),
+                notes_snippet: "old notes".into(),
+                due_at: Some(at(20, 8, 15)),
+                completed: false,
+                list_name: "L".into(),
+                remote_modified_at: 0,
+                missing_since: None,
+                version: 1,
+            },
+            tags: vec!["work".into()],
+            repeat: Some(RepeatRule {
+                freq: RepeatFreq::Month,
+                every: 1,
+            }),
+        };
+        let mut f = RemindForm::editing(&todo, &["haste".into()], NOW, OFF);
+        assert_eq!(f.title, "Pay rent");
+        assert_eq!(f.due, Some(at(20, 8, 15)));
+        assert_eq!(f.repeat.map(|r| r.freq), Some(RepeatFreq::Month));
+        // the labels it has are on, and one it had that is no longer known is still listed
+        assert!(f.labels.iter().any(|(l, on)| l == "work" && *on));
+        // typing words in the title does not move a date that was already set
+        type_text(&mut f, " tomorrow");
+        assert_eq!(f.due, Some(at(20, 8, 15)));
+        f.field = Field::Notes;
+        type_text(&mut f, "bring ID");
+        let Outcome::Save(task) = f.handle(Key::Enter) else {
+            panic!("expected a task")
+        };
+        assert_eq!(task.reminder_id.as_deref(), Some("r1"));
+        assert_eq!(task.tags_before, vec!["work".to_owned()]);
+        assert_eq!(task.title, "Pay rent tomorrow");
+        assert_eq!(task.notes, "bring ID");
+        assert!(task.thread_id.is_none());
     }
 
     #[test]

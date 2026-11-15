@@ -42,6 +42,10 @@ pub enum RemindersRequest {
         title: String,
         due: Option<i64>,
         append_notes: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repeat: Option<haste_core::model::RepeatRule>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        set_repeat: bool,
     },
 }
 

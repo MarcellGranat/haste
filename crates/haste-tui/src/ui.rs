@@ -1170,10 +1170,17 @@ fn todo_items<'a>(app: &App, todos: &[&haste_proto::ReminderView], now: i64) -> 
     todos
         .iter()
         .map(|r| {
-            let due = r
-                .reminder
-                .due_at
-                .map_or_else(|| "no date".to_owned(), |d| inbox::stamp(d, off));
+            // a late TODO says how late it is; otherwise the date
+            let due = r.reminder.due_at.map_or_else(
+                || "no date".to_owned(),
+                |d| {
+                    if d < now {
+                        inbox::overdue_text(now - d)
+                    } else {
+                        inbox::stamp(d, off)
+                    }
+                },
+            );
             let overdue = r.reminder.due_at.is_some_and(|d| d < now);
             if let Some(deadline) = app.pending_done.get(&r.reminder.id) {
                 let left = deadline.saturating_duration_since(app.now).as_secs();
@@ -1971,6 +1978,22 @@ mod tests {
             "labels show on the row: {text}"
         );
         assert!(text.contains("task-soon") && text.contains("task-next"));
+        // a late one says how late
+        let mut late = todo("late", now - 3 * 86_400);
+        late.reminder.title = "task-late".into();
+        app.set_reminder_list(vec![late]);
+        let text = render(&app);
+        assert!(text.contains("3 days overdue"), "{text}");
+        app.set_reminder_list(vec![
+            {
+                let mut s = todo("soon", now + 60);
+                s.tags = vec!["work".into(), "haste".into()];
+                s
+            },
+            todo("next", now + 86_400),
+            todo("far", now + 5 * 86_400),
+        ]);
+        let text = render(&app);
         assert!(text.contains("tomorrow"), "{text}");
         assert!(!text.contains("task-far"), "later ones are not on Today");
         app.view = crate::app::View::Later;

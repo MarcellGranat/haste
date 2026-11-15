@@ -671,7 +671,7 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 Ok(l) => l,
                 Err(e) => {
                     app.status = format!("reminder not created, {e}");
-                    return false;
+                    return false; // nothing changed: no need to reload
                 }
             };
             // the notes: what was typed, the attached files, and the mark that links the
@@ -718,6 +718,8 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                     Ok(()) => "TODO saved".into(),
                     Err(e) => format!("TODO not saved: {e}"),
                 };
+                // the labels and the date changed: the list shows them now, not at quit
+                refresh(app, client);
                 return false;
             }
             app.status = match describe(client.call(RequestBody::ReminderNew {

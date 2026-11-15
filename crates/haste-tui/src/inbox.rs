@@ -309,6 +309,21 @@ pub fn suggest_due(subject: &str, now: i64, off: i64) -> i64 {
     tomorrow_morning(now, off)
 }
 
+/// How late something is: `5 min overdue`, `3 hours overdue`, `2 days overdue`.
+#[must_use]
+pub fn overdue_text(late_secs: i64) -> String {
+    let late = late_secs.max(0);
+    let plural =
+        |n: i64, unit: &str| format!("{n} {unit}{} overdue", if n == 1 { "" } else { "s" });
+    if late < HOUR {
+        format!("{} min overdue", (late / 60).max(1))
+    } else if late < DAY {
+        plural(late / HOUR, "hour")
+    } else {
+        plural(late / DAY, "day")
+    }
+}
+
 /// `YYYY-MM-DD HH:MM` in local time.
 #[must_use]
 pub fn stamp(secs: i64, off: i64) -> String {
@@ -628,6 +643,17 @@ mod tests {
             short_sender_or_address("no-reply-ab-cd@mail.claude.com"),
             "claude"
         );
+    }
+
+    #[test]
+    fn late_things_say_how_late() {
+        assert_eq!(overdue_text(30), "1 min overdue");
+        assert_eq!(overdue_text(10 * 60), "10 min overdue");
+        assert_eq!(overdue_text(3_600), "1 hour overdue");
+        assert_eq!(overdue_text(5 * 3_600 + 59), "5 hours overdue");
+        assert_eq!(overdue_text(86_400), "1 day overdue");
+        assert_eq!(overdue_text(3 * 86_400 + 5), "3 days overdue");
+        assert_eq!(overdue_text(-5), "1 min overdue", "never negative");
     }
 
     #[test]

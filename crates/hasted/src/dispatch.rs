@@ -3312,6 +3312,24 @@ fn send(
 fn snippet(body: &str) -> String {
     // the reactions line is not part of what was said
     let (text, _) = haste_core::reactions::take(body);
+    // nor are the attachment lines (the list shows a paperclip for those)
+    let text: String = text
+        .lines()
+        .filter(|l| haste_core::attachment::parse_line(l).is_none() && l.trim() != "[attachment]")
+        .collect::<Vec<_>>()
+        .join(" ");
     let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     one_line.chars().take(160).collect()
+}
+
+#[cfg(test)]
+mod snippet_tests {
+    use super::snippet;
+
+    #[test]
+    fn the_preview_leaves_out_reactions_and_attachment_lines() {
+        let body = "Please see attached\n[attachment: S26.pdf (application/pdf, 10 bytes) #TOKEN]\n[reactions: 👍]";
+        assert_eq!(snippet(body), "Please see attached");
+        assert_eq!(snippet("[attachment: a.png (image/png, 5 bytes)]"), "");
+    }
 }

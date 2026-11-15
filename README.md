@@ -151,8 +151,9 @@ run `haste connector resync gmail` (or `icloud`); chats are re-read once by them
 `INBOX` label and changes nothing else; it stays in All Mail). iCloud: the thread's inbox
 messages are moved to the `Archive` folder with `UID MOVE` (change the folder with
 `archive_folder` in `icloud.json`; nothing is deleted). It runs at the provider first and is
-recorded here only when that worked; if the mailbox refuses, the thread stays where it was and the
-reason shows in the status line. Approving an agent's archive proposal does the same. Chats are
+recorded here only when that worked. In the TUI it runs in the background, one at a time: the
+thread leaves the list at once so you can keep moving, and if the mailbox refuses it comes back
+with the reason in the status line. Approving an agent's archive proposal does the same. Chats are
 archived here only. Gmail needs the extra `gmail.modify` permission, so after upgrading run
 `haste connector gmail auth` once more. Only the primary inbox is read: Promotions, Social,
 Updates, Forums, spam and other folders are not loaded.

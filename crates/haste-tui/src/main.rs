@@ -1,4 +1,5 @@
 use std::io;
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
@@ -326,6 +327,68 @@ fn describe(response: Result<Response, String>) -> Result<(), String> {
 }
 
 /// Returns `true` when the app should quit.
+/// An archive handed to the background worker: the thread and what to say when it worked.
+struct ArchiveJob {
+    thread_id: String,
+    done: &'static str,
+}
+
+/// The worker's answer.
+struct ArchiveDone {
+    thread_id: String,
+    done: &'static str,
+    result: Result<(), String>,
+}
+
+/// Archives run one at a time in the background, so the list stays responsive while a mailbox
+/// is slow, and never as several connections to the same provider at once.
+fn archive_worker(client: Client) -> (Sender<ArchiveJob>, Receiver<ArchiveDone>) {
+    let (job_tx, job_rx) = channel::<ArchiveJob>();
+    let (done_tx, done_rx) = channel::<ArchiveDone>();
+    std::thread::spawn(move || {
+        while let Ok(job) = job_rx.recv() {
+            let result = describe(client.call(RequestBody::TriageSet {
+                thread_id: job.thread_id.clone(),
+                priority: None,
+                set_aside: None,
+                snoozed_until: None,
+                archived: Some(true),
+            }));
+            if done_tx
+                .send(ArchiveDone {
+                    thread_id: job.thread_id,
+                    done: job.done,
+                    result,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    (job_tx, done_rx)
+}
+
+/// Take the thread out of the list now and queue the archive.
+fn start_archive(app: &mut App, jobs: &Sender<ArchiveJob>, thread_id: String) {
+    let done = if app.thread_is_mail(&thread_id) {
+        "archived in the mailbox and here"
+    } else {
+        "archived (in haste only; chats have no upstream archive)"
+    };
+    app.begin_archive(&thread_id);
+    app.status = "archiving …".into();
+    if jobs
+        .send(ArchiveJob {
+            thread_id: thread_id.clone(),
+            done,
+        })
+        .is_err()
+    {
+        app.finish_archive(&thread_id, Err("the archive worker stopped".into()));
+    }
+}
+
 fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
     match effect {
         Effect::Quit => {
@@ -843,6 +906,7 @@ fn main() -> io::Result<()> {
     let events = client.subscribe();
     let mut app = App::new();
     refresh(&mut app, &client);
+    let (archive_jobs, archive_done) = archive_worker(client.clone());
 
     let mut terminal = ratatui::init();
     let result = (|| -> io::Result<()> {
@@ -871,6 +935,12 @@ fn main() -> io::Result<()> {
                                 edit_external(&mut terminal, &mut app, &text);
                             } else if let Effect::Reply { thread_id } = effect {
                                 app.open_reply_form(&thread_id);
+                            } else if let Effect::Triage {
+                                thread_id,
+                                change: TriageChange::Archive,
+                            } = effect
+                            {
+                                start_archive(&mut app, &archive_jobs, thread_id);
                             } else if run_effect(&mut app, &client, effect) {
                                 return Ok(());
                             }
@@ -884,6 +954,11 @@ fn main() -> io::Result<()> {
                 }
             }
             let mut dirty = false;
+            while let Ok(finished) = archive_done.try_recv() {
+                let failed = finished.result.is_err();
+                app.finish_archive(&finished.thread_id, finished.result.map(|()| finished.done));
+                dirty |= failed;
+            }
             while let Ok(ev) = events.try_recv() {
                 dirty |= app.on_event(&ev).is_some();
             }

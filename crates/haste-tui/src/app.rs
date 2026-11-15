@@ -425,6 +425,8 @@ pub struct App {
     pub connectors: Vec<ConnectorView>,
     /// Reminders permission and counts (no titles); `None` until first read.
     pub reminders: Option<RemindersStatusView>,
+    /// Threads being archived in the background: out of the list already, back if it fails.
+    pub pending_archive: std::collections::HashSet<String>,
     pub connectors_selected: usize,
     pub machines: Vec<MachineView>,
     pub agents_selected: usize,
@@ -553,6 +555,7 @@ impl App {
             approvals_selected: 0,
             connectors: Vec::new(),
             reminders: None,
+            pending_archive: std::collections::HashSet::new(),
             connectors_selected: 0,
             machines: Vec::new(),
             agents_selected: 0,
@@ -634,7 +637,27 @@ impl App {
 
     pub fn set_threads(&mut self, threads: Vec<ThreadView>) {
         self.threads = threads;
+        // what is being archived in the background stays out of the list until it is known
+        let pending = &self.pending_archive;
+        self.threads.retain(|t| !pending.contains(&t.thread.id));
         self.clamp();
+    }
+
+    /// Take a thread out of the list now; the archive itself runs in the background.
+    pub fn begin_archive(&mut self, thread_id: &str) {
+        self.pending_archive.insert(thread_id.to_owned());
+        self.threads.retain(|t| t.thread.id != thread_id);
+        self.clamp();
+    }
+
+    /// The background archive finished. On success the thread stays gone; on failure it is
+    /// let back (the caller reloads the list) and the reason is shown.
+    pub fn finish_archive(&mut self, thread_id: &str, result: Result<&str, String>) {
+        self.pending_archive.remove(thread_id);
+        self.status = match result {
+            Ok(done) => done.to_owned(),
+            Err(e) => format!("archive failed, back in the list: {e}"),
+        };
     }
 
     /// Daemon change events: proposals refresh the list, notices are shown to the human.
@@ -2991,6 +3014,28 @@ mod tests {
                 attachments: vec![std::path::PathBuf::from("/a/report.pdf")],
             })
         );
+    }
+
+    #[test]
+    fn an_archived_thread_leaves_the_list_at_once_and_returns_if_the_archive_fails() {
+        let mut app = inbox_app(); // t2 then t1
+        let before = app.threads.clone();
+        app.begin_archive("t2");
+        let ids =
+            |a: &App| -> Vec<String> { a.threads.iter().map(|t| t.thread.id.clone()).collect() };
+        assert_eq!(ids(&app), ["t1"]);
+        // a reload while it is pending (the daemon still lists it) does not bring it back
+        app.set_threads(before.clone());
+        assert_eq!(ids(&app), ["t1"]);
+        // success: it stays gone
+        app.finish_archive("t2", Ok("archived"));
+        assert_eq!(app.status, "archived");
+        // failure: the next reload lists it again, with the reason shown
+        app.begin_archive("t1");
+        app.finish_archive("t1", Err("the mailbox refused".into()));
+        assert!(app.status.contains("back in the list") && app.status.contains("refused"));
+        app.set_threads(before);
+        assert_eq!(ids(&app), ["t1", "t2"]);
     }
 
     #[test]

@@ -185,6 +185,15 @@ const MIGRATIONS: &[&str] = &[
         every INTEGER NOT NULL
     );
     ",
+    // 11: calendar events moved or resized here only (Google keeps its own times), keyed by the
+    // provider's event so a re-sync leaves them alone.
+    "
+    CREATE TABLE event_overrides (
+        external_id TEXT PRIMARY KEY,
+        start_at INTEGER NOT NULL,
+        end_at INTEGER NOT NULL
+    );
+    ",
 ];
 
 /// Highest schema version this binary understands.

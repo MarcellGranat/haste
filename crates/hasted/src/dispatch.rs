@@ -102,6 +102,7 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::IgnoreMute { .. }
         | RequestBody::ReadSet { .. }
         | RequestBody::SenderRules
+        | RequestBody::EventShift { .. }
         | RequestBody::MutedDelete { .. }
         | RequestBody::RuleChange { .. }
         | RequestBody::ResolveExecuting { .. }
@@ -150,6 +151,7 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::IgnoreMute { .. } => "ignore_mute",
         RequestBody::ReadSet { .. } => "read_set",
         RequestBody::SenderRules => "sender_rules",
+        RequestBody::EventShift { .. } => "event_shift",
         RequestBody::MutedDelete { .. } => "muted_delete",
         RequestBody::RuleChange { .. } => "rule_change",
         _ => "request",
@@ -736,6 +738,9 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
         }
         RequestBody::IgnoreMute { thread_id } => ignore_mute(state, principal, &thread_id),
         RequestBody::MutedDelete { thread_id } => muted_delete(state, principal, &thread_id),
+        RequestBody::EventShift { event_id, times } => {
+            event_shift(state, principal, &event_id, times)
+        }
         RequestBody::SenderRules => {
             let (mute, mut errors) = read_rule_file(&state.config.data_dir, ignore::IGNORE_FILE);
             let (priority, e2) = read_rule_file(&state.config.data_dir, ignore::PRIORITY_FILE);
@@ -1013,8 +1018,46 @@ fn change_reminder_tag(
 }
 
 /// Event reads pass through the same scope filter as thread and reminder reads.
+/// Move or resize an event here only. Google is never written to; `None` puts it back.
+fn event_shift(
+    state: &State,
+    actor: &Principal,
+    event_id: &str,
+    times: Option<(i64, i64)>,
+) -> Response {
+    let event = match state.store.get_event(event_id) {
+        Ok(Some(e)) => e,
+        Ok(None) => return err(ErrorCode::NotFound, "event not found"),
+        Err(e) => return map_store(&e),
+    };
+    if event.all_day {
+        return err(
+            ErrorCode::Validation,
+            "an all-day event has no time to move",
+        );
+    }
+    if let Some((start, end)) = times {
+        // a minute at least, a day at most
+        if end <= start || end - start > 86_400 {
+            return err(ErrorCode::Validation, "the event must last up to a day");
+        }
+    }
+    if let Err(e) = state.store.set_event_override(&event.external_id, times) {
+        return map_store(&e);
+    }
+    state.audit(
+        &actor.id,
+        "event.shift",
+        if times.is_some() { "moved" } else { "reset" },
+        Some(event_id),
+        None,
+    );
+    Response::Done
+}
+
 fn events_list(state: &State, principal: &Principal, from: i64) -> Response {
     let tags = state.store.all_event_tags().unwrap_or_default();
+    let overrides = state.store.event_overrides().unwrap_or_default();
     let machine_labels = machine_labels_for(state, principal);
     match state.store.list_events(from) {
         Ok(rows) => Response::Events {
@@ -1022,8 +1065,22 @@ fn events_list(state: &State, principal: &Principal, from: i64) -> Response {
                 .into_iter()
                 .filter_map(|event| {
                     let own = tags.get(&event.id).cloned().unwrap_or_default();
-                    visible_to(principal, &own, machine_labels.as_ref())
-                        .then_some(EventView { event, tags: own })
+                    visible_to(principal, &own, machine_labels.as_ref()).then(|| {
+                        let mut event = event;
+                        let shifted = match overrides.get(&event.external_id) {
+                            Some(&(start, end)) => {
+                                event.start_at = start;
+                                event.end_at = end;
+                                true
+                            }
+                            None => false,
+                        };
+                        EventView {
+                            event,
+                            tags: own,
+                            shifted,
+                        }
+                    })
                 })
                 .collect(),
         },

@@ -315,6 +315,13 @@ pub enum RequestBody {
     MutedDelete {
         thread_id: String,
     },
+    /// Human-only: move or resize a calendar event here only (`None` puts it back as Google
+    /// has it). Nothing is sent to Google.
+    EventShift {
+        event_id: String,
+        #[serde(default)]
+        times: Option<(i64, i64)>,
+    },
     /// Human-only: the local sender rule files (mute, priority, allowed).
     SenderRules,
     /// Human-only: add or remove the thread's sender (or its whole domain) in a rule file.
@@ -504,6 +511,9 @@ pub struct EventView {
     pub event: CalendarEvent,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Moved or resized here: `event` carries the local times, Google keeps its own.
+    #[serde(default)]
+    pub shifted: bool,
 }
 
 /// Counts and permission state only: no titles, notes or list names.

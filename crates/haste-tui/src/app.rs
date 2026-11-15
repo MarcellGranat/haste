@@ -274,6 +274,11 @@ pub enum Effect {
         thread_id: String,
         read: bool,
     },
+    /// Move or resize a calendar event here only (`None` puts it back as Google has it).
+    ShiftEvent {
+        event_id: String,
+        times: Option<(i64, i64)>,
+    },
     /// Delete one muted mail from the local store (the sender stays muted).
     DeleteMuted {
         thread_id: String,
@@ -423,6 +428,8 @@ pub enum Mode {
     },
     /// The reminder popup (`app.remind` holds it).
     RemindForm,
+    /// The popup that moves or resizes a calendar event here only (`app.event_form`).
+    EventEdit,
     /// The emoji keyboard, opened with Ctrl-e in a text field: a key types its emoji into the
     /// field of `back`, Esc goes back without one.
     Emoji {
@@ -466,6 +473,8 @@ pub struct App {
     pub compose: Option<Box<Compose>>,
     /// The reminder popup, while `Mode::RemindForm`.
     pub remind: Option<Box<crate::remind::RemindForm>>,
+    /// The event popup, while `Mode::EventEdit`.
+    pub event_form: Option<Box<crate::eventedit::EventForm>>,
     /// Every known project label, offered in the reminder popup.
     pub known_labels: Vec<String>,
     /// The open label picker.
@@ -631,6 +640,7 @@ impl App {
             reader: None,
             compose: None,
             remind: None,
+            event_form: None,
             known_labels: Vec::new(),
             labeler: None,
             attach: None,
@@ -1176,6 +1186,12 @@ impl App {
                 }
             }
         }
+        // weekends are not on the calendar grid
+        let off = self.tz_offset;
+        out.retain(|r| {
+            let local = r.at() + off;
+            ((local.div_euclid(86_400) + 3).rem_euclid(7)) < 5
+        });
         out.sort_by_key(AgendaItem::at);
         out
     }
@@ -1345,6 +1361,7 @@ impl App {
             Mode::Preview => self.key_preview(key),
             Mode::Snooze { thread_id, input } => self.key_snooze(key, thread_id, input),
             Mode::RemindForm => self.key_remind_form(key),
+            Mode::EventEdit => self.key_event_edit(key),
             Mode::Emoji { back } => self.key_emoji(key, *back),
             Mode::ReplyChoice { thread_id } => self.key_reply_choice(key, thread_id),
             Mode::Detail(_) => {
@@ -1481,6 +1498,17 @@ impl App {
             Key::Char('K') if self.view == View::Later => self.later_focus = TodayFocus::Inbox,
             Key::Enter if thread_view => return self.open_selected(),
             Key::Enter if self.on_todos() => self.start_todo(),
+            Key::Enter if self.view == View::Calendar => self.start_event_edit(),
+            Key::Char('R') if self.view == View::Calendar => {
+                if let Some(e) = self.event_under_cursor().filter(|e| e.shifted) {
+                    return Some(Effect::ShiftEvent {
+                        event_id: e.event.id.clone(),
+                        times: None,
+                    });
+                }
+            }
+            Key::Char('h') if self.view == View::Calendar => self.calendar_day_step(false),
+            Key::Char('l') if self.view == View::Calendar => self.calendar_day_step(true),
             // a new TODO: the same popup as `t` on a mail, with nothing filled in
             Key::Char('c') if self.on_todos() => self.start_new_todo(),
             Key::Char('l') if thread_view => return self.start_labels(),
@@ -2666,6 +2694,73 @@ impl App {
         self.mode = Mode::RemindForm;
     }
 
+    /// The event under the cursor on the Calendar tab.
+    fn event_under_cursor(&self) -> Option<&EventView> {
+        match self.agenda().get(self.calendar_selected) {
+            Some(AgendaItem::Event(e)) => Some(*e),
+            _ => None,
+        }
+    }
+
+    /// `Enter` on an event: the popup to move or resize it here only.
+    fn start_event_edit(&mut self) {
+        let Some(e) = self.event_under_cursor() else {
+            return;
+        };
+        if e.event.all_day {
+            self.status = "an all-day event has no time to move".into();
+            return;
+        }
+        let form = crate::eventedit::EventForm::new(
+            &e.event.id,
+            &inbox::sanitize(&e.event.title).replace('\n', " "),
+            e.event.start_at,
+            e.event.end_at,
+            e.shifted,
+            self.tz_offset,
+        );
+        self.event_form = Some(Box::new(form));
+        self.mode = Mode::EventEdit;
+    }
+
+    fn key_event_edit(&mut self, key: Key) -> Option<Effect> {
+        let form = self.event_form.as_mut()?;
+        let (event_id, outcome) = (form.event_id.clone(), form.handle(key));
+        let times = match outcome {
+            crate::eventedit::Outcome::Continue => return None,
+            crate::eventedit::Outcome::Cancel => None,
+            crate::eventedit::Outcome::Save(s, e) => Some(Some((s, e))),
+            crate::eventedit::Outcome::Reset => Some(None),
+        };
+        self.event_form = None;
+        self.mode = Mode::Normal;
+        times.map(|times| Effect::ShiftEvent { event_id, times })
+    }
+
+    /// `h` and `l` on the Calendar tab: the first item of the previous or next day that has any.
+    fn calendar_day_step(&mut self, forward: bool) {
+        let off = self.tz_offset;
+        let days: Vec<i64> = self
+            .agenda()
+            .iter()
+            .map(|r| inbox::day_start(r.at(), off))
+            .collect();
+        let Some(here) = days.get(self.calendar_selected).copied() else {
+            return;
+        };
+        let target = if forward {
+            days.iter().position(|d| *d > here)
+        } else {
+            days.iter()
+                .rev()
+                .find(|d| **d < here)
+                .and_then(|d| days.iter().position(|x| x == d))
+        };
+        if let Some(i) = target {
+            self.calendar_selected = i;
+        }
+    }
+
     fn key_remind_form(&mut self, key: Key) -> Option<Effect> {
         let form = self.remind.as_mut()?;
         if key == Key::Ctrl('f') {
@@ -3113,7 +3208,7 @@ mod tests {
         use haste_core::model::{RepeatFreq, RepeatRule};
         let mut app = App::new();
         let now = haste_core::time::now_secs();
-        let mut daily = reminder_view("daily", Some(now + 3_600));
+        let mut daily = reminder_view("daily", Some(on_a_weekday(now, 3_600)));
         daily.repeat = Some(RepeatRule {
             freq: RepeatFreq::Day,
             every: 1,
@@ -3122,7 +3217,7 @@ mod tests {
         done.reminder.completed = true;
         app.set_reminder_list(vec![
             daily,
-            reminder_view("once", Some(now + 2 * 86_400)),
+            reminder_view("once", Some(on_a_weekday(now, 2 * 86_400))),
             reminder_view("old", Some(now - 5 * 86_400)),
             reminder_view("undated", None),
             reminder_view("far", Some(now + 30 * 86_400)),
@@ -3141,8 +3236,12 @@ mod tests {
             .filter(|(id, _)| *id == "daily")
             .map(|(_, at)| *at)
             .collect();
-        assert!(daily_at.len() >= 6, "a turn each day: {daily_at:?}");
-        assert!(daily_at.windows(2).all(|w| w[1] - w[0] == 86_400));
+        // a turn on each weekday of the window (the weekend is left out)
+        assert!(daily_at.len() >= 2, "{daily_at:?}");
+        assert!(daily_at
+            .iter()
+            .all(|t| (t.div_euclid(86_400) + 3).rem_euclid(7) < 5));
+        assert!(daily_at.windows(2).all(|w| (w[1] - w[0]) % 86_400 == 0));
         let once: Vec<_> = tasks.iter().filter(|(id, _)| *id == "once").collect();
         assert_eq!(once.len(), 1);
         for left_out in ["old", "undated", "far", "done"] {
@@ -3185,7 +3284,7 @@ mod tests {
     fn a_task_on_the_calendar_can_be_edited_and_marked_done() {
         let mut app = App::new();
         let now = haste_core::time::now_secs();
-        app.set_reminder_list(vec![reminder_view("rent", Some(now + 3_600))]);
+        app.set_reminder_list(vec![reminder_view("rent", Some(on_a_weekday(now, 3_600)))]);
         press(&mut app, "3");
         assert!(app.on_todos());
         // Enter opens the same popup as for a new one, filled with what it has
@@ -4006,6 +4105,16 @@ mod tests {
         assert!(app.reactions_pending.is_empty());
     }
 
+    /// A time at least `ahead` seconds from `now` that falls on a weekday (the calendar leaves
+    /// the weekend out), whatever day the tests run.
+    fn on_a_weekday(now: i64, ahead: i64) -> i64 {
+        let mut t = now + ahead;
+        while ((t.div_euclid(86_400) + 3).rem_euclid(7)) >= 5 {
+            t += 86_400;
+        }
+        t
+    }
+
     fn log(at: i64, level: &str, event: &str) -> crate::logs::LogLine {
         crate::logs::LogLine {
             at,
@@ -4289,11 +4398,12 @@ mod tests {
                 version: 1,
             },
             tags: vec![],
+            shifted: false,
         };
         app.set_events(vec![
-            e("soon", now + 3600, "confirmed"),
+            e("soon", on_a_weekday(now, 3600), "confirmed"),
             e("far", now + 9 * 86_400, "confirmed"),
-            e("gone", now + 7200, "cancelled"),
+            e("gone", on_a_weekday(now, 7200), "cancelled"),
         ]);
         let ids: Vec<&str> = app
             .agenda()
@@ -4304,6 +4414,133 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, ["soon"]);
+    }
+
+    fn event_view(id: &str, start: i64, minutes: i64, all_day: bool) -> EventView {
+        EventView {
+            event: haste_core::model::Event {
+                id: id.into(),
+                external_id: id.into(),
+                calendar: "c".into(),
+                title: format!("event-{id}"),
+                start_at: start,
+                end_at: start + minutes * 60,
+                all_day,
+                status: "confirmed".into(),
+                attendees: vec![],
+                location: String::new(),
+                description_snippet: String::new(),
+                updated_at: 0,
+                missing_since: None,
+                version: 1,
+            },
+            tags: vec![],
+            shifted: false,
+        }
+    }
+
+    #[test]
+    fn the_calendar_leaves_the_weekend_out_and_h_l_step_between_days() {
+        let mut app = App::new();
+        let now = haste_core::time::now_secs();
+        let first = on_a_weekday(now, 3_600);
+        // a weekday event, the next weekday's, and one on a Saturday
+        let next = on_a_weekday(first + 86_400, 0);
+        let mut saturday = first;
+        while (saturday.div_euclid(86_400) + 3).rem_euclid(7) != 5 {
+            saturday += 86_400;
+        }
+        app.set_events(vec![
+            event_view("a", first, 60, false),
+            event_view("b", next, 60, false),
+            event_view("sat", saturday, 60, false),
+        ]);
+        let ids: Vec<String> = app
+            .agenda()
+            .iter()
+            .filter_map(|r| match r {
+                AgendaItem::Event(e) => Some(e.event.id.clone()),
+                AgendaItem::Task { .. } => None,
+            })
+            .collect();
+        assert!(ids.contains(&"a".to_owned()) && !ids.contains(&"sat".to_owned()));
+        // l goes to the next day that has something, h back
+        press(&mut app, "3");
+        let at = app.calendar_selected;
+        press(&mut app, "l");
+        if ids.contains(&"b".to_owned()) && next != first {
+            assert!(app.calendar_selected > at || app.agenda().len() == 1);
+        }
+        press(&mut app, "h");
+        assert_eq!(app.calendar_selected, at);
+    }
+
+    #[test]
+    fn enter_on_an_event_opens_the_move_popup_and_saving_asks_for_a_local_shift() {
+        let mut app = App::new();
+        let now = haste_core::time::now_secs();
+        let start = on_a_weekday(now, 3_600);
+        app.set_events(vec![
+            event_view("e1", start, 60, false),
+            event_view("all", start, 60, true),
+        ]);
+        press(&mut app, "3");
+        // find the timed event under the cursor
+        while !matches!(app.agenda()[app.calendar_selected], AgendaItem::Event(e) if e.event.id == "e1")
+        {
+            press(&mut app, "j");
+        }
+        assert!(app.handle_key(Key::Enter).is_none());
+        assert_eq!(app.mode, Mode::EventEdit);
+        // a day later, half an hour longer
+        app.handle_key(Key::Up);
+        app.handle_key(Key::Tab);
+        for _ in 0..6 {
+            app.handle_key(Key::Right);
+        }
+        let Some(Effect::ShiftEvent { event_id, times }) = app.handle_key(Key::Enter) else {
+            panic!("expected the shift")
+        };
+        assert_eq!(event_id, "e1");
+        assert_eq!(times, Some((start + 86_400, start + 86_400 + 90 * 60)));
+        assert_eq!(app.mode, Mode::Normal);
+        // Esc leaves it alone
+        app.handle_key(Key::Enter);
+        assert_eq!(app.mode, Mode::EventEdit);
+        assert!(app.handle_key(Key::Esc).is_none());
+        assert_eq!(app.mode, Mode::Normal);
+        // R only does something for an event that was moved
+        assert!(press(&mut app, "R").is_empty());
+        if let Some(e) = app.events.iter_mut().find(|e| e.event.id == "e1") {
+            e.shifted = true;
+        }
+        assert_eq!(
+            press(&mut app, "R"),
+            vec![Effect::ShiftEvent {
+                event_id: "e1".into(),
+                times: None
+            }]
+        );
+    }
+
+    #[test]
+    fn an_all_day_event_has_no_time_to_move() {
+        let mut app = App::new();
+        let now = haste_core::time::now_secs();
+        let day = on_a_weekday(now, 3_600);
+        app.set_events(vec![event_view(
+            "all",
+            day - day.rem_euclid(86_400),
+            24 * 60,
+            true,
+        )]);
+        press(&mut app, "3");
+        if app.agenda().is_empty() {
+            return; // outside today's window in this time zone
+        }
+        app.handle_key(Key::Enter);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.status.contains("all-day"), "{}", app.status);
     }
 
     #[test]

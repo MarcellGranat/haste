@@ -246,6 +246,51 @@ impl Store {
         })
     }
 
+    /// Move or resize an event here only (`None` puts it back as Google has it). The provider's
+    /// times are never changed.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn set_event_override(
+        &self,
+        external_id: &str,
+        times: Option<(i64, i64)>,
+    ) -> StoreResult<()> {
+        let external_id = external_id.to_owned();
+        self.write(move |conn| {
+            match times {
+                Some((start, end)) => conn.execute(
+                    "INSERT INTO event_overrides (external_id, start_at, end_at) VALUES (?1, ?2, ?3) \
+                     ON CONFLICT(external_id) DO UPDATE SET start_at = ?2, end_at = ?3",
+                    rusqlite::params![external_id, start, end],
+                )?,
+                None => conn.execute(
+                    "DELETE FROM event_overrides WHERE external_id = ?1",
+                    [&external_id],
+                )?,
+            };
+            Ok(())
+        })
+    }
+
+    /// The local times of moved events, by the provider's event id: `(start, end)`.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn event_overrides(&self) -> StoreResult<std::collections::HashMap<String, (i64, i64)>> {
+        self.read(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT external_id, start_at, end_at FROM event_overrides")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    (r.get::<_, i64>(1)?, r.get::<_, i64>(2)?),
+                ))
+            })?;
+            Ok(rows.collect::<Result<std::collections::HashMap<_, _>, _>>()?)
+        })
+    }
+
     /// # Errors
     /// Database errors.
     pub fn get_event(&self, id: &str) -> StoreResult<Option<Event>> {

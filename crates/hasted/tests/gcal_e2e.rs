@@ -285,6 +285,66 @@ async fn a_fresh_install_is_engaged_and_reads_nothing_until_released() {
     rig.daemon.shutdown().await;
 }
 
+async fn events_of(rig: &Rig) -> Vec<haste_proto::EventView> {
+    let Response::Events { events } = human(rig, RequestBody::EventsList { from: 0 }).await else {
+        panic!()
+    };
+    events
+}
+
+#[tokio::test]
+async fn an_event_can_be_moved_here_only_by_the_human_and_put_back() {
+    let rig = boot().await;
+    release_and_sync(&rig).await;
+    let before = events_of(&rig).await;
+    let event = before[0].clone();
+    assert!(!event.shifted);
+    let (start, end) = (
+        event.event.start_at + 7_200,
+        event.event.start_at + 7_200 + 1_800,
+    );
+    let shift = |times| RequestBody::EventShift {
+        event_id: event.event.id.clone(),
+        times,
+    };
+    // an agent cannot
+    let token = agent(&rig).await;
+    assert_eq!(
+        code(&call(&rig, &token, shift(Some((start, end)))).await),
+        Some(ErrorCode::Denied)
+    );
+    // nonsense is refused
+    assert_eq!(
+        code(&human(&rig, shift(Some((end, start)))).await),
+        Some(ErrorCode::Validation)
+    );
+    // the human moves it: the list shows the new times, flagged
+    assert!(matches!(
+        human(&rig, shift(Some((start, end)))).await,
+        Response::Done
+    ));
+    let moved = events_of(&rig).await;
+    assert!(moved[0].shifted);
+    assert_eq!(
+        (moved[0].event.start_at, moved[0].event.end_at),
+        (start, end)
+    );
+    // a new read of the calendar leaves it where it was put
+    sync_once(&rig.daemon.state, &rig.connector).await.unwrap();
+    assert_eq!(events_of(&rig).await[0].event.start_at, start);
+    // Google was only read, never written
+    assert!(writes(&rig).is_empty(), "nothing was sent to Google");
+    // and it can be put back
+    assert!(matches!(human(&rig, shift(None)).await, Response::Done));
+    let back = events_of(&rig).await;
+    assert!(!back[0].shifted);
+    assert_eq!(back[0].event.start_at, event.event.start_at);
+    let audit = std::fs::read_to_string(rig.daemon.state.config.data_dir.join("audit.jsonl"))
+        .unwrap_or_default();
+    assert!(audit.contains("event.shift"));
+    rig.daemon.shutdown().await;
+}
+
 #[tokio::test]
 async fn invalid_calendar_proposals_are_refused_at_creation_and_pending_ones_write_nothing() {
     let rig = boot().await;

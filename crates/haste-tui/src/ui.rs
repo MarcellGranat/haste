@@ -61,6 +61,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     if *base == Mode::RemindForm {
         draw_remind(frame, app, frame.area());
     }
+    if *base == Mode::EventEdit {
+        draw_event_edit(frame, app, frame.area());
+    }
     if *base == Mode::Compose {
         let replying = app
             .compose
@@ -1524,112 +1527,396 @@ fn draw_channels(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
+/// One item of the week grid: where it sits and what it says.
+struct Placed {
+    day: usize,
+    start: i64,
+    end: i64,
+    lane: usize,
+    /// How many lanes the group of overlapping items it belongs to has.
+    lanes: usize,
+    label: String,
+    task: bool,
+    shifted: bool,
+    index: usize,
+}
+
+/// Cut or pad a text to exactly `width` display columns.
+fn fit(text: &str, width: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w > width {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push_str(&" ".repeat(width.saturating_sub(used.max(out.width()))));
+    out
+}
+
+/// The calendar as a week: the next seven days without the weekend, one column each, hours
+/// down the side, events and dated TODOs placed by their time, the selected one lit.
 fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     use crate::app::AgendaItem;
     let off = app.tz_offset;
+    let now = haste_core::time::now_secs();
+    let today = inbox::day_start(now, off);
+    let days: Vec<i64> = (0..inbox::AGENDA_DAYS)
+        .map(|d| today + d * 86_400)
+        .filter(|d| (((d + off).div_euclid(86_400) + 3).rem_euclid(7)) < 5)
+        .collect();
     let rows = app.agenda();
-    let mut items: Vec<ListItem<'_>> = Vec::new();
-    let mut position = None;
-    let mut last_day = i64::MIN;
-    for (i, row) in rows.iter().enumerate() {
-        // all-day events are dates (midnight UTC), not moments: never shift them by the offset
-        let all_day = matches!(row, AgendaItem::Event(e) if e.event.all_day);
-        let (day, label) = if all_day {
-            (row.at(), inbox::day_label(row.at(), 0))
-        } else {
-            (
-                inbox::day_start(row.at(), off),
-                inbox::day_label(row.at(), off),
-            )
+    let block = theme::panel(
+        " Calendar · next 7 days without the weekend · h/l day · j/k item · Enter edits ",
+    )
+    .border_style(Style::new().fg(theme::BORDER_ACTIVE));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if days.is_empty() || inner.height < 8 || inner.width < 30 {
+        return;
+    }
+    // place the items: timed ones in the grid, all-day ones in the strip above it
+    let mut placed: Vec<Placed> = Vec::new();
+    let mut all_day: Vec<Vec<String>> = vec![Vec::new(); days.len()];
+    for (index, row) in rows.iter().enumerate() {
+        let at = row.at();
+        let Some(day) = days.iter().position(|d| at >= *d && at < *d + 86_400) else {
+            continue;
         };
-        if day != last_day {
-            last_day = day;
-            items.push(ListItem::new(Line::from(Span::styled(
-                label,
+        match row {
+            AgendaItem::Event(e) if e.event.all_day => {
+                all_day[day].push(inbox::sanitize(&e.event.title).replace('\n', " "));
+            }
+            AgendaItem::Event(e) => placed.push(Placed {
+                day,
+                start: e.event.start_at,
+                end: e.event.end_at.max(e.event.start_at + 1_800),
+                lane: 0,
+                lanes: 1,
+                label: inbox::sanitize(&e.event.title).replace('\n', " "),
+                task: false,
+                shifted: e.shifted,
+                index,
+            }),
+            AgendaItem::Task { reminder, at } => placed.push(Placed {
+                day,
+                start: *at,
+                end: *at + 1_800,
+                lane: 0,
+                lanes: 1,
+                label: inbox::sanitize(&reminder.reminder.title).replace('\n', " "),
+                task: true,
+                shifted: false,
+                index,
+            }),
+        }
+    }
+    // lanes: items that overlap sit side by side; each group of overlapping items is split
+    // among its own lanes, the others keep the whole column
+    for d in 0..days.len() {
+        let mut idx: Vec<usize> = (0..placed.len()).filter(|k| placed[*k].day == d).collect();
+        idx.sort_by_key(|k| placed[*k].start);
+        let mut cluster: Vec<usize> = Vec::new();
+        let mut cluster_end = i64::MIN;
+        let mut ends: Vec<i64> = Vec::new();
+        let close = |cluster: &mut Vec<usize>, ends: &mut Vec<i64>, placed: &mut Vec<Placed>| {
+            let lanes = ends.len().max(1);
+            for k in cluster.drain(..) {
+                placed[k].lanes = lanes;
+            }
+            ends.clear();
+        };
+        for k in idx {
+            if !cluster.is_empty() && placed[k].start >= cluster_end {
+                close(&mut cluster, &mut ends, &mut placed);
+                cluster_end = i64::MIN;
+            }
+            let lane = match ends.iter().position(|e| *e <= placed[k].start) {
+                Some(l) => l,
+                None => {
+                    ends.push(0);
+                    ends.len() - 1
+                }
+            };
+            ends[lane] = placed[k].end;
+            placed[k].lane = lane;
+            cluster_end = cluster_end.max(placed[k].end);
+            cluster.push(k);
+        }
+        close(&mut cluster, &mut ends, &mut placed);
+    }
+    // the hours shown: the working day, wider when something sits outside it
+    let minute_of = |t: i64, day: usize| ((t - days[day]) / 60).clamp(0, 24 * 60);
+    let first = placed
+        .iter()
+        .map(|p| minute_of(p.start, p.day) / 60)
+        .min()
+        .map_or(8, |h| h.min(8));
+    let last = placed
+        .iter()
+        .map(|p| (minute_of(p.end, p.day) + 59) / 60)
+        .max()
+        .map_or(18, |h| h.max(18))
+        .min(24);
+    let strip = all_day.iter().map(Vec::len).max().unwrap_or(0).min(2);
+    let head = 1 + strip;
+    let detail = 2;
+    let grid_h = usize::from(inner.height)
+        .saturating_sub(head + detail)
+        .max(1);
+    let span = usize::try_from((last - first) * 60).unwrap_or(600);
+    let per_row = [15_usize, 30, 60, 120, 240]
+        .into_iter()
+        .find(|m| span.div_ceil(*m) <= grid_h)
+        .unwrap_or(240);
+    let n_rows = span.div_ceil(per_row);
+    let gutter = 6_usize;
+    let width = usize::from(inner.width);
+    let col_w = ((width.saturating_sub(gutter)) / days.len()).max(8);
+    let lane_text = |text: &str, w: usize| fit(text, w);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    // day names
+    let mut head_spans = vec![Span::raw(" ".repeat(gutter))];
+    for (d, day) in days.iter().enumerate() {
+        let label = inbox::day_label(*day, off);
+        let is_today = *day == today;
+        let _ = d;
+        head_spans.push(Span::styled(
+            fit(&format!(" {label}"), col_w),
+            if is_today {
+                Style::new()
+                    .fg(theme::BASE)
+                    .bg(theme::MAUVE)
+                    .add_modifier(Modifier::BOLD)
+            } else {
                 Style::new()
                     .fg(theme::LAVENDER)
-                    .add_modifier(Modifier::BOLD),
-            ))));
-        }
-        if i == app.calendar_selected {
-            position = Some(items.len());
-        }
-        let when = if all_day {
-            "all day".to_owned()
-        } else {
-            inbox::stamp(row.at(), off)[11..].to_owned()
-        };
-        items.push(ListItem::new(match row {
-            AgendaItem::Event(e) => {
-                let tags = if e.tags.is_empty() {
-                    String::new()
-                } else {
-                    format!("  #{}", e.tags.join(" #"))
-                };
-                Line::from(vec![
-                    Span::styled(format!("  {when:<8}"), Style::new().fg(theme::SAPPHIRE)),
-                    Span::styled(e.event.title.clone(), Style::new().fg(theme::TEXT)),
-                    Span::styled(tags, Style::new().fg(theme::MAUVE)),
-                ])
-            }
-            AgendaItem::Task { reminder, .. } => {
-                let tags = if reminder.tags.is_empty() {
-                    String::new()
-                } else {
-                    format!("  #{}", reminder.tags.join(" #"))
-                };
-                let repeat = reminder.repeat.map_or_else(String::new, |r| {
-                    format!(
-                        "  ↻ every {}{}",
-                        if r.every == 1 {
-                            String::new()
-                        } else {
-                            format!("{} ", r.every)
-                        },
-                        r.freq.as_str()
-                    )
-                });
-                let done = app.pending_done.contains_key(&reminder.reminder.id);
-                Line::from(vec![
-                    Span::styled(format!("  {when:<8}"), Style::new().fg(theme::PEACH)),
-                    Span::styled(
-                        if done { "✓ " } else { "☐ " },
-                        Style::new().fg(if done { theme::GREEN } else { theme::PEACH }),
-                    ),
-                    Span::styled(
-                        inbox::sanitize(&reminder.reminder.title).replace('\n', " "),
-                        if done {
-                            Style::new()
-                                .fg(theme::MUTED)
-                                .add_modifier(Modifier::CROSSED_OUT)
-                        } else {
-                            Style::new().fg(theme::TEXT)
-                        },
-                    ),
-                    Span::styled(repeat, Style::new().fg(theme::LAVENDER)),
-                    Span::styled(tags, Style::new().fg(theme::MAUVE)),
-                ])
-            }
-        }));
+                    .add_modifier(Modifier::BOLD)
+            },
+        ));
     }
-    if items.is_empty() {
-        items.push(ListItem::new(Span::styled(
-            "nothing on the calendar for the next 7 days (or Calendar is not authorized yet)",
+    lines.push(Line::from(head_spans));
+    // all-day strip
+    for s in 0..strip {
+        let mut spans = vec![Span::styled(
+            fit(if s == 0 { "all d." } else { "" }, gutter),
             theme::muted(),
-        )));
+        )];
+        for items in &all_day {
+            let text = match items.get(s) {
+                Some(t) if s + 1 == strip && items.len() > strip => {
+                    format!(" {t} +{}", items.len() - strip)
+                }
+                Some(t) => format!(" {t}"),
+                None => String::new(),
+            };
+            spans.push(Span::styled(
+                fit(&text, col_w),
+                Style::new().fg(theme::SAPPHIRE),
+            ));
+        }
+        lines.push(Line::from(spans));
     }
-    let mut state = ListState::default().with_selected(position);
-    frame.render_stateful_widget(
-        List::new(items)
-            .block(
-                theme::panel(" Calendar · next 7 days · local time · events and dated TODOs ")
-                    .border_style(Style::new().fg(theme::BORDER_ACTIVE)),
+    // the grid
+    for r in 0..n_rows.min(grid_h) {
+        let row_start = first * 60 + i64::try_from(r * per_row).unwrap_or(0);
+        let row_end = row_start + i64::try_from(per_row).unwrap_or(60);
+        let on_hour = row_start % 60 == 0;
+        let mut spans = vec![Span::styled(
+            fit(
+                &if on_hour {
+                    format!("{:02}:00", row_start / 60)
+                } else {
+                    String::new()
+                },
+                gutter,
+            ),
+            theme::muted(),
+        )];
+        for (d, _) in days.iter().enumerate() {
+            let inner_w = col_w.saturating_sub(1);
+            spans.push(Span::styled("│", Style::new().fg(theme::SURFACE1)));
+            // the items on this row, left to right
+            let mut hits: Vec<(usize, usize, &Placed)> = placed
+                .iter()
+                .filter(|p| {
+                    p.day == d && minute_of(p.start, d) < row_end && minute_of(p.end, d) > row_start
+                })
+                .map(|p| {
+                    let lane_w = (inner_w / p.lanes).max(1);
+                    let x = p.lane * lane_w;
+                    let w = if p.lane + 1 == p.lanes {
+                        inner_w.saturating_sub(x)
+                    } else {
+                        lane_w
+                    };
+                    (x, w, p)
+                })
+                .collect();
+            hits.sort_by_key(|(x, _, _)| *x);
+            let mut at = 0;
+            for (x, w, p) in hits {
+                if x > at {
+                    spans.push(Span::raw(" ".repeat(x - at)));
+                }
+                let selected = p.index == app.calendar_selected;
+                let begins = minute_of(p.start, d) >= row_start || r == 0;
+                let (_, _, _, h, m) = haste_core::time::to_civil(p.start + off);
+                let text = if begins {
+                    format!(
+                        "{}{}{h:02}:{m:02} {}",
+                        if p.shifted { "↦" } else { "" },
+                        if p.task { "☐ " } else { "" },
+                        p.label
+                    )
+                } else {
+                    String::new()
+                };
+                let style = if selected {
+                    Style::new()
+                        .fg(theme::BASE)
+                        .bg(theme::MAUVE)
+                        .add_modifier(Modifier::BOLD)
+                } else if p.task {
+                    Style::new().fg(theme::PEACH).bg(theme::SURFACE0)
+                } else {
+                    Style::new().fg(theme::TEXT).bg(theme::SURFACE1)
+                };
+                spans.push(Span::styled(lane_text(&text, w), style));
+                at = x + w;
+            }
+            if at < inner_w {
+                spans.push(Span::raw(" ".repeat(inner_w - at)));
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+    // what is selected, in full
+    while lines.len() < head + grid_h {
+        lines.push(Line::default());
+    }
+    let selected = rows.get(app.calendar_selected);
+    let describe = match selected {
+        Some(AgendaItem::Event(e)) if e.event.all_day => format!(
+            "{} · all day · {}",
+            inbox::day_label(e.event.start_at, 0),
+            inbox::sanitize(&e.event.title).replace('\n', " ")
+        ),
+        Some(AgendaItem::Event(e)) => {
+            let end = inbox::stamp(e.event.end_at, off);
+            format!(
+                "{} {}–{} · {}{}",
+                inbox::day_label(e.event.start_at, off),
+                &inbox::stamp(e.event.start_at, off)[11..],
+                &end[11..],
+                inbox::sanitize(&e.event.title).replace('\n', " "),
+                if e.shifted {
+                    " · moved here only · R puts it back"
+                } else {
+                    ""
+                }
             )
-            .highlight_style(theme::selected())
-            .highlight_symbol("▌ "),
-        area,
-        &mut state,
-    );
+        }
+        Some(AgendaItem::Task { reminder, at }) => format!(
+            "{} {} · ☐ {}",
+            inbox::day_label(*at, off),
+            &inbox::stamp(*at, off)[11..],
+            inbox::sanitize(&reminder.reminder.title).replace('\n', " ")
+        ),
+        None => "nothing on the calendar for these days (or Calendar is not authorized yet)".into(),
+    };
+    lines.push(Line::from(Span::styled(
+        "─".repeat(width),
+        Style::new().fg(theme::SURFACE1),
+    )));
+    lines.push(Line::from(Span::styled(
+        fit(&describe, width),
+        Style::new().fg(theme::TEXT),
+    )));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The popup that moves or resizes the selected event here only.
+fn draw_event_edit(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    use crate::eventedit::{Field, Part};
+    let Some(form) = &app.event_form else {
+        return;
+    };
+    let rect = centered(area, 64.min(area.width.saturating_sub(4)), 8);
+    frame.render_widget(Clear, rect);
+    let block = theme::panel(" Move or resize · here only, Google keeps its time ")
+        .border_style(pane_border(true));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let text = Style::new().fg(theme::TEXT);
+    let dim = Style::new().fg(theme::OVERLAY0);
+    let picked = Style::new()
+        .fg(theme::BASE)
+        .bg(theme::MAUVE)
+        .add_modifier(Modifier::BOLD);
+    let label = |name: &str, on: bool| {
+        Span::styled(
+            format!("{} {name:<9}", if on { "▌" } else { " " }),
+            if on {
+                Style::new().fg(theme::MAUVE).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(theme::SUBTEXT0)
+            },
+        )
+    };
+    let (day, hour, minute) = form.start_parts();
+    let part = |s: String, p: Part| {
+        let on = form.field == Field::Start && form.part == p;
+        Span::styled(format!(" {s} "), if on { picked } else { text })
+    };
+    let end = inbox::stamp(form.end(), app.tz_offset);
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("  {}", inbox::sanitize(&form.title)),
+            Style::new()
+                .fg(theme::LAVENDER)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            label("Starts", form.field == Field::Start),
+            part(day, Part::Day),
+            Span::styled("│", dim),
+            part(hour, Part::Hour),
+            Span::styled(":", dim),
+            part(minute, Part::Minute),
+        ]),
+        Line::from(vec![
+            label("Lasts", form.field == Field::Duration),
+            Span::styled(
+                format!(" {} ", form.duration_text()),
+                if form.field == Field::Duration {
+                    picked
+                } else {
+                    text
+                },
+            ),
+            Span::styled(format!("  ends {}", &end[11..]), dim),
+        ]),
+        Line::default(),
+        Line::from(Span::styled(
+            "  Tab start/duration · ←→ part · ↑↓ change · Enter saves · Esc cancels",
+            dim,
+        )),
+        Line::from(Span::styled(
+            if form.shifted {
+                "  R puts it back to Google's time"
+            } else {
+                ""
+            },
+            dim,
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// The opened thread: every message, oldest first, wrapped to the panel and scrollable.
@@ -2254,6 +2541,82 @@ mod tests {
             text.contains("[haste-tui]"),
             "other programs are marked: {text}"
         );
+    }
+
+    #[test]
+    fn the_calendar_is_a_week_grid_of_weekdays_with_events_where_their_time_is() {
+        let mut app = App::new();
+        let now = haste_core::time::now_secs();
+        let weekday = |t: i64| (t.div_euclid(86_400) + 3).rem_euclid(7);
+        let mut day = now - now.rem_euclid(86_400);
+        while weekday(day) >= 5 {
+            day += 86_400;
+        }
+        let at = |h: i64| day + h * 3_600;
+        let ev = |id: &str, start: i64, mins: i64| haste_proto::EventView {
+            event: haste_core::model::Event {
+                id: id.into(),
+                external_id: id.into(),
+                calendar: "c".into(),
+                title: format!("e-{id}"),
+                start_at: start,
+                end_at: start + mins * 60,
+                all_day: false,
+                status: "confirmed".into(),
+                attendees: vec![],
+                location: String::new(),
+                description_snippet: String::new(),
+                updated_at: 0,
+                missing_since: None,
+                version: 1,
+            },
+            tags: vec![],
+            shifted: id == "moved",
+        };
+        // two that overlap share the column; one is far outside the working day
+        app.set_events(vec![
+            ev("one", at(10), 60),
+            ev("two", at(10) + 1_800, 60),
+            ev("late", at(21), 60),
+            ev("moved", at(14), 30),
+        ]);
+        app.view = crate::app::View::Calendar;
+        let text = render(&app);
+        for needle in ["e-late", "e-moved", "10:00", "10:30", "21:00"] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
+        assert!(text.contains("↦"), "a moved event is marked: {text}");
+        assert!(
+            !text.contains("Sat ") && !text.contains("Sun "),
+            "no weekend: {text}"
+        );
+        assert!(text.contains("Enter edits"), "{text}");
+    }
+
+    #[test]
+    fn the_move_popup_shows_the_start_and_the_duration() {
+        let mut app = App::new();
+        app.event_form = Some(Box::new(crate::eventedit::EventForm::new(
+            "e1",
+            "Standup",
+            1_794_744_000,
+            1_794_744_000 + 5_400,
+            true,
+            3_600,
+        )));
+        app.mode = Mode::EventEdit;
+        let text = render(&app);
+        for needle in [
+            "Move or resize",
+            "Standup",
+            "Starts",
+            "Lasts",
+            "1 h 30 min",
+            "Google keeps",
+        ] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
+        assert!(text.contains("R puts it back"), "{text}");
     }
 
     #[test]

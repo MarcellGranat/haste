@@ -7,6 +7,7 @@ pub mod client;
 pub mod compose;
 pub mod editor;
 pub mod emoji;
+pub mod eventedit;
 pub mod extract;
 pub mod inbox;
 pub mod logs;

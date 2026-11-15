@@ -513,6 +513,15 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
             };
             load_rules(app, client);
         }
+        Effect::ShiftEvent { event_id, times } => {
+            app.status = match describe(client.call(RequestBody::EventShift { event_id, times })) {
+                Ok(()) if times.is_some() => {
+                    "moved here only (Google keeps its time); R puts it back".into()
+                }
+                Ok(()) => "back to the times Google has".into(),
+                Err(e) => e,
+            };
+        }
         Effect::DeleteMuted { thread_id } => {
             app.status = match client.call(RequestBody::MutedDelete { thread_id }) {
                 Ok(Response::Deleted { .. }) => {

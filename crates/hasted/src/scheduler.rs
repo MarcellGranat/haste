@@ -193,6 +193,51 @@ pub async fn sync_once(
     }
 }
 
+/// Read the earlier history of the threads waiting for it, one at a time, and store what
+/// comes back. A provider with nothing more to give is not an error.
+pub async fn history_once(state: &Arc<State>, connector: &Arc<dyn Connector>) {
+    use haste_core::connector::{ConnectorError, HistoryRequest};
+    let source = connector.source();
+    for thread_id in state.take_history(&source) {
+        let st = Arc::clone(state);
+        let id = thread_id.clone();
+        let request = tokio::task::spawn_blocking(move || {
+            let (thread, _) = st.store.get_thread(&id).ok().flatten()?;
+            let messages = st.store.messages_for_thread(&id).ok()?;
+            Some(HistoryRequest {
+                thread_external_id: thread.external_id,
+                subject: thread.subject,
+                last_activity_at: thread.last_activity_at,
+                oldest_known_at: messages.iter().map(|m| m.sent_at).min().unwrap_or(0),
+                known: messages.len(),
+            })
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some(request) = request else { continue };
+        let guard = Guarded {
+            connector: connector.as_ref(),
+            hooks: state.as_ref(),
+        };
+        match guard.fetch_thread_history(&request).await {
+            Ok(batch) => {
+                let st = Arc::clone(state);
+                let src = source.clone();
+                let stored =
+                    tokio::task::spawn_blocking(move || store_batch(&st, &src, batch)).await;
+                if let Ok(Ok((_, changed))) = stored {
+                    for id in changed {
+                        state.publish(Event::ThreadChanged { thread_id: id });
+                    }
+                }
+            }
+            Err(CallError::Connector(ConnectorError::Unsupported(_))) => {}
+            Err(_) => state.forget_history(&thread_id),
+        }
+    }
+}
+
 fn store_batch(
     state: &State,
     source: &Source,
@@ -283,11 +328,16 @@ pub async fn sync_loop(
     every: std::time::Duration,
 ) {
     let waker = state.sync_waker(&connector.source());
+    let history = state.history_waker(&connector.source());
     let mut ticker = interval(every);
     loop {
         tokio::select! {
             _ = ticker.tick() => {}
             () = waker.notified() => ticker.reset(),
+            () = history.notified() => {
+                history_once(&state, &connector).await;
+                continue;
+            }
         }
         let _ = sync_once(&state, &connector).await;
     }

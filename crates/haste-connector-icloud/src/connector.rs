@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use haste_core::connector::{
     ArchiveTarget, AttachmentRequest, Batch, BoxFuture, Capabilities, Connector, ConnectorError,
-    Cursor, DraftToSend, SendReceipt,
+    Cursor, DraftToSend, HistoryRequest, SendReceipt,
 };
 use haste_core::model::Source;
 
@@ -75,6 +75,76 @@ fn to_connector_error(failure: ImapFailure) -> ConnectorError {
         ImapFailure::Transient(m) => ConnectorError::Transient(m),
         ImapFailure::Protocol(m) => ConnectorError::Other(m),
     }
+}
+
+/// The most messages one history read keeps (the newest of those found).
+const MAX_HISTORY_MESSAGES: usize = 100;
+
+fn read_history(
+    session: &mut dyn crate::session::MailSession,
+    config: &IcloudConfig,
+    request: &HistoryRequest,
+    wanted: &str,
+) -> Result<Batch, ConnectorError> {
+    let mut folders: Vec<String> = config
+        .effective_folders()
+        .into_iter()
+        .map(|f| f.name)
+        .collect();
+    if !folders.contains(&config.archive_folder) {
+        folders.push(config.archive_folder.clone());
+    }
+    let mut parsed = Vec::new();
+    for folder in folders {
+        let info = match session.examine(&folder) {
+            Ok(info) => info,
+            // a folder that is not there (no Archive yet) is skipped
+            Err(ImapFailure::Protocol(_)) => continue,
+            Err(other) => return Err(to_connector_error(other)),
+        };
+        let mut uids = session
+            .uid_search_subject(wanted)
+            .map_err(to_connector_error)?;
+        let keep = uids.len().saturating_sub(MAX_HISTORY_MESSAGES);
+        uids.drain(..keep);
+        parsed.extend(
+            crate::sync::fetch_parsed(session, &folder, info.uid_validity, &uids)
+                .map_err(to_connector_error)?,
+        );
+    }
+    // a substring match also finds other conversations ("Invoice" in "Invoice 2"): keep the
+    // messages whose whole subject is this one, newest MAX_HISTORY_MESSAGES of them
+    parsed.retain(|m| crate::parse::normalise_subject(&m.subject) == wanted);
+    parsed.sort_by_key(|m| std::cmp::Reverse(m.date));
+    parsed.truncate(MAX_HISTORY_MESSAGES);
+    let mut batch = crate::parse::build_batch(parsed);
+    // everything belongs to the thread that was opened
+    let mut participants = Vec::new();
+    for t in &batch.threads {
+        for p in &t.participants {
+            if !participants.contains(p) {
+                participants.push(p.clone());
+            }
+        }
+    }
+    for m in &mut batch.messages {
+        m.thread_id = request.thread_external_id.clone();
+    }
+    batch.threads = if batch.messages.is_empty() {
+        Vec::new()
+    } else {
+        vec![haste_core::model::Thread {
+            id: String::new(),
+            source: Source::Icloud,
+            external_id: request.thread_external_id.clone(),
+            subject: String::new(), // the stored subject stays
+            participants,
+            last_activity_at: request.last_activity_at,
+            version: 0,
+        }]
+    };
+    batch.next_cursor = None;
+    Ok(batch)
 }
 
 /// Short, secret-free label for the audit entry of a failed cycle.
@@ -210,6 +280,43 @@ impl Connector for IcloudConnector {
 
     fn own_address(&self) -> Option<String> {
         Some(self.config.address.clone())
+    }
+
+    /// The earlier messages of a conversation: every configured folder and the Archive folder
+    /// are searched (read-only) for its subject, the newest [`MAX_HISTORY_MESSAGES`] are read,
+    /// and the ones whose subject is the same conversation's are returned as part of the
+    /// requested thread.
+    fn fetch_thread_history<'a>(
+        &'a self,
+        request: &'a HistoryRequest,
+    ) -> BoxFuture<'a, Result<Batch, ConnectorError>> {
+        Box::pin(async move {
+            let wanted = crate::parse::normalise_subject(&request.subject);
+            if wanted.is_empty() {
+                return Ok(Batch::default());
+            }
+            let password = match self.secrets.get(&self.config.address) {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    return Err(ConnectorError::Checkpoint(
+                        "no app-specific password stored; run the iCloud auth verb".into(),
+                    ))
+                }
+                Err(_) => return Err(ConnectorError::Other("keychain unavailable".into())),
+            };
+            let (config, opener) = (self.config.clone(), Arc::clone(&self.opener));
+            let request = request.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut session = opener
+                    .open(&config, &password)
+                    .map_err(to_connector_error)?;
+                let result = read_history(session.as_mut(), &config, &request, &wanted);
+                session.logout();
+                result
+            })
+            .await
+            .unwrap_or_else(|_| Err(ConnectorError::Transient("history task failed".into())))
+        })
     }
 
     /// Fetch one attachment for the human: find the message in the inbox by its `Message-ID`, read

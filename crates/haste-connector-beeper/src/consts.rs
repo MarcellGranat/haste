@@ -15,6 +15,10 @@ pub const BEEPER_MAX_PAGES_PER_CHAT: usize = 4;
 pub const BEEPER_MAX_CHATS_PER_CYCLE: usize = 50;
 /// Newest messages read for a chat the first time.
 pub const BEEPER_BACKFILL_PER_CHAT: usize = 200;
+/// Opening a chat reads up to this many messages older than the stored ones, within this many
+/// pages counted from the newest.
+pub const BEEPER_HISTORY_EXTRA: usize = 150;
+pub const BEEPER_HISTORY_MAX_PAGES: usize = 10;
 /// A message body is stored cut to this many bytes (at a character boundary).
 pub const BEEPER_BODY_MAX_BYTES: usize = 8 * 1024;
 pub const BEEPER_DEFAULT_HISTORY_DAYS: u32 = 30;

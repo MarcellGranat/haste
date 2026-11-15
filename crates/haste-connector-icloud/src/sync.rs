@@ -70,6 +70,35 @@ pub struct SyncOutcome {
     pub reports: Vec<FolderReport>,
 }
 
+/// Fetch and parse the messages with these UIDs of the open folder, in chunks.
+pub(crate) fn fetch_parsed(
+    session: &mut dyn MailSession,
+    folder: &str,
+    uid_validity: u32,
+    uids: &[u32],
+) -> Result<Vec<ParsedMessage>, ImapFailure> {
+    let mut parsed = Vec::new();
+    for chunk in uids.chunks(FETCH_CHUNK) {
+        for fetch in session.fetch_headers(chunk)? {
+            let body = match &fetch.text {
+                Some(part) => {
+                    let limit = if part.html {
+                        MAX_HTML_BYTES
+                    } else {
+                        MAX_PART_BYTES
+                    };
+                    session.fetch_text_part(fetch.uid, part, limit)?
+                }
+                None => None,
+            };
+            if let Some(m) = parse_message(folder, uid_validity, &fetch, body.as_deref()) {
+                parsed.push(m);
+            }
+        }
+    }
+    Ok(parsed)
+}
+
 fn sync_folder(
     session: &mut dyn MailSession,
     config: &IcloudConfig,
@@ -109,26 +138,7 @@ fn sync_folder(
         all[all.len().saturating_sub(keep)..].to_vec()
     };
 
-    let mut parsed = Vec::new();
-    for chunk in uids.chunks(FETCH_CHUNK) {
-        for fetch in session.fetch_headers(chunk)? {
-            let body = match &fetch.text {
-                Some(part) => {
-                    let limit = if part.html {
-                        MAX_HTML_BYTES
-                    } else {
-                        MAX_PART_BYTES
-                    };
-                    session.fetch_text_part(fetch.uid, part, limit)?
-                }
-                None => None,
-            };
-            if let Some(m) = parse_message(&folder.name, info.uid_validity, &fetch, body.as_deref())
-            {
-                parsed.push(m);
-            }
-        }
-    }
+    let parsed = fetch_parsed(session, &folder.name, info.uid_validity, &uids)?;
     report.new_messages = parsed.len();
     let last_uid = uids.iter().copied().max().or(delta_from).unwrap_or(0);
     Ok((
@@ -193,6 +203,9 @@ mod tests {
             Err(ImapFailure::Protocol("not used".into()))
         }
         fn uid_search_message_id(&mut self, _id: &str) -> Result<Vec<u32>, ImapFailure> {
+            Err(ImapFailure::Protocol("not used".into()))
+        }
+        fn uid_search_subject(&mut self, _subject: &str) -> Result<Vec<u32>, ImapFailure> {
             Err(ImapFailure::Protocol("not used".into()))
         }
         fn uid_move(&mut self, _uids: &[u32], _target: &str) -> Result<(), ImapFailure> {

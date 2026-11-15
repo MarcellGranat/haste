@@ -356,6 +356,10 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
                 {
                     state.wake_sync(&thread.source);
                 }
+                // and its earlier history is read once, if the provider can give it
+                if state.connector_for(&thread.source).is_some() {
+                    state.queue_history(&thread.source, &thread.id);
+                }
                 Response::Done
             }
             Ok(None) => err(ErrorCode::NotFound, "thread not found"),

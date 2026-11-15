@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use haste_core::connector::{
     AttachmentRequest, Batch, BoxFuture, Capabilities, Connector, ConnectorError, Cursor,
-    DraftToSend, SendReceipt,
+    DraftToSend, HistoryRequest, SendReceipt,
 };
 use haste_core::model::{Message, Source, Thread};
 use serde::{Deserialize, Serialize};
@@ -15,8 +15,9 @@ use serde::{Deserialize, Serialize};
 use crate::client::BeeperClient;
 use crate::config::BeeperConfig;
 use crate::consts::{
-    BEEPER_BACKFILL_PER_CHAT, BEEPER_MAX_CHATS_PER_CYCLE, BEEPER_MAX_PAGES_PER_CHAT,
-    BEEPER_MAX_SEND_BYTES, BEEPER_PAGE_SIZE, DAY_SECS,
+    BEEPER_BACKFILL_PER_CHAT, BEEPER_HISTORY_EXTRA, BEEPER_HISTORY_MAX_PAGES,
+    BEEPER_MAX_CHATS_PER_CYCLE, BEEPER_MAX_PAGES_PER_CHAT, BEEPER_MAX_SEND_BYTES, BEEPER_PAGE_SIZE,
+    DAY_SECS,
 };
 pub use crate::mapper::BeeperSource;
 use crate::mapper::{map_message, Mapped};
@@ -233,6 +234,59 @@ impl BeeperConnector {
             ],
         );
         Ok((found, skipped))
+    }
+
+    /// Messages of one chat older than the stored ones: pages are walked from the newest, the
+    /// ones already stored are passed over, and up to [`BEEPER_HISTORY_EXTRA`] older ones are kept.
+    async fn read_history(&self, request: &HistoryRequest) -> Result<Batch, ConnectorError> {
+        let chat_id = request.thread_external_id.as_str();
+        let mut found: Vec<Mapped> = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..BEEPER_HISTORY_MAX_PAGES {
+            let (items, more, next) = self
+                .client
+                .messages(chat_id, BEEPER_PAGE_SIZE, cursor.as_deref())
+                .await?;
+            for wire in &items {
+                if let Some(mapped) = map_message(chat_id, &self.which.source(), wire) {
+                    if request.oldest_known_at == 0 || mapped.timestamp <= request.oldest_known_at {
+                        found.push(mapped);
+                    }
+                }
+            }
+            if found.len() >= BEEPER_HISTORY_EXTRA {
+                break;
+            }
+            match (more, next) {
+                (true, Some(n)) => cursor = Some(n),
+                _ => break,
+            }
+        }
+        let mut batch = Batch::default();
+        if found.is_empty() {
+            return Ok(batch);
+        }
+        found.sort_by_key(|m| std::cmp::Reverse(m.timestamp));
+        found.truncate(BEEPER_HISTORY_EXTRA);
+        let mut participants: Vec<String> = Vec::new();
+        for m in &found {
+            if let Some(s) = &m.message.sender_identifier {
+                if !participants.contains(s) {
+                    participants.push(s.clone());
+                }
+            }
+        }
+        batch.threads.push(Thread {
+            id: String::new(),
+            source: self.which.source(),
+            external_id: chat_id.to_owned(),
+            subject: String::new(), // the stored title stays
+            participants,
+            last_activity_at: request.last_activity_at,
+            version: 0,
+        });
+        batch.messages = found.into_iter().map(|m| m.message).collect();
+        Ok(batch)
     }
 
     async fn run_cycle(&self, cursor: Option<Cursor>) -> Result<Batch, ConnectorError> {
@@ -482,6 +536,13 @@ impl Connector for BeeperConnector {
         draft: &'a DraftToSend,
     ) -> BoxFuture<'a, Result<SendReceipt, ConnectorError>> {
         Box::pin(self.send_text(draft))
+    }
+
+    fn fetch_thread_history<'a>(
+        &'a self,
+        request: &'a HistoryRequest,
+    ) -> BoxFuture<'a, Result<Batch, ConnectorError>> {
+        Box::pin(self.read_history(request))
     }
 
     fn fetch_attachment<'a>(

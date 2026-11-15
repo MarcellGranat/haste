@@ -109,6 +109,13 @@ pub trait MailSession {
     /// # Errors
     /// See [`ImapFailure`].
     fn uid_search_message_id(&mut self, id: &str) -> Result<Vec<u32>, ImapFailure>;
+    /// UIDs of the messages in the open folder whose subject contains `subject` (the server
+    /// matches a substring, case-insensitively). Refused when it holds a quote, a backslash or a
+    /// control character.
+    ///
+    /// # Errors
+    /// See [`ImapFailure`].
+    fn uid_search_subject(&mut self, subject: &str) -> Result<Vec<u32>, ImapFailure>;
     /// Move messages of the open folder into `target` (`UID MOVE`: nothing is deleted).
     ///
     /// # Errors
@@ -456,6 +463,24 @@ impl<T: Read + Write> MailSession for Imap<T> {
             // inbox headers and compare the Message-ID here instead
             uids = self.scan_message_id(id)?;
         }
+        uids.sort_unstable();
+        Ok(uids)
+    }
+
+    fn uid_search_subject(&mut self, subject: &str) -> Result<Vec<u32>, ImapFailure> {
+        if subject.is_empty()
+            || subject
+                .chars()
+                .any(|c| c.is_control() || c == '"' || c == '\\')
+        {
+            return Err(ImapFailure::Protocol("search: unusable subject".into()));
+        }
+        let mut uids: Vec<u32> = self
+            .session
+            .uid_search(format!("SUBJECT \"{subject}\""))
+            .map_err(|e| classify(&e, Stage::Search))?
+            .into_iter()
+            .collect();
         uids.sort_unstable();
         Ok(uids)
     }

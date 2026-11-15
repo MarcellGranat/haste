@@ -11,7 +11,7 @@ use haste_connector_icloud::testing::{
 };
 use haste_connector_icloud::{CycleAudit, IcloudConnector};
 use haste_core::connector::{
-    CallError, Connector, ConnectorError, Cursor, DraftToSend, Guarded, Hooks,
+    CallError, Connector, ConnectorError, Cursor, DraftToSend, Guarded, HistoryRequest, Hooks,
     TRANSIENT_ATTEMPTS_PER_CYCLE,
 };
 use haste_core::model::Source;
@@ -668,4 +668,64 @@ async fn plain_text_wins_and_html_is_fetched_only_when_there_is_no_plain_part() 
         .messages
         .iter()
         .any(|m| m.body_text.contains("tracker.example")));
+}
+
+#[tokio::test]
+async fn opening_a_thread_reads_its_older_messages_from_every_folder() {
+    let msg = |uid: u32, subject: &str| TestMessage::simple(uid, subject, "", "BODY");
+    let r = rig_with(
+        state(
+            vec![
+                (
+                    "INBOX",
+                    42,
+                    vec![
+                        msg(5, "Invoice 5"),
+                        msg(6, "Re: Invoice 5"),
+                        msg(7, "Invoice 55"),
+                    ],
+                ),
+                (
+                    "Archive",
+                    9,
+                    vec![msg(1, "Invoice 5"), msg(2, "Other topic")],
+                ),
+            ],
+            PASSWORD,
+        ),
+        |_| {},
+    );
+    let request = HistoryRequest {
+        thread_external_id: "m5@example.org".into(),
+        subject: "Re: Invoice 5".into(),
+        last_activity_at: 1_700_000_000,
+        oldest_known_at: 1_700_000_000,
+        known: 2,
+    };
+    let batch = r.connector.fetch_thread_history(&request).await.unwrap();
+    // the same conversation from INBOX and Archive; "Invoice 55" and "Other topic" stay out
+    let mut ids: Vec<&str> = batch
+        .messages
+        .iter()
+        .map(|m| m.external_id.as_str())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["m1@example.org", "m5@example.org", "m6@example.org"]);
+    assert!(batch
+        .messages
+        .iter()
+        .all(|m| m.thread_id == "m5@example.org"));
+    assert_eq!(batch.threads.len(), 1);
+    assert_eq!(batch.threads[0].external_id, "m5@example.org");
+    assert_eq!(batch.threads[0].last_activity_at, 1_700_000_000);
+    assert!(
+        batch.next_cursor.is_none(),
+        "a history read never moves the cursor"
+    );
+    // read-only: nothing is changed in the mailbox
+    let cmds = commands(&r).join("\n");
+    assert!(
+        !cmds.contains("STORE") && !cmds.contains("MOVE") && !cmds.contains("EXPUNGE"),
+        "{cmds}"
+    );
 }

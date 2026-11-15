@@ -98,6 +98,15 @@ pub struct State {
     sync_wakers: Mutex<HashMap<Source, Arc<Notify>>>,
     /// When each source was last woken by a thread being opened.
     refreshed: Mutex<RefreshGate>,
+    /// Threads whose earlier history was asked for (once each per run), and the ones waiting.
+    history: Mutex<HistoryQueue>,
+    history_wakers: Mutex<HashMap<Source, Arc<Notify>>>,
+}
+
+#[derive(Default)]
+struct HistoryQueue {
+    done: HashSet<String>,
+    waiting: HashMap<Source, Vec<String>>,
 }
 
 /// Remembers when each source was last woken, so opening threads cannot hammer a provider.
@@ -135,6 +144,8 @@ impl State {
             reminders_helper: RwLock::new(None),
             sync_wakers: Mutex::new(HashMap::new()),
             refreshed: Mutex::new(RefreshGate::default()),
+            history: Mutex::new(HistoryQueue::default()),
+            history_wakers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -156,6 +167,54 @@ impl State {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .due(source, std::time::Instant::now())
+    }
+
+    /// The wake-up for a source's history reads.
+    #[must_use]
+    pub fn history_waker(&self, source: &Source) -> Arc<Notify> {
+        let mut wakers = self
+            .history_wakers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(wakers.entry(source.clone()).or_default())
+    }
+
+    /// Ask for the earlier messages of a thread: once per thread per run. Returns whether it
+    /// was queued (false when it was asked for before).
+    pub fn queue_history(&self, source: &Source, thread_id: &str) -> bool {
+        let mut q = self
+            .history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !q.done.insert(thread_id.to_owned()) {
+            return false;
+        }
+        q.waiting
+            .entry(source.clone())
+            .or_default()
+            .push(thread_id.to_owned());
+        drop(q);
+        self.history_waker(source).notify_one();
+        true
+    }
+
+    /// The threads waiting for a history read of this source.
+    pub fn take_history(&self, source: &Source) -> Vec<String> {
+        self.history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .waiting
+            .remove(source)
+            .unwrap_or_default()
+    }
+
+    /// A history read failed in a way worth trying again on the next open.
+    pub fn forget_history(&self, thread_id: &str) {
+        self.history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .done
+            .remove(thread_id);
     }
 
     /// Ask a source's sync loop to run a cycle now (a permit is kept if it is busy).

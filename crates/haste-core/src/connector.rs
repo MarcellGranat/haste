@@ -80,6 +80,19 @@ pub struct AttachmentRequest {
     pub bytes: u64,
 }
 
+/// Which thread to read the earlier history of: what the daemon already stores of it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HistoryRequest {
+    pub thread_external_id: String,
+    pub subject: String,
+    /// The thread's last activity, so older messages never move it back.
+    pub last_activity_at: i64,
+    /// The sent time of the oldest stored message (0 when none).
+    pub oldest_known_at: i64,
+    /// How many messages are stored.
+    pub known: usize,
+}
+
 /// The biggest attachment fetched for saving or previewing.
 pub const MAX_FETCH_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 
@@ -224,6 +237,16 @@ pub trait Connector: Send + Sync {
         _request: &'a AttachmentRequest,
     ) -> BoxFuture<'a, Result<Vec<u8>, ConnectorError>> {
         Box::pin(async { Err(ConnectorError::Unsupported("attachments".into())) })
+    }
+
+    /// Read messages of one thread that are older than the stored ones (read-only), as a batch
+    /// with no cursor. The human's opening of the thread asks for it, once per thread. Default:
+    /// unsupported (the provider already gives whole threads, or has no history to page).
+    fn fetch_thread_history<'a>(
+        &'a self,
+        _request: &'a HistoryRequest,
+    ) -> BoxFuture<'a, Result<Batch, ConnectorError>> {
+        Box::pin(async { Err(ConnectorError::Unsupported("thread history".into())) })
     }
 
     /// Create a draft at the provider without sending it. `draft.thread_id` carries the
@@ -540,6 +563,29 @@ impl Guarded<'_> {
             }
             Err(e) => {
                 self.hooks.audit("attachment.fetch", &source, "error");
+                Err(CallError::Connector(e))
+            }
+        }
+    }
+
+    /// Read the earlier history of a thread (read-only, one attempt).
+    ///
+    /// # Errors
+    /// See [`CallError`]; `Unsupported` means the provider has nothing more to give.
+    pub async fn fetch_thread_history(&self, request: &HistoryRequest) -> Result<Batch, CallError> {
+        self.precheck(self.connector.capabilities().read, "thread.history")?;
+        let source = self.connector.source();
+        match self.connector.fetch_thread_history(request).await {
+            Ok(batch) => {
+                self.hooks.audit("thread.history", &source, "ok");
+                Ok(batch)
+            }
+            Err(e @ (ConnectorError::Challenge(_) | ConnectorError::Checkpoint(_))) => {
+                Err(self.trip("thread.history", e))
+            }
+            Err(e @ ConnectorError::Unsupported(_)) => Err(CallError::Connector(e)),
+            Err(e) => {
+                self.hooks.audit("thread.history", &source, "error");
                 Err(CallError::Connector(e))
             }
         }

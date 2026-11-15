@@ -283,6 +283,31 @@ fn handle(stream: TcpStream, state: &Arc<Mutex<FakeState>>) {
                     .unwrap_or_default();
                 let raw_query = rest[6..].trim().to_owned();
                 let query = raw_query.to_uppercase();
+                if query.starts_with("SUBJECT ") {
+                    // `SUBJECT "<needle>"`: messages whose subject contains the needle
+                    let needle = raw_query.split('"').nth(1).unwrap_or("").to_lowercase();
+                    let list = selected
+                        .as_ref()
+                        .and_then(|n| st.folders.get(n))
+                        .map(|f| {
+                            f.messages
+                                .iter()
+                                .filter(|m| {
+                                    m.headers
+                                        .to_lowercase()
+                                        .lines()
+                                        .any(|l| l.starts_with("subject:") && l.contains(&needle))
+                                })
+                                .map(|m| m.uid.to_string())
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
+                        .unwrap_or_default();
+                    let _ = writer.write_all(
+                        format!("* SEARCH {list}\r\n{tag} OK SEARCH completed\r\n").as_bytes(),
+                    );
+                    continue;
+                }
                 if query.starts_with("HEADER MESSAGE-ID ") {
                     // `HEADER Message-ID "<needle>"`: messages whose headers contain the needle
                     let needle = raw_query.split('"').nth(1).unwrap_or("").to_lowercase();

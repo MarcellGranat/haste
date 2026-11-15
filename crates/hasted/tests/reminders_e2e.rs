@@ -72,7 +72,13 @@ impl Helper for FakeHelper {
                 reminders: list.clone(),
                 has_more: false,
             }),
-            RemindersRequest::CreateReminder { title, notes, .. } => {
+            RemindersRequest::CreateReminder {
+                title,
+                notes,
+                repeat,
+                due,
+                ..
+            } => {
                 if mode == Mode::TimeOutOnWrite {
                     // the write may or may not have happened
                     return Err(HelperError::TimedOut);
@@ -81,6 +87,8 @@ impl Helper for FakeHelper {
                 *n += 1;
                 let mut r = wire(&format!("new-{n}"), title);
                 r.notes = notes.clone().unwrap_or_default();
+                r.repeat = *repeat;
+                r.due = *due;
                 list.push(r.clone());
                 Ok(RemindersResponse::CreateReminder { reminder: r })
             }
@@ -104,10 +112,17 @@ impl Helper for FakeHelper {
                 external_id,
                 title,
                 append_notes,
+                repeat,
+                set_repeat,
+                due,
                 ..
             } => match list.iter_mut().find(|r| &r.external_id == external_id) {
                 Some(r) => {
                     r.title = title.clone();
+                    r.due = *due;
+                    if *set_repeat {
+                        r.repeat = *repeat;
+                    }
                     if let Some(extra) = append_notes {
                         r.notes = format!("{}{extra}", r.notes);
                     }

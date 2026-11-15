@@ -108,6 +108,8 @@ pub struct RemindForm {
     repeat_touched: bool,
     /// What the thread's subject says about a date (used when the title says nothing).
     subject_due: Option<i64>,
+    /// An edited TODO's date and repeat before the edit: kept when the title says nothing.
+    original: Option<(Option<i64>, Option<RepeatRule>)>,
     now: i64,
     off: i64,
 }
@@ -147,6 +149,7 @@ impl RemindForm {
             date_touched: false,
             repeat_touched: false,
             subject_due: when.due,
+            original: None,
             now,
             off,
         };
@@ -173,13 +176,10 @@ impl RemindForm {
         form.edit_id = Some(todo.reminder.id.clone());
         form.tags_before = todo.tags.clone();
         form.title = todo.reminder.title.clone();
-        form.due = todo.reminder.due_at;
-        form.repeat = todo.repeat;
-        // what it has is kept until it is changed by hand
-        form.date_touched = true;
-        form.repeat_touched = true;
-        form.due_from_title = false;
-        form.repeat_from_title = false;
+        form.original = Some((todo.reminder.due_at, todo.repeat));
+        // the words of the title set the date and the repeat (also as it opens); without
+        // words the TODO keeps what it has, until it is changed by hand
+        form.reread();
         form
     }
 
@@ -197,13 +197,20 @@ impl RemindForm {
     fn reread(&mut self) {
         let when = smartdate::parse(&self.title, self.now, self.off);
         if !self.date_touched {
-            self.due = when
-                .due
-                .or(self.subject_due)
-                .or_else(|| Some(inbox::tomorrow_morning(self.now, self.off)));
+            self.due = match self.original {
+                // an edit: the words win, else what the TODO had
+                Some((due, _)) => when.due.or(due),
+                None => when
+                    .due
+                    .or(self.subject_due)
+                    .or_else(|| Some(inbox::tomorrow_morning(self.now, self.off))),
+            };
         }
         if !self.repeat_touched {
-            self.repeat = when.repeat;
+            self.repeat = match self.original {
+                Some((_, repeat)) => when.repeat.or(repeat),
+                None => when.repeat,
+            };
         }
         self.due_from_title = !self.date_touched && when.due.is_some();
         self.repeat_from_title = !self.repeat_touched && when.repeat.is_some();
@@ -698,9 +705,18 @@ mod tests {
         assert_eq!(f.repeat.map(|r| r.freq), Some(RepeatFreq::Month));
         // the labels it has are on, and one it had that is no longer known is still listed
         assert!(f.labels.iter().any(|(l, on)| l == "work" && *on));
-        // typing words in the title does not move a date that was already set
-        type_text(&mut f, " tomorrow");
+        assert!(!f.due_from_title);
+        // words typed in the title move the date, as for a new one
+        type_text(&mut f, " tomorrow 11:00");
+        assert_eq!(f.due, Some(at(16, 11, 0)));
+        assert!(f.due_from_title);
+        // and without them it goes back to what it had
+        for _ in 0..15 {
+            f.handle(Key::Backspace);
+        }
         assert_eq!(f.due, Some(at(20, 8, 15)));
+        assert_eq!(f.repeat.map(|r| r.freq), Some(RepeatFreq::Month));
+        type_text(&mut f, " tomorrow");
         f.field = Field::Notes;
         type_text(&mut f, "bring ID");
         let Outcome::Save(task) = f.handle(Key::Enter) else {
@@ -709,6 +725,7 @@ mod tests {
         assert_eq!(task.reminder_id.as_deref(), Some("r1"));
         assert_eq!(task.tags_before, vec!["work".to_owned()]);
         assert_eq!(task.title, "Pay rent tomorrow");
+        assert_eq!(task.due, Some(at(16, 9, 0)));
         assert_eq!(task.notes, "bring ID");
         assert!(task.thread_id.is_none());
     }

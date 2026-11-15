@@ -78,6 +78,7 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::ConnectorEngage { .. }
         | RequestBody::ConnectorResync { .. }
         | RequestBody::AttachmentSave { .. }
+        | RequestBody::ReactionAdd { .. }
         | RequestBody::ConnectorAuthorized { .. }
         | RequestBody::TagAdd { .. }
         | RequestBody::TagRemove { .. }
@@ -117,6 +118,7 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::ConnectorEngage { .. } => "connector_engage",
         RequestBody::ConnectorResync { .. } => "connector_resync",
         RequestBody::AttachmentSave { .. } => "attachment_save",
+        RequestBody::ReactionAdd { .. } => "reaction_add",
         RequestBody::ConnectorAuthorized { .. } => "connector_authorized",
         RequestBody::RegisterPrincipal { .. } => "register_principal",
         RequestBody::RevokeToken { .. } => "revoke_token",
@@ -611,6 +613,9 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             index,
             dir,
         } => attachment_save(state, principal, &message_id, index, dir.as_deref()),
+        RequestBody::ReactionAdd { message_id, key } => {
+            reaction_add(state, principal, &message_id, &key)
+        }
         RequestBody::ConnectorEngage { source } => set_switch(state, principal, &source, true),
         RequestBody::ConnectorAuthorized { source } => {
             state.audit(
@@ -1591,6 +1596,84 @@ fn connector_status(state: &State) -> Response {
 /// Fetch one attachment of a stored message from its provider and write it as a plain file: into
 /// `dir` (an absolute folder the human picked) or into the private preview folder. Never
 /// overwrites. The audit has the source and the size, never a file name.
+/// The human reacts to a chat message: sent through the network once, never retried; the stored
+/// message then shows the reaction at once (the next read of the chat confirms it).
+fn reaction_add(state: &State, actor: &Principal, message_id: &str, key: &str) -> Response {
+    let fail = |code: ErrorCode, msg: &str| err(code, msg);
+    if !haste_core::reactions::valid_key(key) {
+        return fail(ErrorCode::Validation, "not a usable reaction");
+    }
+    let message = match state.store.get_message(message_id) {
+        Ok(Some(m)) => m,
+        Ok(None) => return fail(ErrorCode::NotFound, "message not found"),
+        Err(e) => return map_store(&e),
+    };
+    let thread = match state.store.get_thread(&message.thread_id) {
+        Ok(Some((t, _))) => t,
+        _ => return fail(ErrorCode::NotFound, "thread not found"),
+    };
+    let Some(connector) = state.connector_for(&message.source) else {
+        return fail(
+            ErrorCode::Validation,
+            "no connector is registered for this source",
+        );
+    };
+    let request = haste_core::connector::ReactionRequest {
+        thread_external_id: thread.external_id.clone(),
+        message_external_id: message.external_id.clone(),
+        key: key.trim().to_owned(),
+    };
+    let guard = Guarded {
+        connector: connector.as_ref(),
+        hooks: state,
+    };
+    let source = message.source.as_name();
+    match tokio::runtime::Handle::current().block_on(guard.add_reaction(&request)) {
+        Ok(()) => {
+            let mut updated = message.clone();
+            updated.body_text = haste_core::reactions::add_key(&message.body_text, key);
+            let _ = state.store.upsert_message(&updated);
+            state.audit(
+                &actor.id,
+                "reaction.add",
+                "sent",
+                Some(message_id),
+                Some(&format!("source={source}")),
+            );
+            state.publish(Event::ThreadChanged {
+                thread_id: message.thread_id,
+            });
+            Response::Done
+        }
+        Err(e) => {
+            let reason = match &e {
+                CallError::KillSwitchEngaged => {
+                    "the connector is stopped; release it to react".to_owned()
+                }
+                CallError::Connector(ConnectorError::Unsupported(_)) => {
+                    "reactions are only for chats".to_owned()
+                }
+                CallError::Connector(ConnectorError::Other(m))
+                | CallError::Connector(ConnectorError::Authorization(m)) => {
+                    m.chars().take(200).collect()
+                }
+                CallError::Connector(ConnectorError::Ambiguous(_)) => {
+                    "the reaction may or may not have arrived; look in the chat".to_owned()
+                }
+                _ => "the chat network refused the reaction".to_owned(),
+            };
+            state.audit(
+                &actor.id,
+                "reaction.add",
+                "failed",
+                Some(message_id),
+                Some(&format!("source={source}")),
+            );
+            fail(ErrorCode::Internal, &reason)
+        }
+    }
+}
+
 fn attachment_save(
     state: &State,
     actor: &Principal,

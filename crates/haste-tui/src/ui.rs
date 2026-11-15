@@ -34,8 +34,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     if let Mode::Detail(id) = &app.mode {
         draw_detail(frame, app, id, body);
     }
-    if matches!(app.mode, Mode::Read | Mode::Attachments | Mode::Preview) {
+    if matches!(
+        app.mode,
+        Mode::Read | Mode::Attachments | Mode::Preview | Mode::React { .. }
+    ) {
         draw_reader(frame, app, body);
+    }
+    if matches!(app.mode, Mode::React { .. }) {
+        draw_reactions(frame, frame.area());
     }
     if matches!(app.mode, Mode::Attachments | Mode::Preview) {
         draw_attachments(frame, app, frame.area());
@@ -254,6 +260,25 @@ fn draw_compose(frame: &mut Frame<'_>, app: &App, area: Rect, docked: bool) {
 
 /// The attachments of the message under the cursor; while choosing where to save, the folder
 /// picker on top.
+fn draw_reactions(frame: &mut Frame<'_>, area: Rect) {
+    let rect = centered(area, 46, 5.min(area.height));
+    frame.render_widget(Clear, rect);
+    let block = theme::panel(" React · 1-8 sends · Esc ").border_style(pane_border(true));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let line: Vec<Span<'static>> = crate::app::REACTIONS
+        .iter()
+        .enumerate()
+        .flat_map(|(i, e)| {
+            [
+                Span::styled(format!("{} ", i + 1), Style::new().fg(theme::MUTED)),
+                Span::raw(format!("{e}  ")),
+            ]
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(Line::from(line)), inner);
+}
+
 fn draw_attachments(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(menu) = &app.attach else {
         return;
@@ -970,7 +995,7 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
     reader.scroll.set(scroll);
     *reader.links.borrow_mut() = laid.iter().flat_map(|l| l.links.clone()).collect();
     let hint =
-        " j/k message · a attachments · x fold · o older · r reply · n note · l label · e archive · Esc ";
+        " j/k message · a attachments · + react · x fold · o older · r reply · n note · l label · e archive · Esc ";
     frame.render_widget(
         Paragraph::new(lines)
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))

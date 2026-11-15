@@ -97,6 +97,9 @@ pub struct Reader {
     pub links: std::cell::RefCell<Vec<(String, String)>>,
 }
 
+/// The reactions offered by `+` in the reader, in the order of the digit keys.
+pub const REACTIONS: [&str; 8] = ["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "🎉"];
+
 /// How many of the newest messages of a thread the reader shows at first, and how many more
 /// each press of `o` adds.
 pub const READER_WINDOW: usize = 6;
@@ -202,6 +205,11 @@ pub enum Effect {
         thread_id: String,
     },
     /// New messages arrived for the thread that is open: fetch it again, keeping the place.
+    /// React to a chat message with an emoji (the daemon sends it once, never retried).
+    React {
+        message_id: String,
+        key: String,
+    },
     ReloadThread {
         thread_id: String,
     },
@@ -276,6 +284,10 @@ pub enum Effect {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
     Normal,
+    /// Picking an emoji to react to a chat message (`+` in the reader).
+    React {
+        message_id: String,
+    },
     /// Typing a filter after `/`.
     Filter,
     Detail(String),
@@ -988,6 +1000,7 @@ impl App {
             Mode::Read => self.key_read(key),
             Mode::Compose => self.key_compose(key),
             Mode::Label => self.key_label(key),
+            Mode::React { message_id } => self.key_react(key, &message_id),
             Mode::Attachments => self.key_attachments(key),
             Mode::Preview => self.key_preview(key),
             Mode::Snooze { thread_id, input } => self.key_snooze(key, thread_id, input),
@@ -1442,7 +1455,12 @@ impl App {
             return;
         };
         messages.sort_by_key(|m| m.sent_at);
-        if messages.len() == reader.messages.len() {
+        let unchanged = messages.len() == reader.messages.len()
+            && messages
+                .iter()
+                .zip(&reader.messages)
+                .all(|(a, b)| a.id == b.id && a.body_text == b.body_text);
+        if unchanged {
             return;
         }
         let was_last = reader.selected + 1 >= reader.messages.len();
@@ -1455,6 +1473,26 @@ impl App {
         };
         reader.messages = messages;
         reader.selected = reader.selected.max(reader.first_visible());
+    }
+
+    /// Keys while choosing a reaction: a digit sends that emoji, Esc goes back.
+    fn key_react(&mut self, key: Key, message_id: &str) -> Option<Effect> {
+        match key {
+            Key::Char(c) if c.is_ascii_digit() => {
+                self.mode = Mode::Read;
+                let pick = usize::try_from(c.to_digit(10)?.checked_sub(1)?).ok()?;
+                let emoji = REACTIONS.get(pick)?;
+                self.status = format!("reacting {emoji} …");
+                Some(Effect::React {
+                    message_id: message_id.to_owned(),
+                    key: (*emoji).to_owned(),
+                })
+            }
+            _ => {
+                self.mode = Mode::Read;
+                None
+            }
+        }
     }
 
     /// Keys in the attachment menu: move, `p` preview, Enter or `d` download the one, `D` or `A`
@@ -1603,6 +1641,13 @@ impl App {
                     );
                 }
             }
+            Key::Char('+') => match reader.messages.get(reader.selected).map(|m| m.id.clone()) {
+                Some(_) if self.thread_is_mail(&thread_id) => {
+                    self.status = "reactions are for chats, not mail".into();
+                }
+                Some(message_id) => self.mode = Mode::React { message_id },
+                None => {}
+            },
             Key::Char('x') => {
                 if let Some(id) = reader.messages.get(reader.selected).map(|m| m.id.clone()) {
                     if !reader.expanded.remove(&id) {
@@ -2946,6 +2991,38 @@ mod tests {
                 attachments: vec![std::path::PathBuf::from("/a/report.pdf")],
             })
         );
+    }
+
+    #[test]
+    fn plus_picks_a_reaction_for_a_chat_message_and_never_for_mail() {
+        let mut app = App::new();
+        let mail = mail_thread("t1", "Quarterly plan", &["a@x.com"], 10);
+        let mut chat = mail_thread("t3", "Ana", &["a@x.com"], 30);
+        chat.thread.source = haste_core::model::Source::Whatsapp;
+        app.set_threads(vec![mail.clone(), chat.clone()]);
+        // mail: refused, nothing to pick
+        app.show_thread(mail, vec![message("m1", "a@x.com", "hi", 10)], None);
+        assert!(press(&mut app, "+").is_empty());
+        assert_eq!(app.mode, Mode::Read);
+        assert!(app.status.contains("chats"), "{}", app.status);
+        // chat: the picker opens and a digit sends that emoji for the selected message
+        app.show_thread(chat, vec![message("m1", "a@x.com", "hi", 10)], None);
+        assert!(press(&mut app, "+").is_empty());
+        assert!(matches!(app.mode, Mode::React { .. }));
+        assert_eq!(
+            press(&mut app, "2"),
+            vec![Effect::React {
+                message_id: "m1".into(),
+                key: "❤️".into()
+            }]
+        );
+        assert_eq!(app.mode, Mode::Read);
+        // an unknown digit and Esc send nothing
+        press(&mut app, "+");
+        assert!(press(&mut app, "9").is_empty());
+        press(&mut app, "+");
+        assert!(press(&mut app, "0").is_empty());
+        assert_eq!(app.mode, Mode::Read);
     }
 
     #[test]

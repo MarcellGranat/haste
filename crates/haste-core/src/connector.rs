@@ -93,6 +93,15 @@ pub struct HistoryRequest {
     pub known: usize,
 }
 
+/// A reaction the human adds to a message of a chat.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReactionRequest {
+    pub thread_external_id: String,
+    pub message_external_id: String,
+    /// An emoji (or the network's short name for one).
+    pub key: String,
+}
+
 /// The biggest attachment fetched for saving or previewing.
 pub const MAX_FETCH_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 
@@ -237,6 +246,14 @@ pub trait Connector: Send + Sync {
         _request: &'a AttachmentRequest,
     ) -> BoxFuture<'a, Result<Vec<u8>, ConnectorError>> {
         Box::pin(async { Err(ConnectorError::Unsupported("attachments".into())) })
+    }
+
+    /// Add the human's reaction to a message. One attempt, never retried. Default: unsupported.
+    fn add_reaction<'a>(
+        &'a self,
+        _request: &'a ReactionRequest,
+    ) -> BoxFuture<'a, Result<(), ConnectorError>> {
+        Box::pin(async { Err(ConnectorError::Unsupported("reactions".into())) })
     }
 
     /// Read messages of one thread that are older than the stored ones (read-only), as a batch
@@ -563,6 +580,30 @@ impl Guarded<'_> {
             }
             Err(e) => {
                 self.hooks.audit("attachment.fetch", &source, "error");
+                Err(CallError::Connector(e))
+            }
+        }
+    }
+
+    /// Add a reaction after the human asked for it: one attempt, never retried (a repeat could
+    /// toggle it off). Gated like a send.
+    ///
+    /// # Errors
+    /// See [`CallError`].
+    pub async fn add_reaction(&self, request: &ReactionRequest) -> Result<(), CallError> {
+        self.precheck(self.connector.capabilities().send, "reaction.add")?;
+        let source = self.connector.source();
+        match self.connector.add_reaction(request).await {
+            Ok(()) => {
+                self.hooks.audit("reaction.add", &source, "ok");
+                Ok(())
+            }
+            Err(e @ (ConnectorError::Challenge(_) | ConnectorError::Checkpoint(_))) => {
+                Err(self.trip("reaction.add", e))
+            }
+            Err(e @ ConnectorError::Unsupported(_)) => Err(CallError::Connector(e)),
+            Err(e) => {
+                self.hooks.audit("reaction.add", &source, "error");
                 Err(CallError::Connector(e))
             }
         }

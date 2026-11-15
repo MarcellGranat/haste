@@ -357,6 +357,14 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 }
             }
         }
+        Effect::React { message_id, key } => {
+            app.status = match client.call(RequestBody::ReactionAdd { message_id, key }) {
+                Ok(Response::Done) => "reaction sent".into(),
+                other => describe(other)
+                    .err()
+                    .unwrap_or_else(|| "could not react".into()),
+            };
+        }
         Effect::ReloadThread { thread_id } => {
             if let Ok(Response::Thread { messages, .. }) =
                 client.call(RequestBody::ThreadShow { thread_id })

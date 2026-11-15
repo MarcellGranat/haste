@@ -10,7 +10,7 @@ use haste_core::policy::PrincipalKind;
 use haste_core::proposal::{Payload, Proposal, ProposalState};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 /// Largest frame either side accepts.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
@@ -163,6 +163,12 @@ pub enum RequestBody {
     },
     ConnectorEngage {
         source: String,
+    },
+    /// Human-only: react to a stored chat message with an emoji (sent through the chat network,
+    /// once, never retried).
+    ReactionAdd {
+        message_id: String,
+        key: String,
     },
     /// Human-only: fetch one attachment of a stored message from its provider and write it to
     /// `dir` (an absolute folder), or, with no `dir`, to the daemon's private preview folder.

@@ -492,6 +492,60 @@ impl BeeperClient {
     }
 }
 
+impl BeeperClient {
+    /// Add one reaction to a message: exactly one request, never retried (a second one could
+    /// toggle it off). Failures that delivered nothing are `Authorization`/`Other`; a transport
+    /// failure or a 5xx may have reached the network and is `Ambiguous`.
+    ///
+    /// # Errors
+    /// Classified [`ConnectorError`].
+    pub async fn add_reaction(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        key: &str,
+    ) -> Result<(), ConnectorError> {
+        let token = self.token()?;
+        let response = self
+            .http
+            .post(self.url(&["v1", "chats", chat_id, "messages", message_id, "reactions"]))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "reactionKey": key }))
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_connect() {
+                    ConnectorError::Authorization(NOT_RUNNING.into())
+                } else {
+                    ConnectorError::Ambiguous("reaction outcome unknown".into())
+                }
+            })?;
+        let status = response.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            self.forget();
+            return Err(ConnectorError::Authorization(TOKEN_REJECTED.into()));
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(ConnectorError::Checkpoint(
+                "Beeper reports rate limiting; the source is stopped until you release it".into(),
+            ));
+        }
+        if status.is_client_error() || status.is_redirection() {
+            return Err(ConnectorError::Other(format!(
+                "reaction refused: http {}",
+                status.as_u16()
+            )));
+        }
+        if !status.is_success() {
+            return Err(ConnectorError::Ambiguous(format!(
+                "http {}",
+                status.as_u16()
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// `file:///Users/me/a%20b.pdf` to `/Users/me/a b.pdf`; `None` for anything but an absolute
 /// `file://` path.
 fn file_url_to_path(url: &str) -> Option<std::path::PathBuf> {

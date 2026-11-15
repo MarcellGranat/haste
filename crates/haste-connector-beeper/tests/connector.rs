@@ -87,6 +87,9 @@ fn serve(world: &Shared) -> impl Fn(&Recorded) -> (u16, String) + Send + Sync + 
             ("POST", ["v1", "assets", "upload", "base64"]) => {
                 (200, json!({ "uploadID": "up-1" }).to_string())
             }
+            ("POST", ["v1", "chats", _, "messages", _, "reactions"]) => {
+                (200, json!({ "success": true }).to_string())
+            }
             ("POST", ["v1", "chats", _, "messages"]) => w
                 .send
                 .clone()
@@ -931,4 +934,41 @@ async fn allow_all_reads_every_chat_of_the_selected_accounts_except_denied_ones(
         joined,
         "ok:accounts=1 chats=2 messages=4 skipped_chats=0 skipped_messages=0"
     );
+}
+
+#[tokio::test]
+async fn a_reaction_is_one_request_into_a_selected_chat_and_refusals_send_nothing() {
+    use haste_core::connector::ReactionRequest;
+    let r = rig(BeeperSource::Whatsapp, basic, send_rig_cfg()).await;
+    let ask = |chat: &str, key: &str| ReactionRequest {
+        thread_external_id: chat.into(),
+        message_external_id: "msg-9".into(),
+        key: key.into(),
+    };
+    r.connector
+        .add_reaction(&ask("chat-a", "👍"))
+        .await
+        .unwrap();
+    let post = r
+        .server
+        .requests()
+        .into_iter()
+        .find(|q| q.method == "POST")
+        .unwrap();
+    assert_eq!(post.path, "/v1/chats/chat-a/messages/msg-9/reactions");
+    let body: Value = serde_json::from_str(&post.body).unwrap();
+    assert_eq!(body, json!({ "reactionKey": "👍" }));
+    assert_eq!(posts(&r.server), 1);
+    // a chat that is not selected, or an unusable key, never reaches the service
+    assert!(r
+        .connector
+        .add_reaction(&ask("chat-b", "👍"))
+        .await
+        .is_err());
+    assert!(r
+        .connector
+        .add_reaction(&ask("chat-a", "a]b"))
+        .await
+        .is_err());
+    assert_eq!(posts(&r.server), 1, "nothing more was requested");
 }

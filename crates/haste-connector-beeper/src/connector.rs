@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use haste_core::connector::{
     AttachmentRequest, Batch, BoxFuture, Capabilities, Connector, ConnectorError, Cursor,
-    DraftToSend, HistoryRequest, SendReceipt,
+    DraftToSend, HistoryRequest, ReactionRequest, SendReceipt,
 };
 use haste_core::model::{Message, Source, Thread};
 use serde::{Deserialize, Serialize};
@@ -538,6 +538,34 @@ impl Connector for BeeperConnector {
         draft: &'a DraftToSend,
     ) -> BoxFuture<'a, Result<SendReceipt, ConnectorError>> {
         Box::pin(self.send_text(draft))
+    }
+
+    fn add_reaction<'a>(
+        &'a self,
+        request: &'a ReactionRequest,
+    ) -> BoxFuture<'a, Result<(), ConnectorError>> {
+        Box::pin(async move {
+            let chat_id = request.thread_external_id.as_str();
+            if !haste_core::reactions::valid_key(&request.key) {
+                return Err(ConnectorError::Other("reaction refused: key".into()));
+            }
+            // same gates as a send: a selected chat of an on-device account of this network
+            if !self.config.selects_chat(chat_id) {
+                return Err(ConnectorError::Other(
+                    "reaction refused: chat not selected".into(),
+                ));
+            }
+            let chat = self.client.chat(chat_id).await?;
+            let accounts = self.selected_accounts().await?;
+            if !accounts.iter().any(|(a, _)| a.id == chat.account_id) {
+                return Err(ConnectorError::Other(
+                    "reaction refused: account not selected or on another network".into(),
+                ));
+            }
+            self.client
+                .add_reaction(chat_id, &request.message_external_id, request.key.trim())
+                .await
+        })
     }
 
     fn fetch_thread_history<'a>(

@@ -914,6 +914,7 @@ fn kind(body: &RequestBody) -> Kind {
         | RequestBody::ConnectorResync { .. }
         | RequestBody::RemindersAuth
         | RequestBody::AttachmentSave { .. }
+        | RequestBody::ReactionAdd { .. }
         | RequestBody::ConnectorAuthorized { .. }
         | RequestBody::TagAdd { .. }
         | RequestBody::TagRemove { .. }

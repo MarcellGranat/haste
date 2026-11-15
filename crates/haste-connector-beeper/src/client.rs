@@ -14,6 +14,17 @@ use crate::consts::{BEEPER_REQUEST_TIMEOUT, KEYCHAIN_SERVICE, TOKEN_ACCOUNT};
 use crate::wire::{List, WireAccount, WireChat, WireMessage, WireSent};
 
 const NOT_RUNNING: &str = "Beeper Desktop is not running";
+
+/// What a send reports when Beeper could not reach the Messages app window: nothing was sent.
+pub const MESSAGES_WINDOW_FAILED: &str = "iMessage could not reach the Messages app window, so nothing was sent; Messages is being opened, try the send again";
+
+/// Does an error answer from Beeper say the Messages app had no usable window? (Beeper sends
+/// iMessages by driving that window.) The answer is only read, never stored or logged.
+#[must_use]
+pub fn messages_window_failure(body: &str) -> bool {
+    let b = body.to_lowercase();
+    b.contains("messages") && (b.contains("window") || b.contains("parked"))
+}
 const TOKEN_REJECTED: &str = "Beeper token rejected; run `haste connector beeper auth`";
 const NO_TOKEN: &str = "no Beeper token stored; run `haste connector beeper auth`";
 
@@ -478,6 +489,11 @@ impl BeeperClient {
             )));
         }
         if !status.is_success() {
+            // an answer that says the Messages window was missing means nothing was sent
+            let answer = response.text().await.unwrap_or_default();
+            if messages_window_failure(&answer) {
+                return Err(ConnectorError::Other(MESSAGES_WINDOW_FAILED.into()));
+            }
             return Err(ConnectorError::Ambiguous(format!(
                 "http {}",
                 status.as_u16()
@@ -594,6 +610,17 @@ fn encode(segment: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_missing_messages_window_is_recognised() {
+        use super::messages_window_failure as f;
+        assert!(f(
+            r#"{"message":"Timed out verifying parked Messages AX main window"}"#
+        ));
+        assert!(f("Could not get main Messages window"));
+        assert!(!f(r#"{"message":"internal error"}"#));
+        assert!(!f(""));
+    }
+
     #[test]
     fn file_urls_become_local_paths_and_nothing_else_does() {
         use super::file_url_to_path;

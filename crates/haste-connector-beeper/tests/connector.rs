@@ -886,6 +886,29 @@ async fn each_failure_is_classified_once_with_no_retry() {
     }
 }
 
+#[tokio::test]
+async fn a_missing_messages_window_means_nothing_was_sent() {
+    // a network other than iMessage, so the test never opens the real Messages app
+    let r = rig(
+        BeeperSource::Whatsapp,
+        |w| {
+            basic(w);
+            w.send = Some((
+                500,
+                r#"{"message":"Timed out verifying parked Messages AX main window"}"#.to_owned(),
+            ));
+        },
+        send_rig_cfg(),
+    )
+    .await;
+    let err = r.connector.send(&reply("chat-a", "x")).await.unwrap_err();
+    match &err {
+        ConnectorError::Other(m) => assert!(m.contains("nothing was sent"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(posts(&r.server), 1, "one request, never retried");
+}
+
 #[test]
 fn the_connector_starts_engaged_declares_no_drafts_and_owns_one_network() {
     let store: Arc<dyn TokenStore> = Arc::new(MemoryStore::default());

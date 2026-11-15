@@ -495,7 +495,13 @@ impl BeeperConnector {
             Ok(id) => id,
             Err(e) => {
                 // a fixed cause label, never the error text: why the outcome is unknown or refused
+                let window = matches!(&e, ConnectorError::Other(m) if m == crate::client::MESSAGES_WINDOW_FAILED);
+                if window && network == "imessage" {
+                    // give the next try a Messages window to work with
+                    open_messages_app();
+                }
                 let label = match &e {
+                    _ if window => "messages_window",
                     ConnectorError::Ambiguous(m) if m.starts_with("http ") => "http_5xx",
                     ConnectorError::Ambiguous(m) if m.contains("no message id") => "no_message_id",
                     ConnectorError::Ambiguous(_) => "transport_or_timeout",
@@ -598,4 +604,15 @@ impl Connector for BeeperConnector {
                 .await
         })
     }
+}
+
+/// Open the Messages app (it comes to the front), so Beeper has a window to drive on the next
+/// send. Only called after a send failed for lack of that window.
+fn open_messages_app() {
+    let _ = std::process::Command::new("open")
+        .args(["-a", "Messages"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }

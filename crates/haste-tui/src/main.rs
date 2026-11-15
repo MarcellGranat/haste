@@ -475,10 +475,9 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
         }
         Effect::DeleteMuted { thread_id } => {
             app.status = match client.call(RequestBody::MutedDelete { thread_id }) {
-                Ok(Response::Deleted { messages }) => format!(
-                    "deleted {messages} stored mail{} here (the mailbox is untouched; the sender stays muted)",
-                    if messages == 1 { "" } else { "s" }
-                ),
+                Ok(Response::Deleted { .. }) => {
+                    "deleted here (the mailbox is untouched; the sender stays muted)".to_owned()
+                }
                 other => describe(other)
                     .err()
                     .unwrap_or_else(|| "nothing was deleted".into()),

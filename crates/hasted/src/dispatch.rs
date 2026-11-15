@@ -1611,75 +1611,36 @@ fn rule_sender(state: &State, thread_id: &str) -> Result<String, &'static str> {
         .ok_or("no sender other than you")
 }
 
-/// The stored mail of the muted sender of this thread is deleted here: their messages, and a
-/// thread entirely when nothing from anyone else is left in it. The sender stays muted and the
-/// mailbox is not touched. The mute lines that match this sender decide whose mail goes.
+/// One muted mail is deleted from the local store (the thread, its messages, its read mark,
+/// triage state and links). Only a thread of a muted sender can go this way; the sender stays
+/// muted and the mailbox is not touched.
 fn muted_delete(state: &State, actor: &Principal, thread_id: &str) -> Response {
     let sender = match rule_sender(state, thread_id) {
         Ok(s) => s,
         Err(why) => return err(ErrorCode::Validation, why),
     };
-    let (all, _) = read_ignore(&state.config.data_dir);
-    let lines: Vec<String> = all
-        .patterns()
-        .into_iter()
-        .filter(|p| {
-            haste_core::ignore::IgnoreList::from_patterns(std::slice::from_ref(p))
-                .is_muted(&[sender.as_str()])
-        })
-        .collect();
-    if lines.is_empty() {
+    let (mute, _) = read_ignore(&state.config.data_dir);
+    if !mute.is_muted(&[sender.as_str()]) {
         return err(ErrorCode::Validation, "this sender is not muted");
     }
-    let mute = haste_core::ignore::IgnoreList::from_patterns(&lines);
-    let own = |source: &Source| {
-        state
-            .connector_for(source)
-            .and_then(|c| c.own_address())
-            .map(|a| haste_core::ignore::address_of(&a))
-            .unwrap_or_default()
-    };
-    let mut gone = 0;
-    for id in state.store.mail_thread_ids().unwrap_or_default() {
-        let Ok(Some((thread, _))) = state.store.get_thread(&id) else {
-            continue;
-        };
-        let messages = state.store.messages_for_thread(&id).unwrap_or_default();
-        let own = own(&thread.source);
-        let mut muted = Vec::new();
-        let mut others = false;
-        for (i, m) in messages.iter().enumerate() {
-            match m.sender_identifier.as_deref() {
-                Some(s) if mute.is_muted(&[s]) => muted.push(i),
-                Some(s) if own.is_empty() || haste_core::ignore::address_of(s) != own => {
-                    others = true;
-                }
-                None => others = true,
-                Some(_) => {}
-            }
-        }
-        if muted.is_empty() {
-            continue;
-        }
-        gone += muted.len();
-        if others {
-            let ids: Vec<String> = muted.iter().map(|i| messages[*i].id.clone()).collect();
-            let _ = state.store.delete_messages(&ids);
-        } else {
-            let _ = state.store.delete_threads(&[id]);
-        }
+    let messages = state
+        .store
+        .messages_for_thread(thread_id)
+        .map_or(0, |m| m.len());
+    if state.store.delete_threads(&[thread_id.to_owned()]).is_err() {
+        return err(ErrorCode::Internal, "could not delete the mail");
     }
     state.audit(
         &actor.id,
         "muted.delete",
         "deleted",
         Some(thread_id),
-        Some(&format!("messages={gone}")),
+        Some(&format!("messages={messages}")),
     );
     state.publish(Event::ThreadChanged {
         thread_id: thread_id.to_owned(),
     });
-    Response::Deleted { messages: gone }
+    Response::Deleted { messages }
 }
 
 fn mute_pattern(state: &State, thread_id: &str) -> Result<String, &'static str> {

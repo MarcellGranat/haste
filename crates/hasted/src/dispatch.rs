@@ -7,6 +7,7 @@ use haste_core::connector::{
     CallError, ConnectorError, DraftToSend, EventPatch, Guarded, NewEvent, NewReminder,
 };
 use haste_core::herdr::visible_to;
+use haste_core::ignore;
 use haste_core::model::{notes_snippet, Reminder, Source};
 use haste_core::notes::{note_project, slugify, NoteDenial};
 use haste_core::policy::{
@@ -99,6 +100,9 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::FilterList
         | RequestBody::IgnoreList
         | RequestBody::IgnoreMute { .. }
+        | RequestBody::ReadSet { .. }
+        | RequestBody::SenderRules
+        | RequestBody::RuleChange { .. }
         | RequestBody::ResolveExecuting { .. }
         | RequestBody::Subscribe { .. } => Action::Manage,
     }
@@ -143,6 +147,9 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::FilterList => "filter_list",
         RequestBody::IgnoreList => "ignore_list",
         RequestBody::IgnoreMute { .. } => "ignore_mute",
+        RequestBody::ReadSet { .. } => "read_set",
+        RequestBody::SenderRules => "sender_rules",
+        RequestBody::RuleChange { .. } => "rule_change",
         _ => "request",
     }
 }
@@ -294,6 +301,7 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             let machine_labels = machine_labels_for(state, principal);
             let lasts = state.store.last_messages().unwrap_or_default();
             let with_files = state.store.threads_with_attachments().unwrap_or_default();
+            let flags = MailFlags::load(state);
             match state.store.list_threads(&filter) {
                 Ok(rows) => Response::Threads {
                     threads: rows
@@ -303,6 +311,10 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
                             // The one scope filter for thread reads: a machine sees only its projects.
                             visible_to(principal, &own, machine_labels.as_ref()).then_some(
                                 ThreadView {
+                                    unread: flags.unread.contains(&thread.id),
+                                    replied: flags.replied.contains(&thread.id),
+                                    sender_known: flags.known(&thread),
+                                    sender: flags.senders.get(&thread.id).cloned(),
                                     last: lasts.get(&thread.id).map(|(sender, body)| {
                                         haste_proto::LastMessage {
                                             sender: sender.clone(),
@@ -337,6 +349,13 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
                             .flatten()
                             .and_then(|c| c.own_address()),
                         view: ThreadView {
+                            unread: state
+                                .store
+                                .unread_threads()
+                                .is_ok_and(|u| u.contains(&thread.id)),
+                            replied: false,
+                            sender_known: true,
+                            sender: None,
                             thread,
                             triage,
                             tags: own,
@@ -694,6 +713,26 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             }
         }
         RequestBody::IgnoreMute { thread_id } => ignore_mute(state, principal, &thread_id),
+        RequestBody::SenderRules => {
+            let (mute, mut errors) = read_rule_file(&state.config.data_dir, ignore::IGNORE_FILE);
+            let (priority, e2) = read_rule_file(&state.config.data_dir, ignore::PRIORITY_FILE);
+            let (allowed, e3) = read_rule_file(&state.config.data_dir, ignore::ALLOWED_FILE);
+            errors.extend(e2);
+            errors.extend(e3);
+            Response::Rules {
+                mute: mute.patterns(),
+                priority: priority.patterns(),
+                allowed: allowed.patterns(),
+                errors,
+            }
+        }
+        RequestBody::RuleChange {
+            thread_id,
+            rule,
+            add,
+            domain,
+        } => rule_change(state, principal, &thread_id, rule, add, domain),
+        RequestBody::ReadSet { thread_id, read } => read_set(state, principal, &thread_id, read),
         RequestBody::FilterList => {
             let (filters, error) = crate::filters::load(&state.config.data_dir);
             Response::Filters { filters, error }
@@ -1411,7 +1450,7 @@ fn triage_set(
         Err(e) => return map_store(&e),
     }
     if let Some(p) = update.priority {
-        if !(0..=MAX_TRIAGE_PRIORITY).contains(&p) {
+        if !(-1..=MAX_TRIAGE_PRIORITY).contains(&p) {
             return err(ErrorCode::Validation, "priority out of range");
         }
     }
@@ -1462,9 +1501,9 @@ fn read_ignore(data_dir: &std::path::Path) -> (haste_core::ignore::IgnoreList, V
     haste_core::ignore::IgnoreList::parse(&text)
 }
 
-/// Who to mute for a thread. Mail: the latest sender that is not the human's own address (the
+/// Who a rule applies to for a thread. Mail: the latest sender that is not the human's own address (the
 /// human is never muted). Chats: the chat name, since a chat has no single sender.
-fn mute_pattern(state: &State, thread_id: &str) -> Result<String, &'static str> {
+fn rule_sender(state: &State, thread_id: &str) -> Result<String, &'static str> {
     let (thread, _) = state
         .store
         .get_thread(thread_id)
@@ -1475,7 +1514,7 @@ fn mute_pattern(state: &State, thread_id: &str) -> Result<String, &'static str> 
         return if thread.subject.trim().is_empty() {
             Err("this chat has no name to mute")
         } else {
-            Ok(haste_core::ignore::pattern_for(&thread.subject))
+            Ok(thread.subject.clone())
         };
     }
     let own = state
@@ -1492,8 +1531,157 @@ fn mute_pattern(state: &State, thread_id: &str) -> Result<String, &'static str> 
         .rev()
         .filter_map(|m| m.sender_identifier.as_deref())
         .find(|s| s.to_lowercase() != own)
-        .map(haste_core::ignore::pattern_for)
+        .map(str::to_owned)
         .ok_or("no sender other than you")
+}
+
+fn mute_pattern(state: &State, thread_id: &str) -> Result<String, &'static str> {
+    rule_sender(state, thread_id).map(|s| haste_core::ignore::pattern_for(&s))
+}
+
+fn read_rule_file(
+    data_dir: &std::path::Path,
+    file: &str,
+) -> (haste_core::ignore::IgnoreList, Vec<String>) {
+    let text = std::fs::read_to_string(data_dir.join(file)).unwrap_or_default();
+    haste_core::ignore::IgnoreList::parse(&text)
+}
+
+/// Add the thread's sender (or its domain) to a rule file, or remove every line that matches it.
+/// Local files only; the audit records which file and that it happened, never the address.
+fn rule_change(
+    state: &State,
+    actor: &Principal,
+    thread_id: &str,
+    rule: haste_proto::RuleKind,
+    add: bool,
+    domain: bool,
+) -> Response {
+    use haste_proto::RuleKind;
+    let sender = match rule_sender(state, thread_id) {
+        Ok(s) => s,
+        Err(why) => return err(ErrorCode::Validation, why),
+    };
+    let (file, label) = match rule {
+        RuleKind::Mute => (ignore::IGNORE_FILE, "mute"),
+        RuleKind::Priority => (ignore::PRIORITY_FILE, "priority"),
+        RuleKind::Allowed => (ignore::ALLOWED_FILE, "allowed"),
+    };
+    let path = state.config.data_dir.join(file);
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    if add {
+        let pattern = if domain {
+            match ignore::domain_pattern_for(&sender) {
+                Some(p) => p,
+                None => return err(ErrorCode::Validation, "this sender has no domain"),
+            }
+        } else {
+            ignore::pattern_for(&sender)
+        };
+        if !lines.iter().any(|l| l.trim() == pattern) {
+            lines.push(pattern);
+        }
+    } else {
+        lines.retain(|l| {
+            let t = l.trim();
+            t.is_empty()
+                || t.starts_with('#')
+                || !ignore::IgnoreList::from_patterns(&[t.to_owned()]).is_muted(&[sender.as_str()])
+        });
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    if out != text {
+        if write_private(&path, &out).is_err() {
+            return err(ErrorCode::Internal, "could not write the rule file");
+        }
+        state.audit(
+            &actor.id,
+            if add { "rule.add" } else { "rule.remove" },
+            label,
+            Some(thread_id),
+            None,
+        );
+    }
+    state.publish(Event::ThreadChanged {
+        thread_id: thread_id.to_owned(),
+    });
+    Response::Done
+}
+
+/// Write a file by replacing it whole (a temporary file, then a rename), readable by the owner.
+fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = path.with_extension("tmp");
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    f.write_all(text.as_bytes())?;
+    drop(f);
+    std::fs::rename(tmp, path)
+}
+
+/// Mark a mail thread read or unread. The mark is stored here first; then the provider is
+/// asked once (Gmail). A provider that cannot or does not is reported, and the local mark stays.
+fn read_set(state: &State, actor: &Principal, thread_id: &str, read: bool) -> Response {
+    let thread = match state.store.get_thread(thread_id) {
+        Ok(Some((t, _))) => t,
+        Ok(None) => return err(ErrorCode::NotFound, "thread not found"),
+        Err(e) => return map_store(&e),
+    };
+    if !matches!(thread.source, Source::Gmail | Source::Icloud) {
+        return err(ErrorCode::Validation, "only mail has a read mark");
+    }
+    if let Err(e) = state
+        .store
+        .set_unread(&[(thread_id.to_owned(), !read)], now_secs())
+    {
+        return map_store(&e);
+    }
+    state.publish(Event::ThreadChanged {
+        thread_id: thread_id.to_owned(),
+    });
+    state.audit(
+        &actor.id,
+        "thread.read_state",
+        if read { "read" } else { "unread" },
+        Some(thread_id),
+        Some(&format!("source={}", thread.source.as_name())),
+    );
+    let Some(connector) = state.connector_for(&thread.source) else {
+        return Response::Done;
+    };
+    let messages = match state.store.messages_for_thread(thread_id) {
+        Ok(m) => m,
+        Err(e) => return map_store(&e),
+    };
+    let target = haste_core::connector::ReadTarget {
+        thread_external_id: thread.external_id.clone(),
+        message_external_ids: messages.iter().map(|m| m.external_id.clone()).collect(),
+        read,
+    };
+    let guard = Guarded {
+        connector: connector.as_ref(),
+        hooks: state,
+    };
+    match tokio::runtime::Handle::current().block_on(guard.set_thread_read(&target)) {
+        Ok(()) => Response::Done,
+        // a provider that has no such call: the mark stays local
+        Err(CallError::Connector(ConnectorError::Unsupported(_))) => Response::Done,
+        Err(CallError::Connector(ConnectorError::Other(m))) if m.contains("gmail.modify") => err(
+            ErrorCode::Denied,
+            "marked here only: run `haste connector gmail auth` to let it change Gmail",
+        ),
+        Err(_) => err(
+            ErrorCode::Internal,
+            "marked here only: the mailbox did not take the change",
+        ),
+    }
 }
 
 fn ignore_mute(state: &State, actor: &Principal, thread_id: &str) -> Response {
@@ -1526,6 +1714,71 @@ fn ignore_mute(state: &State, actor: &Principal, thread_id: &str) -> Response {
 
 /// Highest priority a human can set from the TUI.
 const MAX_TRIAGE_PRIORITY: i32 = 9;
+
+/// What the thread list needs about mail beyond the threads themselves: unread marks, which
+/// threads the human answered last, and whose mail has been read before.
+struct MailFlags {
+    unread: std::collections::HashSet<String>,
+    replied: std::collections::HashSet<String>,
+    /// Lowercase addresses of senders whose mail was read or answered.
+    known: std::collections::HashSet<String>,
+    /// Per thread: the newest sender who is not the human.
+    senders: std::collections::HashMap<String, String>,
+}
+
+impl MailFlags {
+    fn load(state: &State) -> Self {
+        let own = |source: &Source| {
+            state
+                .connector_for(source)
+                .and_then(|c| c.own_address())
+                .map(|a| haste_core::ignore::address_of(&a))
+                .unwrap_or_default()
+        };
+        let (gmail, icloud) = (own(&Source::Gmail), own(&Source::Icloud));
+        let replied = state
+            .store
+            .replied_threads(&[
+                ("gmail".to_owned(), gmail.clone()),
+                ("icloud".to_owned(), icloud.clone()),
+            ])
+            .unwrap_or_default();
+        let senders = state
+            .store
+            .last_incoming_senders(&gmail, &icloud)
+            .unwrap_or_default();
+        let mut known: std::collections::HashSet<String> = state
+            .store
+            .senders_of_read_mail()
+            .unwrap_or_default()
+            .iter()
+            .map(|s| haste_core::ignore::address_of(s))
+            .collect();
+        // whoever the human answered is known too
+        for id in &replied {
+            if let Some(s) = senders.get(id) {
+                known.insert(haste_core::ignore::address_of(s));
+            }
+        }
+        Self {
+            unread: state.store.unread_threads().unwrap_or_default(),
+            replied,
+            known,
+            senders,
+        }
+    }
+
+    /// Mail from someone whose mail was never read or answered is not known; chats always are.
+    fn known(&self, thread: &haste_core::model::Thread) -> bool {
+        if !matches!(thread.source, Source::Gmail | Source::Icloud) {
+            return true;
+        }
+        match self.senders.get(&thread.id) {
+            Some(s) => self.known.contains(&haste_core::ignore::address_of(s)),
+            None => true,
+        }
+    }
+}
 
 fn change_tag(state: &State, actor: &Principal, thread_id: &str, tag: &str, add: bool) -> Response {
     let result = if add {

@@ -931,6 +931,9 @@ fn kind(body: &RequestBody) -> Kind {
         | RequestBody::FilterList
         | RequestBody::IgnoreList
         | RequestBody::IgnoreMute { .. }
+        | RequestBody::ReadSet { .. }
+        | RequestBody::SenderRules
+        | RequestBody::RuleChange { .. }
         | RequestBody::Execute { .. }
         | RequestBody::ResolveExecuting { .. }
         | RequestBody::Subscribe { .. } => Kind::NotARead,
@@ -1289,6 +1292,86 @@ async fn triage_writes_are_human_only_local_and_leave_content_alone() {
         panic!()
     };
     assert_eq!((filters.len(), error), (1, None));
+    rig.daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn sender_rules_are_local_files_changed_only_by_the_human() {
+    use haste_proto::RuleKind;
+    let rig = boot("working").await;
+    let chat = rig
+        .daemon
+        .state
+        .store
+        .upsert_thread(
+            &haste_core::model::Source::Whatsapp,
+            "chat-2",
+            "Team (ops)",
+            &[],
+            1,
+        )
+        .unwrap()
+        .id;
+    let change = |add: bool, rule: RuleKind| RequestBody::RuleChange {
+        thread_id: chat.clone(),
+        rule,
+        add,
+        domain: false,
+    };
+    let agent = register(&rig, "agent-r", PrincipalKind::Agent).await;
+    let denied = call(&rig, &agent, change(true, RuleKind::Priority)).await;
+    assert_eq!(code(&denied), Some(ErrorCode::Denied));
+    let denied = call(
+        &rig,
+        &agent,
+        RequestBody::ReadSet {
+            thread_id: chat.clone(),
+            read: true,
+        },
+    )
+    .await;
+    assert_eq!(code(&denied), Some(ErrorCode::Denied));
+
+    assert!(matches!(
+        human(&rig, change(true, RuleKind::Priority)).await,
+        Response::Done
+    ));
+    human(&rig, change(true, RuleKind::Priority)).await; // no duplicate line
+    human(&rig, change(true, RuleKind::Allowed)).await;
+    let Response::Rules {
+        mute,
+        priority,
+        allowed,
+        errors,
+    } = human(&rig, RequestBody::SenderRules).await
+    else {
+        panic!()
+    };
+    assert_eq!(priority, vec!["^Team \\(ops\\)$".to_owned()]);
+    assert_eq!(allowed, priority);
+    assert!(mute.is_empty() && errors.is_empty());
+    // taking it off removes every line that matches this sender, and nothing else
+    human(&rig, change(false, RuleKind::Priority)).await;
+    let Response::Rules {
+        priority, allowed, ..
+    } = human(&rig, RequestBody::SenderRules).await
+    else {
+        panic!()
+    };
+    assert!(priority.is_empty());
+    assert_eq!(allowed.len(), 1);
+    // a chat has no read mark
+    let refused = human(
+        &rig,
+        RequestBody::ReadSet {
+            thread_id: chat,
+            read: true,
+        },
+    )
+    .await;
+    assert_eq!(code(&refused), Some(ErrorCode::Validation));
+    assert!(rig.audit().contains("rule.add"));
+    assert!(!rig.audit().contains("Team"));
     rig.daemon.shutdown().await;
 }
 

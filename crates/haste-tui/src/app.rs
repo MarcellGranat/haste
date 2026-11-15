@@ -99,6 +99,8 @@ pub struct Reader {
     /// How many of the newest messages are shown; `o` shows more. The older ones are already
     /// stored, so showing them reads nothing again.
     pub shown: usize,
+    /// The sender is blocked: the thread can be read, nothing else, until it is unblocked.
+    pub blocked: bool,
     /// `(shown text, address)` of the links on screen, set while drawing; the terminal makes
     /// them clickable after the frame is drawn.
     pub links: std::cell::RefCell<Vec<(String, String)>>,
@@ -237,9 +239,25 @@ pub enum Effect {
     LoadOlder {
         thread_id: String,
     },
-    /// Hide a thread's sender from the TUI (the local `.haste_ignore` list).
+    /// Mute a thread's sender (the local `.haste_ignore` list): its mail goes to the bottom,
+    /// marked blocked.
     Mute {
         thread_id: String,
+    },
+    /// Mark a mail thread read or unread (Gmail: also at the provider).
+    SetRead {
+        thread_id: String,
+        read: bool,
+    },
+    /// Let a blocked sender through: out of the mute list, into the allowed list, thread read.
+    Unblock {
+        thread_id: String,
+    },
+    /// Add or remove the thread's sender (or its domain) in the priority list.
+    PriorityRule {
+        thread_id: String,
+        add: bool,
+        domain: bool,
     },
     /// Complete these reminders in Reminders (propose, approve and run, as the human).
     CompleteReminders {
@@ -424,6 +442,11 @@ pub struct App {
     pub preview: Option<Preview>,
     /// Muted senders (`.haste_ignore`), applied to the Today and Channels lists only.
     pub ignore: IgnoreList,
+    /// Senders whose mail is priority, and senders let through although never read.
+    pub priority_rules: IgnoreList,
+    pub allowed_rules: IgnoreList,
+    /// A thread just opened that is to be marked read (the loop sends it).
+    pub mark_read_on_open: Option<String>,
     pub ignore_errors: Vec<String>,
     /// Tasks selected with Space in the TODO pane.
     pub todo_marked: BTreeSet<String>,
@@ -561,6 +584,9 @@ impl App {
             attach: None,
             preview: None,
             ignore: IgnoreList::default(),
+            priority_rules: IgnoreList::default(),
+            allowed_rules: IgnoreList::default(),
+            mark_read_on_open: None,
             ignore_errors: Vec::new(),
             todo_marked: BTreeSet::new(),
             pending_done: BTreeMap::new(),
@@ -643,6 +669,44 @@ impl App {
         self.todo_marked.retain(|id| live.contains(id.as_str()));
         self.pending_done.retain(|id, _| live.contains(id.as_str()));
         self.clamp();
+    }
+
+    pub fn set_rules(
+        &mut self,
+        mute: &[String],
+        priority: &[String],
+        allowed: &[String],
+        errors: Vec<String>,
+    ) {
+        self.ignore = IgnoreList::from_patterns(mute);
+        self.priority_rules = IgnoreList::from_patterns(priority);
+        self.allowed_rules = IgnoreList::from_patterns(allowed);
+        self.ignore_errors = errors;
+    }
+
+    /// Is this thread priority: set on it, or its sender is on the priority list (unless the
+    /// human took it off this one thread, which is stored as -1).
+    #[must_use]
+    pub fn is_priority(&self, t: &ThreadView) -> bool {
+        match t.triage.priority {
+            p if p > 0 => true,
+            p if p < 0 => false,
+            _ => self.priority_rules.is_muted(&inbox::rule_subjects(t)),
+        }
+    }
+
+    /// Is this thread's sender blocked: muted, or (mail) a stranger whose mail was never read
+    /// or answered and who is not let through.
+    #[must_use]
+    pub fn is_blocked(&self, t: &ThreadView) -> bool {
+        let subjects = inbox::rule_subjects(t);
+        if self.ignore.is_muted(&subjects) {
+            return true;
+        }
+        inbox::is_mail(&t.thread.source.as_name())
+            && !t.sender_known
+            && !self.allowed_rules.is_muted(&subjects)
+            && !self.priority_rules.is_muted(&subjects)
     }
 
     pub fn set_ignore(&mut self, patterns: &[String], errors: Vec<String>) {
@@ -833,11 +897,15 @@ impl App {
             .iter()
             .filter(|t| !t.triage.archived && (include_aside || !t.triage.set_aside))
             .filter(|t| inbox::matches(filter, t))
-            .filter(|t| !self.ignore.is_muted(&inbox::senders(t)))
             .collect();
-        out.sort_by(|a, b| {
-            (b.triage.priority, b.thread.last_activity_at)
-                .cmp(&(a.triage.priority, a.thread.last_activity_at))
+        // blocked senders last; then priority; then the newest
+        out.sort_by_key(|t| {
+            (
+                self.is_blocked(t),
+                std::cmp::Reverse(self.is_priority(t)),
+                std::cmp::Reverse(t.triage.priority.max(0)),
+                std::cmp::Reverse(t.thread.last_activity_at),
+            )
         });
         out
     }
@@ -1183,6 +1251,11 @@ impl App {
             Key::Char('e') if self.on_todos() => self.mark_done(),
             Key::Char('g') if thread_view => return self.triage_aside(),
             Key::Char('p') if thread_view => return self.triage_priority(),
+            Key::Char('P') if thread_view => return self.priority_sender(false),
+            Key::Ctrl('p') if thread_view => return self.priority_sender(true),
+            Key::Char('u') if thread_view => return self.toggle_read(),
+            Key::Char('b') if thread_view => return self.unblock_selected(),
+            Key::Ctrl('r') => return Some(Effect::Refresh),
             Key::Char('s') if thread_view => self.start_snooze(),
             Key::Char('t') if thread_view => self.start_remind(),
             Key::Char('r') if thread_view => return self.start_reply(),
@@ -1481,6 +1554,16 @@ impl App {
     ) {
         messages.sort_by_key(|m| m.sent_at);
         let selected = messages.len().saturating_sub(1);
+        let thread_id = view.thread.id.clone();
+        // the list knows more than the thread itself: who the sender is, and whether blocked
+        let listed = self.threads.iter().find(|t| t.thread.id == thread_id);
+        let blocked = listed.is_some_and(|t| self.is_blocked(t));
+        let was_unread = listed.is_some_and(|t| t.unread);
+        if !blocked && was_unread {
+            if let Some(t) = self.thread_mut(&thread_id) {
+                t.unread = false;
+            }
+        }
         self.reader = Some(Reader {
             view,
             messages,
@@ -1493,7 +1576,11 @@ impl App {
             expanded: std::collections::HashSet::new(),
             links: std::cell::RefCell::new(Vec::new()),
             shown: READER_WINDOW,
+            blocked,
         });
+        if !blocked && was_unread {
+            self.mark_read_on_open = Some(thread_id);
+        }
         self.mode = Mode::Read;
     }
 
@@ -1668,6 +1755,11 @@ impl App {
         None
     }
 
+    /// The thread just opened, when it is to be marked read (asked once).
+    pub fn take_mark_read(&mut self) -> Option<String> {
+        self.mark_read_on_open.take()
+    }
+
     fn close_reader(&mut self) {
         self.reader = None;
         self.mode = Mode::Normal;
@@ -1683,6 +1775,10 @@ impl App {
         let last = reader.messages.len().saturating_sub(1);
         let first = reader.first_visible();
         // a batch of attachment-only messages is one item: moving lands on its last message
+        if reader.blocked && matches!(key, Key::Char('r' | 'e' | 'n' | 'l' | '+')) {
+            self.status = "this sender is blocked: b unblocks it, Esc leaves it".into();
+            return None;
+        }
         let step = |r: &Reader, by: isize| {
             let base = if by > 0 {
                 crate::chat::batch_end(&r.messages, r.selected)
@@ -1697,7 +1793,25 @@ impl App {
             Key::Char('j') | Key::Down => reader.selected = step(reader, 1),
             Key::Char('k') | Key::Up => reader.selected = step(reader, -1),
             Key::Char(' ' | 'd') => reader.selected = step(reader, READER_PAGE),
-            Key::Char('b' | 'u') => reader.selected = step(reader, -READER_PAGE),
+            Key::Char('u') => {
+                if !inbox::is_mail(&reader.view.thread.source.as_name()) {
+                    self.status = "only mail has a read mark".into();
+                } else {
+                    let thread_id = reader.view.thread.id.clone();
+                    let read = self
+                        .threads
+                        .iter()
+                        .find(|t| t.thread.id == thread_id)
+                        .is_some_and(|t| t.unread);
+                    if let Some(t) = self.thread_mut(&thread_id) {
+                        t.unread = !read;
+                    }
+                    return Some(Effect::SetRead { thread_id, read });
+                }
+            }
+            Key::Char('b') if reader.blocked => {
+                return Some(Effect::Unblock { thread_id });
+            }
             Key::Char('g' | '0') => {
                 reader.selected = crate::chat::batch_end(&reader.messages, first)
             }
@@ -2053,6 +2167,49 @@ impl App {
         Some(Effect::Mute { thread_id })
     }
 
+    fn thread_mut(&mut self, id: &str) -> Option<&mut ThreadView> {
+        self.threads.iter_mut().find(|t| t.thread.id == id)
+    }
+
+    /// `u`: mark the thread under the cursor read, or unread when it already is read. The list
+    /// shows it at once; the provider follows.
+    fn toggle_read(&mut self) -> Option<Effect> {
+        let t = self.selected_thread()?;
+        if !inbox::is_mail(&t.thread.source.as_name()) {
+            self.status = "only mail has a read mark".into();
+            return None;
+        }
+        let (thread_id, read) = (t.thread.id.clone(), t.unread);
+        if let Some(t) = self.thread_mut(&thread_id) {
+            t.unread = !read;
+        }
+        Some(Effect::SetRead { thread_id, read })
+    }
+
+    /// `b`: let a blocked sender through.
+    fn unblock_selected(&mut self) -> Option<Effect> {
+        let t = self.selected_thread()?;
+        if !self.is_blocked(t) {
+            self.status = "this sender is not blocked".into();
+            return None;
+        }
+        Some(Effect::Unblock {
+            thread_id: t.thread.id.clone(),
+        })
+    }
+
+    /// `P`: put the thread's sender on the priority list, or take it off again; with `domain`
+    /// the whole domain.
+    fn priority_sender(&mut self, domain: bool) -> Option<Effect> {
+        let t = self.selected_thread()?;
+        let on_list = self.priority_rules.is_muted(&inbox::rule_subjects(t));
+        Some(Effect::PriorityRule {
+            thread_id: t.thread.id.clone(),
+            add: !on_list,
+            domain,
+        })
+    }
+
     fn toggle_todo_mark(&mut self) {
         let Some(id) = self
             .todos()
@@ -2112,8 +2269,15 @@ impl App {
 
     fn triage_priority(&mut self) -> Option<Effect> {
         let t = self.selected_thread()?;
-        let next = if t.triage.priority > 0 {
-            0
+        let by_rule = self.priority_rules.is_muted(&inbox::rule_subjects(t));
+        // taking priority off a thread whose sender is on the list sets it to -1, so the list
+        // does not bring it back; otherwise back to 0
+        let next = if self.is_priority(t) {
+            if by_rule {
+                -1
+            } else {
+                0
+            }
         } else {
             PRIORITY_ON
         };
@@ -2506,6 +2670,10 @@ mod tests {
             triage: haste_core::model::Triage::new(id, haste_core::model::ObjectKind::Thread),
             tags: vec![],
             last: None,
+            unread: false,
+            replied: false,
+            sender_known: true,
+            sender: None,
         }
     }
 
@@ -2724,7 +2892,7 @@ mod tests {
     }
 
     #[test]
-    fn x_mutes_and_a_muted_sender_disappears_from_today_and_channels() {
+    fn x_mutes_and_a_muted_sender_drops_to_the_bottom_marked_blocked() {
         let mut app = inbox_app();
         assert_eq!(
             press(&mut app, "x"),
@@ -2739,15 +2907,128 @@ mod tests {
             .iter()
             .map(|t| t.thread.id.as_str())
             .collect();
-        assert_eq!(ids, ["t1"], "t2 has b@x.com among its senders");
-        press(&mut app, "2");
-        assert_eq!(app.channel_threads(0).len(), 1);
+        assert_eq!(ids, ["t1", "t2"], "t2 has b@x.com among its senders: last");
+        assert!(app.is_blocked(&app.threads[1].clone()));
         // an invalid line is reported and the rest still applies
         app.set_ignore(
             &["^b@x\\.com$".to_owned()],
             vec!["line 3: not a valid regular expression".into()],
         );
         assert_eq!(app.ignore_errors.len(), 1);
+    }
+
+    fn rules(app: &mut App, mute: &[&str], priority: &[&str], allowed: &[&str]) {
+        let v = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        app.set_rules(&v(mute), &v(priority), &v(allowed), vec![]);
+    }
+
+    #[test]
+    fn priority_senders_rise_to_the_top_and_p_takes_one_thread_off() {
+        let mut app = inbox_app();
+        rules(&mut app, &[], &["^a@x\\.com$"], &[]);
+        for t in &mut app.threads {
+            t.sender = Some("a@x.com".into());
+        }
+        app.threads[0].thread.last_activity_at = 5; // t1 is older
+        let first = |app: &App| app.today_threads()[0].thread.id.clone();
+        assert!(app.is_priority(&app.threads[0].clone()));
+        // both are priority by the rule: the newer one first, and p takes the cursor's off
+        assert_eq!(first(&app), "t2");
+        assert_eq!(
+            press(&mut app, "p"),
+            vec![Effect::Triage {
+                thread_id: "t2".into(),
+                change: TriageChange::Priority(-1)
+            }]
+        );
+        app.threads[1].triage.priority = -1;
+        assert!(!app.is_priority(&app.threads[1].clone()));
+        assert_eq!(first(&app), "t1", "the one still on the list leads");
+        // P toggles the sender on the list
+        press(&mut app, "k");
+        assert_eq!(
+            press(&mut app, "P"),
+            vec![Effect::PriorityRule {
+                thread_id: "t1".into(),
+                add: false,
+                domain: false
+            }]
+        );
+    }
+
+    #[test]
+    fn strangers_are_blocked_until_unblocked_and_the_reader_refuses_actions() {
+        let mut app = inbox_app();
+        app.threads[1].sender_known = false;
+        app.threads[1].sender = Some("new@shop.example".into());
+        let ids: Vec<String> = app
+            .today_threads()
+            .iter()
+            .map(|t| t.thread.id.clone())
+            .collect();
+        assert_eq!(ids, ["t1", "t2"], "the stranger is last");
+        assert!(app.is_blocked(&app.threads[1].clone()));
+        // priority or allowed senders are let through
+        rules(&mut app, &[], &[], &["^new@shop\\.example$"]);
+        assert!(!app.is_blocked(&app.threads[1].clone()));
+        rules(&mut app, &[], &[], &[]);
+        // b only works on a blocked thread
+        assert!(
+            press(&mut app, "b").is_empty(),
+            "t1 is first and not blocked"
+        );
+        press(&mut app, "j");
+        assert_eq!(
+            press(&mut app, "b"),
+            vec![Effect::Unblock {
+                thread_id: "t2".into()
+            }]
+        );
+        // opening a blocked thread does not mark it read, and actions are refused
+        press(&mut app, "\n");
+        let view = app.threads[1].clone();
+        app.show_thread(view, vec![], None);
+        assert!(app.reader.as_ref().unwrap().blocked);
+        assert!(app.take_mark_read().is_none());
+        assert!(press(&mut app, "r").is_empty());
+        assert!(app.status.contains("blocked"), "{}", app.status);
+        assert_eq!(
+            press(&mut app, "b"),
+            vec![Effect::Unblock {
+                thread_id: "t2".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn u_toggles_read_and_opening_an_unread_thread_marks_it_read() {
+        let mut app = inbox_app();
+        app.threads[0].unread = true; // t1
+        app.threads[1].unread = true; // t2, first in the list
+        assert_eq!(
+            press(&mut app, "u"),
+            vec![Effect::SetRead {
+                thread_id: "t2".into(),
+                read: true
+            }]
+        );
+        assert!(!app.threads[1].unread, "the list shows it read at once");
+        assert_eq!(
+            press(&mut app, "u"),
+            vec![Effect::SetRead {
+                thread_id: "t2".into(),
+                read: false
+            }]
+        );
+        assert!(app.threads[1].unread);
+        // Ctrl-r refreshes now
+        assert_eq!(app.handle_key(Key::Ctrl('r')), Some(Effect::Refresh));
+        // opening t2 marks it read once
+        let view = app.threads[1].clone();
+        app.show_thread(view, vec![], None);
+        assert_eq!(app.take_mark_read().as_deref(), Some("t2"));
+        assert!(app.take_mark_read().is_none());
+        assert!(!app.threads[1].unread);
     }
 
     fn reminder_view(id: &str, due: Option<i64>) -> ReminderView {

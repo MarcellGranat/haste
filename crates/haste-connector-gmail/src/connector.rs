@@ -172,6 +172,9 @@ impl GmailConnector {
             // Only the default inbox is loaded; other folders and tabs are skipped.
             if let Some(api) = read.filter(crate::mapper::is_primary_inbox) {
                 let mapped = map_thread(&api);
+                batch
+                    .unread
+                    .push((mapped.thread.external_id.clone(), mapped.labels.unread));
                 batch.threads.push(mapped.thread);
                 batch.messages.extend(mapped.messages);
             }
@@ -265,6 +268,15 @@ impl GmailConnector {
             }
             _ => first,
         }
+    }
+
+    async fn set_read(
+        &self,
+        target: &haste_core::connector::ReadTarget,
+    ) -> Result<(), ConnectorError> {
+        self.client
+            .set_thread_unread(&target.thread_external_id, !target.read)
+            .await
     }
 
     async fn archive(&self, target: &ArchiveTarget) -> Result<(), ConnectorError> {
@@ -419,6 +431,13 @@ impl Connector for GmailConnector {
         request: &'a AttachmentRequest,
     ) -> BoxFuture<'a, Result<Vec<u8>, ConnectorError>> {
         Box::pin(self.attachment(request))
+    }
+
+    fn set_thread_read<'a>(
+        &'a self,
+        target: &'a haste_core::connector::ReadTarget,
+    ) -> BoxFuture<'a, Result<(), ConnectorError>> {
+        Box::pin(self.set_read(target))
     }
 
     fn archive_thread<'a>(

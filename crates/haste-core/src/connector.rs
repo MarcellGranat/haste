@@ -59,6 +59,18 @@ pub struct Batch {
     pub events: Vec<Event>,
     pub calendar_sweeps: Vec<CalendarSweep>,
     pub next_cursor: Option<Cursor>,
+    /// Mail: `(thread external id, unread)` as the provider reports it.
+    pub unread: Vec<(String, bool)>,
+}
+
+/// What an upstream read or unread mark acts on: the provider's thread id and the provider ids
+/// of the thread's stored messages (IMAP needs the messages, Gmail the thread).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReadTarget {
+    pub thread_external_id: String,
+    pub message_external_ids: Vec<String>,
+    /// `true` marks the thread read, `false` unread.
+    pub read: bool,
 }
 
 /// What an upstream archive acts on: the provider's thread id and the provider ids of the
@@ -242,6 +254,15 @@ pub trait Connector: Send + Sync {
         _target: &'a ArchiveTarget,
     ) -> BoxFuture<'a, Result<(), ConnectorError>> {
         Box::pin(async { Err(ConnectorError::Unsupported("archive".into())) })
+    }
+
+    /// Mark a mail thread read or unread at the provider (Gmail: the UNREAD label; iCloud: the
+    /// `\Seen` flag). Nothing is deleted or sent. Default: unsupported.
+    fn set_thread_read<'a>(
+        &'a self,
+        _target: &'a ReadTarget,
+    ) -> BoxFuture<'a, Result<(), ConnectorError>> {
+        Box::pin(async { Err(ConnectorError::Unsupported("read state".into())) })
     }
 
     /// Fetch one attachment's bytes (read-only; at most [`MAX_FETCH_ATTACHMENT_BYTES`]). The
@@ -656,6 +677,29 @@ impl Guarded<'_> {
             }
             Err(e) => {
                 self.hooks.audit("thread.archive", &source, "error");
+                Err(CallError::Connector(e))
+            }
+        }
+    }
+
+    /// Mark a thread read or unread upstream after the human asked. One attempt, never
+    /// retried; a failure leaves the local mark in place and is reported.
+    ///
+    /// # Errors
+    /// See [`CallError`].
+    pub async fn set_thread_read(&self, target: &ReadTarget) -> Result<(), CallError> {
+        self.precheck(self.connector.capabilities().read, "thread.read_state")?;
+        let source = self.connector.source();
+        match self.connector.set_thread_read(target).await {
+            Ok(()) => {
+                self.hooks.audit("thread.read_state", &source, "ok");
+                Ok(())
+            }
+            Err(e @ (ConnectorError::Challenge(_) | ConnectorError::Checkpoint(_))) => {
+                Err(self.trip("thread.read_state", e))
+            }
+            Err(e) => {
+                self.hooks.audit("thread.read_state", &source, "error");
                 Err(CallError::Connector(e))
             }
         }

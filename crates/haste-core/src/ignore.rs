@@ -6,6 +6,10 @@
 use regex::{Regex, RegexBuilder};
 
 pub const IGNORE_FILE: &str = ".haste_ignore";
+/// Senders whose mail is priority, in the data folder (same line format as the mute list).
+pub const PRIORITY_FILE: &str = "priority_senders";
+/// Senders let through although none of their mail was read yet.
+pub const ALLOWED_FILE: &str = "allowed_senders";
 /// Patterns read; further lines are ignored.
 pub const MAX_PATTERNS: usize = 1000;
 /// Longest pattern line accepted.
@@ -79,6 +83,24 @@ fn compile(pattern: &str) -> Result<Regex, &'static str> {
         .map_err(|_| "not a valid regular expression")
 }
 
+/// The bare lowercase address of a sender: the part in `<...>` when there is one.
+#[must_use]
+pub fn address_of(sender: &str) -> String {
+    let s = sender.trim();
+    match (s.rfind('<'), s.rfind('>')) {
+        (Some(a), Some(b)) if a < b => s[a + 1..b].trim().to_lowercase(),
+        _ => s.to_lowercase(),
+    }
+}
+
+/// The line that matches every sender at this sender's domain.
+#[must_use]
+pub fn domain_pattern_for(sender: &str) -> Option<String> {
+    let address = address_of(sender);
+    let (_, domain) = address.rsplit_once('@')?;
+    (!domain.is_empty()).then(|| format!("@{}$", regex::escape(domain)))
+}
+
 /// The line that mutes exactly this sender.
 #[must_use]
 pub fn pattern_for(sender: &str) -> String {
@@ -88,6 +110,17 @@ pub fn pattern_for(sender: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn addresses_and_domains_are_taken_from_senders() {
+        assert_eq!(address_of("Ana <Ana@X.org>"), "ana@x.org");
+        assert_eq!(address_of(" B@y.com "), "b@y.com");
+        let p = domain_pattern_for("Ana <ana@shop.example.com>").unwrap();
+        let list = IgnoreList::from_patterns(&[p]);
+        assert!(list.is_muted(&["bob@shop.example.com"]));
+        assert!(!list.is_muted(&["bob@shop.example.com.evil.org", "bob@example.com"]));
+        assert!(domain_pattern_for("no-at-sign").is_none());
+    }
 
     #[test]
     fn patterns_match_senders_case_insensitively() {

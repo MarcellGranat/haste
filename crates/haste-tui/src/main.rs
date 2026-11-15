@@ -30,6 +30,19 @@ fn map_key(code: KeyCode, mods: KeyModifiers) -> Option<Key> {
     })
 }
 
+/// The sender rule files (mute, priority, allowed), read again by the daemon on every call.
+fn load_rules(app: &mut App, client: &Client) {
+    if let Ok(Response::Rules {
+        mute,
+        priority,
+        allowed,
+        errors,
+    }) = client.call(RequestBody::SenderRules)
+    {
+        app.set_rules(&mute, &priority, &allowed, errors);
+    }
+}
+
 fn refresh(app: &mut App, client: &Client) {
     app.refresh_tz();
     match client.call(RequestBody::ProposalList {
@@ -60,9 +73,7 @@ fn refresh(app: &mut App, client: &Client) {
     if let Ok(Response::RemindersStatus { status }) = client.call(RequestBody::RemindersStatus) {
         app.set_reminders(status);
     }
-    if let Ok(Response::Ignore { patterns, errors }) = client.call(RequestBody::IgnoreList) {
-        app.set_ignore(&patterns, errors);
-    }
+    load_rules(app, client);
     if let Ok(Response::Filters { filters, error }) = client.call(RequestBody::FilterList) {
         app.set_filters(filters, error);
     }
@@ -409,6 +420,15 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 }) => {
                     let thread_id = view.thread.id.clone();
                     app.show_thread(view, messages, own);
+                    if let Some(id) = app.take_mark_read() {
+                        // reading it here marks it read, at the provider too (Gmail)
+                        if let Err(e) = describe(client.call(RequestBody::ReadSet {
+                            thread_id: id,
+                            read: true,
+                        })) {
+                            app.status = e;
+                        }
+                    }
                     // Ask for a fresh sync of this source (the daemon rate-limits it); the
                     // reader reloads when the new messages arrive. A failure changes nothing.
                     let _ = client.call(RequestBody::ThreadRefresh {
@@ -452,11 +472,70 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
         }
         Effect::Mute { thread_id } => {
             app.status = match client.call(RequestBody::IgnoreMute { thread_id }) {
-                Ok(Response::Muted { pattern }) => {
-                    format!("muted {pattern} (to undo, delete that line in .haste_ignore)")
+                Ok(Response::Muted { .. }) => {
+                    "muted: its mail goes to the bottom, marked blocked; b unblocks".to_owned()
                 }
                 other => describe(other).err().unwrap_or_else(|| "not muted".into()),
             };
+            load_rules(app, client);
+        }
+        Effect::SetRead { thread_id, read } => {
+            app.status = match describe(client.call(RequestBody::ReadSet { thread_id, read })) {
+                Ok(()) if read => "marked read".into(),
+                Ok(()) => "marked unread".into(),
+                Err(e) => e,
+            };
+        }
+        Effect::Unblock { thread_id } => {
+            use haste_proto::RuleKind;
+            let steps = [
+                RequestBody::RuleChange {
+                    thread_id: thread_id.clone(),
+                    rule: RuleKind::Mute,
+                    add: false,
+                    domain: false,
+                },
+                RequestBody::RuleChange {
+                    thread_id: thread_id.clone(),
+                    rule: RuleKind::Allowed,
+                    add: true,
+                    domain: false,
+                },
+                RequestBody::ReadSet {
+                    thread_id,
+                    read: true,
+                },
+            ];
+            let mut result = Ok(());
+            for step in steps {
+                result = describe(client.call(step));
+                if result.is_err() {
+                    break;
+                }
+            }
+            app.status = match result {
+                Ok(()) => "unblocked: this sender is let through".into(),
+                Err(e) => format!("not unblocked: {e}"),
+            };
+            load_rules(app, client);
+        }
+        Effect::PriorityRule {
+            thread_id,
+            add,
+            domain,
+        } => {
+            app.status = match describe(client.call(RequestBody::RuleChange {
+                thread_id,
+                rule: haste_proto::RuleKind::Priority,
+                add,
+                domain,
+            })) {
+                Ok(()) if add && domain => "its whole domain is priority now".into(),
+                Ok(()) if add => "this sender's mail is priority now".into(),
+                Ok(()) => "this sender is no longer priority".into(),
+                Err(e) => e,
+            };
+            load_rules(app, client);
         }
         Effect::SaveNote {
             thread_id,

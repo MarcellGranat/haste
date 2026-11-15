@@ -10,7 +10,7 @@ use haste_core::policy::PrincipalKind;
 use haste_core::proposal::{Payload, Proposal, ProposalState};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 /// Largest frame either side accepts.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
@@ -291,6 +291,22 @@ pub enum RequestBody {
     IgnoreMute {
         thread_id: String,
     },
+    /// Human-only: mark a mail thread read or unread here and, for Gmail, at the provider.
+    ReadSet {
+        thread_id: String,
+        read: bool,
+    },
+    /// Human-only: the local sender rule files (mute, priority, allowed).
+    SenderRules,
+    /// Human-only: add or remove the thread's sender (or its whole domain) in a rule file.
+    RuleChange {
+        thread_id: String,
+        rule: RuleKind,
+        add: bool,
+        /// The whole domain (`@example.com`) instead of this one address.
+        #[serde(default)]
+        domain: bool,
+    },
     /// Human-only: the preset inbox filters from `filters.json` (or the built-in default).
     FilterList,
     /// Human-only: run an approved reminder proposal (`approved -> executing -> sent`).
@@ -338,6 +354,22 @@ pub struct Hints {
     pub pane: Option<String>,
 }
 
+/// Which local sender rule file a change applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleKind {
+    /// `.haste_ignore`: muted senders.
+    Mute,
+    /// `priority_senders`: their mail is priority unless set otherwise.
+    Priority,
+    /// `allowed_senders`: senders let through although never read.
+    Allowed,
+}
+
+fn yes() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadView {
     pub thread: Thread,
@@ -348,6 +380,18 @@ pub struct ThreadView {
     /// Newest message of the thread, for the list preview.
     #[serde(default)]
     pub last: Option<LastMessage>,
+    /// Mail not read yet (here or at the provider).
+    #[serde(default)]
+    pub unread: bool,
+    /// The human wrote the newest message.
+    #[serde(default)]
+    pub replied: bool,
+    /// Mail: the sender has had mail read or answered before. Chats are always known.
+    #[serde(default = "yes")]
+    pub sender_known: bool,
+    /// Mail: the newest sender who is not the human (what the sender rules are matched on).
+    #[serde(default)]
+    pub sender: Option<String>,
 }
 
 /// Sender and the first words of a thread's newest message (a list preview, never the full text).
@@ -538,6 +582,13 @@ pub enum Response {
     },
     Muted {
         pattern: String,
+    },
+    /// The patterns of the three sender rule files, and bad lines in them (numbers only).
+    Rules {
+        mute: Vec<String>,
+        priority: Vec<String>,
+        allowed: Vec<String>,
+        errors: Vec<String>,
     },
     Filters {
         filters: Vec<FilterView>,

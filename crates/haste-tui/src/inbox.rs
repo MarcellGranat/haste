@@ -122,6 +122,18 @@ pub fn senders(t: &ThreadView) -> Vec<&str> {
     out
 }
 
+/// What the sender rules (mute, priority, allowed) are matched against: for mail the newest
+/// sender who is not the human, else the participants; for chats the chat name and people.
+#[must_use]
+pub fn rule_subjects(t: &ThreadView) -> Vec<&str> {
+    if is_mail(&t.thread.source.as_name()) {
+        if let Some(s) = t.sender.as_deref() {
+            return vec![s];
+        }
+    }
+    senders(t)
+}
+
 #[must_use]
 pub fn matches(filter: &FilterView, t: &ThreadView) -> bool {
     let lower = |s: &str| s.to_lowercase();
@@ -428,6 +440,10 @@ mod tests {
             triage,
             tags: vec![],
             last: None,
+            unread: false,
+            replied: false,
+            sender_known: true,
+            sender: None,
         }
     }
 

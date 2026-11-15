@@ -288,6 +288,14 @@ fn store_batch(
         state.store.upsert_message(&m)?;
         messages += 1;
     }
+    if !batch.unread.is_empty() {
+        let flags: Vec<(String, bool)> = batch
+            .unread
+            .iter()
+            .filter_map(|(external, unread)| ids.get(external).map(|id| (id.clone(), *unread)))
+            .collect();
+        state.store.set_unread(&flags, now_secs())?;
+    }
     if !batch.reminders.is_empty() || batch.sweep.is_some() {
         state
             .store

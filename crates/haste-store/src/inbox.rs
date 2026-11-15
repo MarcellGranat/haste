@@ -332,6 +332,130 @@ impl Store {
         })
     }
 
+    /// Record whether threads are unread (`(thread id, unread)`).
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn set_unread(&self, flags: &[(String, bool)], now: i64) -> StoreResult<()> {
+        let flags = flags.to_vec();
+        self.write(move |conn| {
+            let tx = conn.transaction()?;
+            for (id, unread) in &flags {
+                tx.execute(
+                    "INSERT INTO thread_flags (thread_id, unread, updated_at) VALUES (?1, ?2, ?3) \
+                     ON CONFLICT(thread_id) DO UPDATE SET unread = ?2, updated_at = ?3",
+                    rusqlite::params![id, i64::from(*unread), now],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// Ids of the unread threads.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn unread_threads(&self) -> StoreResult<std::collections::HashSet<String>> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare("SELECT thread_id FROM thread_flags WHERE unread = 1")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            Ok(rows.collect::<Result<std::collections::HashSet<_>, _>>()?)
+        })
+    }
+
+    /// Threads where the human wrote the newest message: `own` is the human's address per mail
+    /// source (lowercase); chat messages carry their own flag.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn replied_threads(
+        &self,
+        own: &[(String, String)],
+    ) -> StoreResult<std::collections::HashSet<String>> {
+        let own = own.to_vec();
+        self.read(move |conn| {
+            let mut out = std::collections::HashSet::new();
+            let mut chats = conn.prepare(
+                "SELECT thread_id FROM messages m WHERE is_own = 1 AND sent_at >= \
+                 IFNULL((SELECT MAX(x.sent_at) FROM messages x WHERE x.thread_id = m.thread_id \
+                         AND x.is_own = 0), 0) GROUP BY thread_id",
+            )?;
+            for r in chats.query_map([], |r| r.get::<_, String>(0))? {
+                out.insert(r?);
+            }
+            let mut mail = conn.prepare(
+                "SELECT m.thread_id FROM messages m JOIN threads t ON t.id = m.thread_id \
+                 WHERE t.source = ?1 AND instr(lower(IFNULL(m.sender_identifier, '')), ?2) > 0 \
+                 AND m.sent_at >= IFNULL((SELECT MAX(x.sent_at) FROM messages x \
+                     WHERE x.thread_id = m.thread_id \
+                     AND instr(lower(IFNULL(x.sender_identifier, '')), ?2) = 0), 0) \
+                 GROUP BY m.thread_id",
+            )?;
+            for (source, address) in &own {
+                if address.is_empty() {
+                    continue;
+                }
+                for r in mail.query_map(rusqlite::params![source, address], |r| {
+                    r.get::<_, String>(0)
+                })? {
+                    out.insert(r?);
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    /// For mail threads: the sender of the newest message that is not from one of the human's
+    /// own addresses (lowercase; an empty one matches nothing).
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn last_incoming_senders(
+        &self,
+        own_a: &str,
+        own_b: &str,
+    ) -> StoreResult<std::collections::HashMap<String, String>> {
+        let none = "\u{1}";
+        let a = if own_a.is_empty() { none } else { own_a }.to_owned();
+        let b = if own_b.is_empty() { none } else { own_b }.to_owned();
+        self.read(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT m.thread_id, m.sender_identifier FROM messages m \
+                 JOIN threads t ON t.id = m.thread_id \
+                 WHERE t.source IN ('gmail', 'icloud') AND m.sender_identifier IS NOT NULL \
+                 AND instr(lower(m.sender_identifier), ?1) = 0 \
+                 AND instr(lower(m.sender_identifier), ?2) = 0 \
+                 AND m.id = (SELECT m2.id FROM messages m2 WHERE m2.thread_id = m.thread_id \
+                     AND instr(lower(IFNULL(m2.sender_identifier, '')), ?1) = 0 \
+                     AND instr(lower(IFNULL(m2.sender_identifier, '')), ?2) = 0 \
+                     ORDER BY m2.sent_at DESC, m2.id DESC LIMIT 1)",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![a, b], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            Ok(rows.collect::<Result<std::collections::HashMap<_, _>, _>>()?)
+        })
+    }
+
+    /// Senders (as stored) of the mail messages in threads that are not unread: people whose
+    /// mail has been read or answered.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn senders_of_read_mail(&self) -> StoreResult<Vec<String>> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT m.sender_identifier FROM messages m \
+                 JOIN threads t ON t.id = m.thread_id \
+                 WHERE t.source IN ('gmail', 'icloud') AND m.sender_identifier IS NOT NULL \
+                 AND m.thread_id NOT IN (SELECT thread_id FROM thread_flags WHERE unread = 1)",
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+    }
+
     /// Threads with a message that carries an attachment line (`[attachment…]`).
     ///
     /// # Errors
@@ -747,5 +871,63 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].sender_identifier.as_deref(), Some("who@x"));
         assert_eq!(msgs[0].id, stored.id);
+    }
+
+    fn mail(store: &Store, thread: &Thread, ext: &str, from: &str, at: i64) {
+        store
+            .upsert_message(&Message {
+                id: String::new(),
+                thread_id: thread.id.clone(),
+                source: thread.source.clone(),
+                external_id: ext.into(),
+                sender_person_id: None,
+                sender_identifier: Some(from.into()),
+                body_text: "hi".into(),
+                sent_at: at,
+                is_own: false,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn unread_replied_and_known_senders_come_from_the_stored_mail() {
+        let (_dir, store) = test_store();
+        let read = thread(&store, "g1", Source::Gmail, "Read", 10);
+        let unread = thread(&store, "g2", Source::Gmail, "Unread", 20);
+        let answered = thread(&store, "g3", Source::Gmail, "Answered", 30);
+        mail(&store, &read, "m1", "Ana <ana@x.org>", 10);
+        mail(&store, &unread, "m2", "stranger@y.org", 20);
+        mail(&store, &answered, "m3", "bob@z.org", 29);
+        mail(&store, &answered, "m4", "Me <me@mail.com>", 30);
+        store.set_unread(&[(unread.id.clone(), true)], 1).unwrap();
+        assert_eq!(
+            store.unread_threads().unwrap(),
+            std::collections::HashSet::from([unread.id.clone()])
+        );
+        // a thread without a mark counts as read, so its senders are known
+        let known = store.senders_of_read_mail().unwrap();
+        assert!(known.iter().any(|s| s.contains("ana@x.org")));
+        assert!(!known.iter().any(|s| s.contains("stranger@")));
+        // the human wrote last in one thread only
+        let replied = store
+            .replied_threads(&[("gmail".into(), "me@mail.com".into())])
+            .unwrap();
+        assert_eq!(
+            replied,
+            std::collections::HashSet::from([answered.id.clone()])
+        );
+        // the newest sender who is not the human
+        let last = store.last_incoming_senders("me@mail.com", "").unwrap();
+        assert_eq!(
+            last.get(&answered.id).map(String::as_str),
+            Some("bob@z.org")
+        );
+        assert_eq!(
+            last.get(&unread.id).map(String::as_str),
+            Some("stranger@y.org")
+        );
+        // reading it later flips the mark
+        store.set_unread(&[(unread.id.clone(), false)], 2).unwrap();
+        assert!(store.unread_threads().unwrap().is_empty());
     }
 }

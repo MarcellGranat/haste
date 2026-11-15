@@ -240,6 +240,7 @@ impl Store {
                      OR (to_kind = 'thread' AND to_id = ?1)",
                     [id],
                 )?;
+                tx.execute("DELETE FROM thread_flags WHERE thread_id = ?1", [id])?;
                 tx.execute("DELETE FROM messages WHERE thread_id = ?1", [id])?;
                 tx.execute("DELETE FROM threads WHERE id = ?1", [id])?;
             }

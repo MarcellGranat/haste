@@ -568,9 +568,12 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         ("l", "label"),
         ("g", "aside"),
         ("p", "priority"),
+        ("P", "priority sender"),
+        ("u", "read/unread"),
         ("s", "snooze"),
         ("t", "remind"),
         ("x", "mute"),
+        ("b", "unblock"),
         ("f", "filter"),
     ];
     match app.view {
@@ -691,9 +694,9 @@ pub fn source_icon(source: &str) -> &'static str {
     }
 }
 
-fn thread_line(t: &ThreadView, now: i64) -> ListItem<'static> {
+fn thread_line(t: &ThreadView, now: i64, priority: bool, blocked: bool) -> ListItem<'static> {
     let source = t.thread.source.as_name();
-    let star = if t.triage.priority > 0 { "★" } else { " " };
+    let star = if priority { "★" } else { " " };
     let aside = if t.triage.set_aside { "◌ " } else { "" };
     let age = human_duration(now.saturating_sub(t.thread.last_activity_at));
     let is_mail = inbox::is_mail(&source);
@@ -705,7 +708,16 @@ fn thread_line(t: &ThreadView, now: i64) -> ListItem<'static> {
         .map(inbox::short_sender)
         .unwrap_or_default();
     let mut spans = vec![
-        Span::styled(format!("{star} "), Style::new().fg(theme::PRIORITY)),
+        Span::styled(
+            format!("{} ", if blocked { "⊘" } else { star }),
+            Style::new().fg(if blocked {
+                theme::DANGER
+            } else if priority {
+                theme::PEACH
+            } else {
+                theme::PRIORITY
+            }),
+        ),
         Span::styled(
             format!("{} ", source_icon(&source)),
             Style::new().fg(theme::channel_colour(&source)),
@@ -717,10 +729,17 @@ fn thread_line(t: &ThreadView, now: i64) -> ListItem<'static> {
             Style::new().fg(theme::SUBTEXT0),
         ));
     }
-    spans.push(Span::styled(
-        t.thread.subject.clone(),
-        Style::new().fg(theme::UNREAD),
-    ));
+    let subject_style = if blocked {
+        Style::new().fg(theme::DANGER)
+    } else if t.unread {
+        Style::new().fg(theme::UNREAD).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(theme::UNREAD)
+    };
+    spans.push(Span::styled(t.thread.subject.clone(), subject_style));
+    if blocked {
+        spans.push(Span::styled(" blocked", Style::new().fg(theme::DANGER)));
+    }
     if let Some(last) = &t.last {
         let who = if is_mail {
             String::new()
@@ -748,7 +767,19 @@ fn thread_line(t: &ThreadView, now: i64) -> ListItem<'static> {
         format!("  {age}"),
         Style::new().fg(theme::MUTED),
     ));
-    ListItem::new(Line::from(spans))
+    // one background per row: blocked, priority, answered, unread, in that order of weight
+    let item = ListItem::new(Line::from(spans));
+    if blocked {
+        item.style(Style::new().bg(theme::BLOCKED_BG))
+    } else if priority {
+        item.style(Style::new().bg(theme::PRIORITY_BG))
+    } else if t.replied {
+        item.style(Style::new().bg(theme::REPLIED_BG))
+    } else if t.unread {
+        item.style(Style::new().bg(theme::UNREAD_BG))
+    } else {
+        item
+    }
 }
 
 fn filter_title(app: &App, what: &str) -> String {
@@ -821,7 +852,10 @@ fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
         app.filter_index + 1,
         app.filters.len()
     );
-    let items: Vec<ListItem<'_>> = threads.iter().map(|t| thread_line(t, now)).collect();
+    let items: Vec<ListItem<'_>> = threads
+        .iter()
+        .map(|t| thread_line(t, now, app.is_priority(t), app.is_blocked(t)))
+        .collect();
     draw_scrolling(
         frame,
         top,
@@ -927,7 +961,10 @@ fn draw_channels(frame: &mut Frame<'_>, app: &App, area: Rect) {
         &mut cs,
     );
     let threads = app.channel_threads(app.channels_selected);
-    let items: Vec<ListItem<'_>> = threads.iter().map(|t| thread_line(t, now)).collect();
+    let items: Vec<ListItem<'_>> = threads
+        .iter()
+        .map(|t| thread_line(t, now, app.is_priority(t), app.is_blocked(t)))
+        .collect();
     let title = CHANNELS.get(app.channels_selected).copied().unwrap_or("");
     draw_scrolling(
         frame,
@@ -1320,6 +1357,10 @@ mod tests {
                         thread: t,
                         tags: vec![],
                         last: None,
+                        unread: false,
+                        replied: false,
+                        sender_known: true,
+                        sender: None,
                     }
                 })
                 .collect(),
@@ -1352,6 +1393,10 @@ mod tests {
             triage: haste_core::model::Triage::new("t1", haste_core::model::ObjectKind::Thread),
             tags: vec![],
             last: None,
+            unread: false,
+            replied: false,
+            sender_known: true,
+            sender: None,
         };
         app.show_thread(view, messages, None);
     }

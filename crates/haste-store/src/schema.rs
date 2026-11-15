@@ -165,6 +165,15 @@ const MIGRATIONS: &[&str] = &[
     ",
     // 7: whether the human wrote a message (chats), for the reader's chat layout.
     "ALTER TABLE messages ADD COLUMN is_own INTEGER NOT NULL DEFAULT 0;",
+    // 8: whether a mail thread is unread. A thread without a row counts as read, so mail
+    // stored before this existed shows as read until its provider reports otherwise.
+    "
+    CREATE TABLE thread_flags (
+        thread_id TEXT PRIMARY KEY REFERENCES threads(id),
+        unread INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    ",
 ];
 
 /// Highest schema version this binary understands.

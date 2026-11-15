@@ -280,6 +280,47 @@ impl GmailClient {
         }
     }
 
+    /// Mark every message of a thread read (remove the UNREAD label) or unread (add it).
+    ///
+    /// # Errors
+    /// `Other` for a missing permission or thread; otherwise a classified [`ConnectorError`].
+    pub async fn set_thread_unread(&self, id: &str, unread: bool) -> Result<(), ConnectorError> {
+        let token = self.tokens.access_token().await?;
+        let body = if unread {
+            serde_json::json!({ "addLabelIds": ["UNREAD"] })
+        } else {
+            serde_json::json!({ "removeLabelIds": ["UNREAD"] })
+        };
+        let response = self
+            .http
+            .post(format!(
+                "{}/gmail/v1/users/me/threads/{id}/modify",
+                self.base
+            ))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                ConnectorError::Transient(format!(
+                    "gmail unreachable: {}",
+                    haste_google_oauth::errors::request_kind(&e)
+                ))
+            })?;
+        let status = response.status().as_u16();
+        let text = response.text().await.unwrap_or_default();
+        match status {
+            200..=299 => Ok(()),
+            403 if text.contains("insufficient") || text.contains("ACCESS_TOKEN_SCOPE") => {
+                Err(ConnectorError::Other(
+                    "marking read needs the gmail.modify permission: run `haste connector gmail auth` again".into(),
+                ))
+            }
+            404 => Err(ConnectorError::Other("thread not found".into())),
+            _ => Err(classify(status, &text)),
+        }
+    }
+
     /// Headers only; used to thread a reply.
     ///
     /// # Errors

@@ -845,8 +845,10 @@ fn draw_scrolling(
     items: Vec<ListItem<'_>>,
     selected: Option<usize>,
     offset: &std::cell::Cell<usize>,
+    rows_out: &std::cell::Cell<usize>,
 ) {
     let rows = usize::from(area.height.saturating_sub(2));
+    rows_out.set(rows);
     let start = inbox::window_start(offset.get(), selected.unwrap_or(0), rows);
     offset.set(start);
     let mut state = ListState::default()
@@ -897,6 +899,7 @@ fn draw_later(frame: &mut Frame<'_>, app: &App, area: Rect) {
         items,
         Some(app.later_selected),
         &app.later_offset,
+        &app.list_rows,
     );
 }
 
@@ -938,6 +941,7 @@ fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
         items,
         (inbox_focus && !threads.is_empty()).then_some(app.today_selected),
         &app.inbox_offset,
+        &app.list_rows,
     );
 
     // TODOs for today and without a date
@@ -999,6 +1003,7 @@ fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
         items,
         (!inbox_focus && !todos.is_empty()).then_some(app.todo_selected),
         &app.todo_offset,
+        &app.list_rows,
     );
 }
 
@@ -1048,6 +1053,7 @@ fn draw_channels(frame: &mut Frame<'_>, app: &App, area: Rect) {
         items,
         (app.channel_inner && !threads.is_empty()).then_some(app.channel_thread_selected),
         &app.channel_offset,
+        &app.list_rows,
     );
 }
 
@@ -1546,6 +1552,52 @@ mod tests {
         app.threads[0].triage.set_aside = true;
         let text = render(&app);
         assert!(text.find("set aside ").unwrap() < text.find("a-very-long").unwrap());
+    }
+
+    #[test]
+    fn ctrl_d_and_ctrl_u_move_half_a_screen_in_the_inbox() {
+        let mut app = App::new();
+        app.set_threads(
+            (0..60)
+                .map(|i| {
+                    let id = format!("t{i}");
+                    haste_proto::ThreadView {
+                        thread: haste_core::model::Thread {
+                            id: id.clone(),
+                            source: haste_core::model::Source::Gmail,
+                            external_id: id.clone(),
+                            subject: format!("subject-{i:02}"),
+                            participants: vec![],
+                            last_activity_at: 1000 - i64::from(i),
+                            version: 1,
+                        },
+                        triage: haste_core::model::Triage::new(
+                            &id,
+                            haste_core::model::ObjectKind::Thread,
+                        ),
+                        tags: vec![],
+                        last: None,
+                        unread: false,
+                        replied: false,
+                        sender_known: true,
+                        sender: None,
+                    }
+                })
+                .collect(),
+        );
+        render(&app); // the draw tells the app how many rows the list shows
+        let rows = app.list_rows.get();
+        assert!(rows >= 4, "{rows}");
+        app.handle_key(Key::Ctrl('d'));
+        assert_eq!(app.today_selected, rows / 2);
+        app.handle_key(Key::Ctrl('d'));
+        assert_eq!(app.today_selected, 2 * (rows / 2));
+        app.handle_key(Key::Ctrl('u'));
+        assert_eq!(app.today_selected, rows / 2);
+        for _ in 0..10 {
+            app.handle_key(Key::Ctrl('u'));
+        }
+        assert_eq!(app.today_selected, 0, "stops at the top");
     }
 
     #[test]

@@ -468,6 +468,8 @@ pub struct App {
     pub todo_offset: Cell<usize>,
     pub channel_offset: Cell<usize>,
     pub later_offset: Cell<usize>,
+    /// Rows the list on screen shows (set while drawing), for Ctrl-d and Ctrl-u.
+    pub list_rows: Cell<usize>,
     pub channels_selected: usize,
     /// Inside a channel's thread list (Channels tab).
     pub channel_inner: bool,
@@ -605,6 +607,7 @@ impl App {
             todo_offset: Cell::new(0),
             channel_offset: Cell::new(0),
             later_offset: Cell::new(0),
+            list_rows: Cell::new(0),
             channels_selected: 0,
             channel_inner: false,
             channel_thread_selected: 0,
@@ -1086,6 +1089,11 @@ impl App {
         }
     }
 
+    /// Half the rows of the list on screen, at least one.
+    fn half_page(&self) -> isize {
+        isize::try_from((self.list_rows.get() / 2).max(1)).unwrap_or(1)
+    }
+
     fn move_selection(&mut self, delta: isize) {
         let len = self.selection_len();
         let sel = self.selection_mut();
@@ -1314,6 +1322,9 @@ impl App {
             Key::Char('E') if self.view == View::Connectors => return self.engage_selected(),
             Key::Char('j') | Key::Down => self.move_selection(1),
             Key::Char('k') | Key::Up => self.move_selection(-1),
+            // half a screen of rows
+            Key::Ctrl('d') => self.move_selection(self.half_page()),
+            Key::Ctrl('u') => self.move_selection(-self.half_page()),
             Key::Char('g') if !thread_view => self.jump(false),
             Key::Char('G') => self.jump(true),
             Key::Char('r') if self.view == View::Approvals => return self.reject_selected(),

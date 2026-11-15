@@ -465,17 +465,10 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
         }
         Effect::Mute { thread_id } => {
             app.status = match client.call(RequestBody::IgnoreMute { thread_id }) {
-                Ok(Response::Muted { deleted, .. }) => format!(
-                    "muted: its mail is hidden{}; to undo, remove its line from .haste_ignore",
-                    if deleted > 0 {
-                        format!(
-                            " and {deleted} stored mail{} deleted here (the mailbox is untouched)",
-                            if deleted == 1 { " was" } else { "s were" }
-                        )
-                    } else {
-                        String::new()
-                    }
-                ),
+                Ok(Response::Muted { .. }) => {
+                    "muted: its mail waits on the last screen (7); b there lets the sender back"
+                        .to_owned()
+                }
                 other => describe(other).err().unwrap_or_else(|| "not muted".into()),
             };
             load_rules(app, client);

@@ -352,65 +352,6 @@ impl Store {
         })
     }
 
-    /// Ids of every mail thread (Gmail and iCloud).
-    ///
-    /// # Errors
-    /// Database errors.
-    pub fn mail_thread_ids(&self) -> StoreResult<Vec<String>> {
-        self.read(|conn| {
-            let mut stmt =
-                conn.prepare("SELECT id FROM threads WHERE source IN ('gmail', 'icloud')")?;
-            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-            Ok(rows.collect::<Result<Vec<_>, _>>()?)
-        })
-    }
-
-    /// Delete single messages (by id) from the local store.
-    ///
-    /// # Errors
-    /// Database errors.
-    pub fn delete_messages(&self, ids: &[String]) -> StoreResult<usize> {
-        let ids = ids.to_vec();
-        self.write(move |conn| {
-            let tx = conn.transaction()?;
-            let mut deleted = 0;
-            for id in &ids {
-                deleted += tx.execute("DELETE FROM messages WHERE id = ?1", [id])?;
-            }
-            tx.commit()?;
-            Ok(deleted)
-        })
-    }
-
-    /// Delete threads from the local store with their messages, marks, triage state and links.
-    /// Nothing is done at any mailbox or chat network. Returns how many threads were deleted.
-    ///
-    /// # Errors
-    /// Database errors.
-    pub fn delete_threads(&self, ids: &[String]) -> StoreResult<usize> {
-        let ids = ids.to_vec();
-        self.write(move |conn| {
-            let tx = conn.transaction()?;
-            let mut deleted = 0;
-            for id in &ids {
-                tx.execute("DELETE FROM messages WHERE thread_id = ?1", [id])?;
-                tx.execute("DELETE FROM thread_flags WHERE thread_id = ?1", [id])?;
-                tx.execute(
-                    "DELETE FROM triage WHERE object_kind = 'thread' AND object_id = ?1",
-                    [id],
-                )?;
-                tx.execute(
-                    "DELETE FROM links WHERE (from_kind = 'thread' AND from_id = ?1) \
-                     OR (to_kind = 'thread' AND to_id = ?1)",
-                    [id],
-                )?;
-                deleted += tx.execute("DELETE FROM threads WHERE id = ?1", [id])?;
-            }
-            tx.commit()?;
-            Ok(deleted)
-        })
-    }
-
     /// Ids of the unread threads.
     ///
     /// # Errors

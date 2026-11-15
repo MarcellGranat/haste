@@ -30,7 +30,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         View::Channels => draw_channels(frame, app, body),
         View::Calendar => draw_calendar(frame, app, body),
         View::Later => draw_later(frame, app, body),
-        View::Blocked => draw_blocked(frame, app, body),
+        View::Muted => draw_muted(frame, app, body),
         View::Approvals => draw_approvals(frame, app, body),
         View::Connectors => draw_connectors(frame, app, body),
     }
@@ -532,14 +532,10 @@ fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
             &format!("4 Later {}", app.later_threads().len()),
             app.view == View::Later,
         ),
-        tab(
-            &format!("5 Blocked {}", app.blocked_threads().len()),
-            app.view == View::Blocked,
-        ),
         Span::styled(" │ ", theme::muted()),
     ];
     let pending = app.proposals.len();
-    let approvals = format!("6 Approvals {pending}");
+    let approvals = format!("5 Approvals {pending}");
     spans.push(if pending > 0 && app.view != View::Approvals {
         Span::styled(
             format!(" {approvals} "),
@@ -549,8 +545,12 @@ fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
         tab(&approvals, app.view == View::Approvals)
     });
     spans.push(tab(
-        &format!("7 Connectors {}", app.connectors.len()),
+        &format!("6 Connectors {}", app.connectors.len()),
         app.view == View::Connectors,
+    ));
+    spans.push(tab(
+        &format!("7 Muted {}", app.muted_threads().len()),
+        app.view == View::Muted,
     ));
     frame.render_widget(Paragraph::new(Line::from(spans)).style(theme::text()), area);
 }
@@ -624,11 +624,10 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ("Tab", "to threads"),
             ("j/k", "move"),
         ],
-        View::Blocked => vec![
-            ("b", "accept sender"),
-            ("x", "mute and delete"),
+        View::Muted => vec![
+            ("b", "let the sender back"),
             ("Enter", "open (read only)"),
-            ("Tab", "next tab"),
+            ("Esc", "back"),
             ("j/k", "move"),
         ],
         View::Later => vec![
@@ -1108,18 +1107,18 @@ fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 }
 
-/// The Blocked tab: mail from senders that are not accepted yet.
-fn draw_blocked(frame: &mut Frame<'_>, app: &App, area: Rect) {
+/// The last screen: mail from senders on the mute list, kept out of every other list.
+fn draw_muted(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let now = haste_core::time::now_secs();
-    let threads = app.blocked_threads();
+    let threads = app.muted_threads();
     let title = format!(
-        " Blocked · {} not accepted yet · b accepts the sender · x mutes and deletes ",
+        " Muted · {} from muted senders · b lets the sender back · Esc goes back ",
         threads.len()
     );
     if threads.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "no mail is waiting for you to accept its sender",
+                "nothing from a muted sender (x on a mail mutes its sender)",
                 theme::muted(),
             )))
             .block(theme::panel(&title).border_style(pane_border(true))),
@@ -1129,15 +1128,15 @@ fn draw_blocked(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
     let items: Vec<ListItem<'_>> = threads
         .iter()
-        .map(|t| thread_line(t, now, app.is_priority(t), true, None))
+        .map(|t| thread_line(t, now, false, true, None))
         .collect();
     draw_scrolling(
         frame,
         area,
         theme::panel(&title).border_style(pane_border(true)),
         items,
-        Some(app.blocked_selected),
-        &app.blocked_offset,
+        Some(app.muted_selected),
+        &app.muted_offset,
         &app.list_rows,
     );
 }
@@ -2051,15 +2050,15 @@ mod tests {
     }
 
     #[test]
-    fn mail_from_unaccepted_senders_is_listed_on_the_blocked_tab_only() {
-        let thread = |id: &str, known: bool| haste_proto::ThreadView {
+    fn strangers_are_last_in_the_inbox_and_muted_mail_is_on_the_last_screen() {
+        let thread = |id: &str, known: bool, at: i64| haste_proto::ThreadView {
             thread: haste_core::model::Thread {
                 id: id.into(),
                 source: haste_core::model::Source::Gmail,
                 external_id: id.into(),
                 subject: format!("subject-{id}"),
                 participants: vec![],
-                last_activity_at: 1,
+                last_activity_at: at,
                 version: 1,
             },
             triage: haste_core::model::Triage::new(id, haste_core::model::ObjectKind::Thread),
@@ -2071,14 +2070,27 @@ mod tests {
             sender: Some(format!("{id}@x.org")),
         };
         let mut app = App::new();
-        app.set_threads(vec![thread("friend", true), thread("stranger", false)]);
+        // the stranger is the newest, yet it is listed after the accepted one
+        app.set_threads(vec![
+            thread("friend", true, 1),
+            thread("stranger", false, 9),
+            thread("noisy", true, 5),
+        ]);
+        app.set_ignore(&["^noisy@x\\.org$".to_owned()], vec![]);
         let today = render(&app);
-        assert!(today.contains("subject-friend") && !today.contains("subject-stranger"));
-        assert!(today.contains("5 Blocked 1"), "{today}");
-        app.view = crate::app::View::Blocked;
-        let blocked = render(&app);
-        assert!(blocked.contains("subject-stranger") && !blocked.contains("subject-friend"));
-        assert!(blocked.contains("b accepts the sender"), "{blocked}");
+        let (friend, stranger) = (
+            today.find("subject-friend").unwrap(),
+            today.find("subject-stranger").unwrap(),
+        );
+        assert!(friend < stranger, "blocked mail is at the bottom: {today}");
+        assert!(
+            !today.contains("subject-noisy"),
+            "muted mail is not in the inbox"
+        );
+        assert!(today.contains("7 Muted 1"), "{today}");
+        app.view = crate::app::View::Muted;
+        let muted = render(&app);
+        assert!(muted.contains("subject-noisy") && !muted.contains("subject-friend"));
     }
 
     #[test]

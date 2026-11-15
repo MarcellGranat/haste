@@ -42,22 +42,16 @@ pub enum View {
     Calendar,
     /// Tab 4: threads set aside or snoozed.
     Later,
-    /// Tab 5: mail from senders not accepted yet (`b` accepts them).
-    Blocked,
-    /// Secondary screens, opened with 6 and 7.
+    /// Secondary screens, opened with 5, 6 and 7.
     Approvals,
     Connectors,
+    /// The last screen: mail from muted senders (hidden everywhere else).
+    Muted,
 }
 
 impl View {
-    /// The five main tabs, in order.
-    pub const TABS: [Self; 5] = [
-        Self::Today,
-        Self::Channels,
-        Self::Calendar,
-        Self::Later,
-        Self::Blocked,
-    ];
+    /// The four main tabs, in order.
+    pub const TABS: [Self; 4] = [Self::Today, Self::Channels, Self::Calendar, Self::Later];
 
     #[must_use]
     pub fn is_tab(self) -> bool {
@@ -371,12 +365,6 @@ pub enum Mode {
     ConfirmBatch(Vec<String>),
     ConfirmStaleApprove(String),
     ConfirmRelease(String),
-    /// `x` on a mail: mute its sender and delete their stored mail here, after a yes.
-    ConfirmMute {
-        thread_id: String,
-        sender: String,
-        threads: usize,
-    },
     /// A normal send is not confirmed with a key: it runs after [`SEND_DELAY`] unless the human
     /// cancels with any key. The recipients shown are the ones the daemon resolved and the digest
     /// binds the send to them.
@@ -501,7 +489,7 @@ pub struct App {
     pub todo_offset: Cell<usize>,
     pub channel_offset: Cell<usize>,
     pub later_offset: Cell<usize>,
-    pub blocked_offset: Cell<usize>,
+    pub muted_offset: Cell<usize>,
     /// Rows the list on screen shows (set while drawing), for Ctrl-d and Ctrl-u.
     pub list_rows: Cell<usize>,
     pub channels_selected: usize,
@@ -520,7 +508,7 @@ pub struct App {
     pub events: Vec<EventView>,
     pub calendar_selected: usize,
     pub later_selected: usize,
-    pub blocked_selected: usize,
+    pub muted_selected: usize,
     /// Open reminders (read-only; add or change them through proposals).
     pub reminder_list: Vec<ReminderView>,
     pub group_by: GroupBy,
@@ -646,7 +634,7 @@ impl App {
             todo_offset: Cell::new(0),
             channel_offset: Cell::new(0),
             later_offset: Cell::new(0),
-            blocked_offset: Cell::new(0),
+            muted_offset: Cell::new(0),
             list_rows: Cell::new(0),
             channels_selected: 0,
             channel_inner: false,
@@ -660,7 +648,7 @@ impl App {
             events: Vec::new(),
             calendar_selected: 0,
             later_selected: 0,
-            blocked_selected: 0,
+            muted_selected: 0,
             reminder_list: Vec::new(),
             group_by: GroupBy::Agent,
             blocked_collapsed: false,
@@ -930,11 +918,10 @@ impl App {
                 !t.triage.archived && (include_aside || !t.triage.set_aside) && !self.is_snoozed(t)
             })
             .filter(|t| inbox::matches(filter, t))
-            // a muted sender's mail does not reach the lists at all; mail from senders not
-            // accepted yet waits on the Blocked tab
-            .filter(|t| !self.is_blocked(t))
+            // a muted sender's mail is only on the last screen
+            .filter(|t| !self.is_muted(t))
             .collect();
-        // blocked senders last; then priority; then the newest
+        // senders not accepted yet last; then priority; then the newest
         out.sort_by_key(|t| {
             (
                 self.is_blocked(t),
@@ -1046,13 +1033,13 @@ impl App {
             .is_some_and(|until| until > haste_core::time::now_secs())
     }
 
-    /// The Blocked tab: mail from senders not accepted yet (muted ones are gone), newest first.
+    /// The Muted screen: mail from senders on the mute list, newest first.
     #[must_use]
-    pub fn blocked_threads(&self) -> Vec<&ThreadView> {
+    pub fn muted_threads(&self) -> Vec<&ThreadView> {
         let mut out: Vec<&ThreadView> = self
             .threads
             .iter()
-            .filter(|t| !t.triage.archived && !self.is_muted(t) && self.is_blocked(t))
+            .filter(|t| !t.triage.archived && self.is_muted(t))
             .collect();
         out.sort_by_key(|t| std::cmp::Reverse(t.thread.last_activity_at));
         out
@@ -1066,7 +1053,7 @@ impl App {
             .threads
             .iter()
             .filter(|t| !t.triage.archived && (t.triage.set_aside || self.is_snoozed(t)))
-            .filter(|t| !self.is_blocked(t))
+            .filter(|t| !self.is_muted(t))
             .collect();
         out.sort_by_key(|t| {
             (
@@ -1095,7 +1082,7 @@ impl App {
             View::Later if self.later_focus == TodayFocus::Inbox => {
                 self.later_threads().get(self.later_selected).copied()
             }
-            View::Blocked => self.blocked_threads().get(self.blocked_selected).copied(),
+            View::Muted => self.muted_threads().get(self.muted_selected).copied(),
             _ => None,
         }
     }
@@ -1168,9 +1155,9 @@ impl App {
         self.later_selected = self
             .later_selected
             .min(self.later_threads().len().saturating_sub(1));
-        self.blocked_selected = self
-            .blocked_selected
-            .min(self.blocked_threads().len().saturating_sub(1));
+        self.muted_selected = self
+            .muted_selected
+            .min(self.muted_threads().len().saturating_sub(1));
         self.later_todo_selected = self
             .later_todo_selected
             .min(self.later_todos().len().saturating_sub(1));
@@ -1194,7 +1181,7 @@ impl App {
             View::Calendar => self.agenda().len(),
             View::Later if self.later_focus == TodayFocus::Todo => self.later_todos().len(),
             View::Later => self.later_threads().len(),
-            View::Blocked => self.blocked_threads().len(),
+            View::Muted => self.muted_threads().len(),
             View::Approvals => self.rows().len(),
             View::Connectors => self.connectors.len(),
         }
@@ -1209,7 +1196,7 @@ impl App {
             View::Calendar => &mut self.calendar_selected,
             View::Later if self.later_focus == TodayFocus::Todo => &mut self.later_todo_selected,
             View::Later => &mut self.later_selected,
-            View::Blocked => &mut self.blocked_selected,
+            View::Muted => &mut self.muted_selected,
             View::Approvals => &mut self.approvals_selected,
             View::Connectors => &mut self.connectors_selected,
         }
@@ -1314,7 +1301,6 @@ impl App {
                 },
             ),
             Mode::ConfirmRelease(source) => self.confirm(key, Effect::ReleaseConnector { source }),
-            Mode::ConfirmMute { thread_id, .. } => self.confirm(key, Effect::Mute { thread_id }),
             Mode::ConfirmStaleApprove(id) => self.confirm(
                 key,
                 Effect::Approve {
@@ -1385,7 +1371,7 @@ impl App {
         let thread_view = (self.view == View::Today && self.today_focus == TodayFocus::Inbox)
             || (self.view == View::Channels && self.channel_inner)
             || (self.view == View::Later && self.later_focus == TodayFocus::Inbox)
-            || self.view == View::Blocked;
+            || self.view == View::Muted;
         match key {
             Key::Char('q') => return Some(Effect::Quit),
             Key::Tab if self.view == View::Today => {
@@ -1410,9 +1396,9 @@ impl App {
             Key::Char('2') => self.view = View::Channels,
             Key::Char('3') => self.view = View::Calendar,
             Key::Char('4') => self.view = View::Later,
-            Key::Char('5') => self.view = View::Blocked,
-            Key::Char('6') => self.view = View::Approvals,
-            Key::Char('7') => self.view = View::Connectors,
+            Key::Char('5') => self.view = View::Approvals,
+            Key::Char('6') => self.view = View::Connectors,
+            Key::Char('7') => self.view = View::Muted,
             Key::Esc | Key::Char('h') if self.view == View::Channels && self.channel_inner => {
                 self.channel_inner = false;
             }
@@ -2343,27 +2329,10 @@ impl App {
         }
     }
 
-    /// `x`: mute the sender. For mail that also deletes their stored mail here, so it asks.
+    /// `x`: mute the sender. Their mail leaves the lists and waits on the last screen.
     fn mute_selected(&mut self) -> Option<Effect> {
         let (thread_id, _) = self.thread_under_cursor()?;
-        let t = self.selected_thread()?;
-        if !inbox::is_mail(&t.thread.source.as_name()) {
-            return Some(Effect::Mute { thread_id });
-        }
-        let subject = inbox::rule_subjects(t).first().map(|s| (*s).to_owned())?;
-        let rule = IgnoreList::from_patterns(&[haste_core::ignore::pattern_for(&subject)]);
-        let threads = self
-            .threads
-            .iter()
-            .filter(|o| inbox::is_mail(&o.thread.source.as_name()))
-            .filter(|o| rule.is_muted(&inbox::rule_subjects(o)))
-            .count();
-        self.mode = Mode::ConfirmMute {
-            thread_id,
-            sender: inbox::short_sender_or_address(&inbox::sanitize(&subject)),
-            threads,
-        };
-        None
+        Some(Effect::Mute { thread_id })
     }
 
     fn thread_mut(&mut self, id: &str) -> Option<&mut ThreadView> {
@@ -2646,13 +2615,6 @@ impl App {
             }
             Mode::ConfirmRelease(source) => Some(format!(
                 "Release {source}? It will sync again from its saved cursor. [y/N]"
-            )),
-            Mode::ConfirmMute {
-                sender, threads, ..
-            } => Some(format!(
-                "Mute {sender}? Its mail stops arriving and {threads} stored thread{} from it {} deleted here (the mailbox is not touched). [y/N]",
-                if *threads == 1 { "" } else { "s" },
-                if *threads == 1 { "is" } else { "are" }
             )),
             Mode::ConfirmStaleApprove(id) => {
                 Some(format!("Thread changed. Approve {id} anyway? [y/N]"))
@@ -3142,38 +3104,36 @@ mod tests {
     }
 
     #[test]
-    fn x_asks_then_mutes_and_a_muted_senders_mail_is_not_shown_anywhere() {
+    fn x_mutes_and_the_muted_mail_waits_on_the_last_screen() {
         let mut app = inbox_app();
-        // the daemon names the newest sender of each mail thread
         app.threads[0].sender = Some("a@x.com".into());
         app.threads[1].sender = Some("b@x.com".into());
-        // mail: a confirmation first, naming how many stored threads go
-        assert!(press(&mut app, "x").is_empty());
-        let Mode::ConfirmMute { threads, .. } = app.mode.clone() else {
-            panic!("{:?}", app.mode)
-        };
-        assert_eq!(threads, 1);
-        assert!(app.confirm_prompt().unwrap().contains("deleted here"));
         assert_eq!(
-            press(&mut app, "y"),
+            press(&mut app, "x"),
             vec![Effect::Mute {
                 thread_id: "t2".into()
             }]
         );
-        // anything but y cancels
-        press(&mut app, "x");
-        assert!(press(&mut app, "n").is_empty());
-        assert_eq!(app.mode, Mode::Normal);
         // the daemon answers with the pattern; the next refresh delivers the list
         app.set_ignore(&["^b@x\\.com$".to_owned()], vec![]);
-        let ids: Vec<&str> = app
-            .today_threads()
-            .iter()
-            .map(|t| t.thread.id.as_str())
-            .collect();
-        assert_eq!(ids, ["t1"], "t2 has b@x.com among its senders: gone");
+        let ids = |v: Vec<&ThreadView>| -> Vec<String> {
+            v.iter().map(|t| t.thread.id.clone()).collect()
+        };
+        assert_eq!(ids(app.today_threads()), ["t1"], "not in the inbox");
         press(&mut app, "2");
         assert_eq!(app.channel_threads(0).len(), 1);
+        assert_eq!(ids(app.muted_threads()), ["t2"]);
+        // the last screen: Esc goes back, b takes the sender off the mute list
+        press(&mut app, "7");
+        assert_eq!(app.view, View::Muted);
+        assert_eq!(
+            press(&mut app, "b"),
+            vec![Effect::Unblock {
+                thread_id: "t2".into()
+            }]
+        );
+        app.handle_key(Key::Esc);
+        assert_eq!(app.view, View::Today);
         // an invalid line is reported and the rest still applies
         app.set_ignore(
             &["^b@x\\.com$".to_owned()],
@@ -3253,23 +3213,30 @@ mod tests {
     }
 
     #[test]
-    fn strangers_wait_on_the_blocked_tab_until_accepted_and_the_reader_refuses_actions() {
+    fn strangers_are_last_in_the_inbox_until_accepted_and_the_reader_refuses_actions() {
         let mut app = inbox_app();
         app.threads[1].sender_known = false;
         app.threads[1].sender = Some("new@shop.example".into());
-        let ids = |v: Vec<&ThreadView>| -> Vec<String> {
-            v.iter().map(|t| t.thread.id.clone()).collect()
+        let ids = |app: &App| -> Vec<String> {
+            app.today_threads()
+                .iter()
+                .map(|t| t.thread.id.clone())
+                .collect()
         };
-        assert_eq!(ids(app.today_threads()), ["t1"], "not in the inbox");
-        assert_eq!(ids(app.blocked_threads()), ["t2"]);
+        assert_eq!(
+            ids(&app),
+            ["t1", "t2"],
+            "the stranger is last, still in the inbox"
+        );
+        assert!(app.is_blocked(&app.threads[1].clone()));
         // priority or allowed senders are let through
         rules(&mut app, &[], &[], &["^new@shop\\.example$"]);
-        assert!(app.blocked_threads().is_empty());
-        assert_eq!(app.today_threads().len(), 2);
+        assert!(!app.is_blocked(&app.threads[1].clone()));
+        assert_eq!(ids(&app), ["t2", "t1"]);
         rules(&mut app, &[], &[], &[]);
-        // the Blocked tab: b accepts the sender, x asks before muting
-        press(&mut app, "5");
-        assert_eq!(app.view, View::Blocked);
+        // b only works on a blocked thread
+        assert!(press(&mut app, "b").is_empty(), "t1 is first and accepted");
+        press(&mut app, "j");
         assert_eq!(
             press(&mut app, "b"),
             vec![Effect::Unblock {
@@ -4686,7 +4653,7 @@ mod tests {
     fn connectors_app() -> App {
         let mut app = approvals_app();
         app.set_connectors(connectors());
-        press(&mut app, "7");
+        press(&mut app, "6");
         assert_eq!(app.view, View::Connectors);
         app
     }

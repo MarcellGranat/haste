@@ -243,9 +243,8 @@ pub async fn history_once(state: &Arc<State>, connector: &Arc<dyn Connector>) {
 fn store_batch(
     state: &State,
     source: &Source,
-    mut batch: haste_core::connector::Batch,
+    batch: haste_core::connector::Batch,
 ) -> Result<(SyncReport, Vec<String>), haste_store::StoreError> {
-    drop_muted_mail(state, source, &mut batch);
     let mut ids: HashMap<String, String> = HashMap::new();
     let mut changed = Vec::new();
     for t in &batch.threads {
@@ -355,58 +354,4 @@ pub async fn sync_loop(
         }
         let _ = sync_once(&state, &connector).await;
     }
-}
-
-/// Mail from a muted sender is not stored: threads whose senders are all on the mute list
-/// (the human's own messages aside) are left out of the batch.
-fn drop_muted_mail(state: &State, source: &Source, batch: &mut haste_core::connector::Batch) {
-    if !matches!(source, Source::Gmail | Source::Icloud) || batch.threads.is_empty() {
-        return;
-    }
-    let text = std::fs::read_to_string(state.config.data_dir.join(haste_core::ignore::IGNORE_FILE))
-        .unwrap_or_default();
-    let (mute, _) = haste_core::ignore::IgnoreList::parse(&text);
-    if mute.is_empty() {
-        return;
-    }
-    let own = state
-        .connector_for(source)
-        .and_then(|c| c.own_address())
-        .map(|a| haste_core::ignore::address_of(&a))
-        .unwrap_or_default();
-    // per thread: drop the muted senders' messages, and the thread when nothing else
-    // incoming is left in it
-    let mut drop_threads: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut drop_messages: std::collections::HashSet<(String, Option<String>)> =
-        std::collections::HashSet::new();
-    for t in &batch.threads {
-        let msgs: Vec<&haste_core::model::Message> = batch
-            .messages
-            .iter()
-            .filter(|m| m.thread_id == t.external_id)
-            .collect();
-        let senders: Vec<Option<String>> =
-            msgs.iter().map(|m| m.sender_identifier.clone()).collect();
-        let (muted, others) = crate::dispatch::split_muted(&senders, &own, &mute);
-        if muted.is_empty() {
-            continue;
-        }
-        if others {
-            for i in muted {
-                drop_messages.insert((t.external_id.clone(), Some(msgs[i].external_id.clone())));
-            }
-        } else {
-            drop_threads.insert(t.external_id.clone());
-        }
-    }
-    batch
-        .threads
-        .retain(|t| !drop_threads.contains(&t.external_id));
-    batch.messages.retain(|m| {
-        !drop_threads.contains(&m.thread_id)
-            && !drop_messages.contains(&(m.thread_id.clone(), Some(m.external_id.clone())))
-    });
-    batch
-        .unread
-        .retain(|(external, _)| !drop_threads.contains(external));
 }

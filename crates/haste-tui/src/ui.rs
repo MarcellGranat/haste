@@ -1391,6 +1391,33 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_d_and_ctrl_u_scroll_a_tall_message() {
+        let mut app = App::new();
+        let body: Vec<String> = (0..120).map(|i| format!("line-number-{i:03}")).collect();
+        open_thread(&mut app, vec![msg("m1", &body.join("\n"), 100)]);
+        let first = render(&app);
+        assert!(
+            first.contains("line-number-000"),
+            "opens at the top of the message"
+        );
+        assert!(!first.contains("line-number-119"));
+        app.handle_key(Key::Ctrl('d'));
+        let after = render(&app);
+        assert!(!after.contains("line-number-000"), "scrolled down: {after}");
+        for _ in 0..20 {
+            app.handle_key(Key::Ctrl('d'));
+            render(&app);
+        }
+        let end = render(&app);
+        assert!(end.contains("line-number-119"), "reaches the end: {end}");
+        for _ in 0..30 {
+            app.handle_key(Key::Ctrl('u'));
+            render(&app);
+        }
+        assert!(render(&app).contains("line-number-000"), "and back up");
+    }
+
+    #[test]
     fn a_long_thread_shows_the_newest_six_and_o_loads_older_ones() {
         let mut app = App::new();
         let many: Vec<_> = (0..40)

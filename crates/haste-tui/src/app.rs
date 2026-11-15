@@ -1696,6 +1696,8 @@ impl App {
                 reader.selected = crate::chat::batch_end(&reader.messages, first)
             }
             Key::Char('G') => reader.selected = last,
+            Key::Ctrl('d') => reader.half_pages.set(reader.half_pages.get() + 1),
+            Key::Ctrl('u') => reader.half_pages.set(reader.half_pages.get() - 1),
             Key::Char('a') => {
                 let from = crate::chat::batch_start(&reader.messages, reader.selected);
                 let mut files = Vec::new();

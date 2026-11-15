@@ -54,7 +54,8 @@ pub enum DatePart {
 /// What the form is ready to create.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Task {
-    pub thread_id: String,
+    /// The thread it is about, when it was made from one.
+    pub thread_id: Option<String>,
     pub title: String,
     pub due: Option<i64>,
     pub repeat: Option<RepeatRule>,
@@ -73,7 +74,7 @@ pub enum Outcome {
 
 #[derive(Debug, Clone)]
 pub struct RemindForm {
-    pub thread_id: String,
+    pub thread_id: Option<String>,
     /// Shown dimmed while the title is empty.
     pub suggestion: String,
     pub title: String,
@@ -84,7 +85,10 @@ pub struct RemindForm {
     pub notes: String,
     /// Known project labels, and whether each is on.
     pub labels: Vec<(String, bool)>,
+    /// Index into [`Self::visible_labels`].
     pub label_cursor: usize,
+    /// Typed in the Labels field: narrows the labels fuzzily, fzf style. Empty = the arrows.
+    pub label_query: String,
     pub attachments: Vec<PathBuf>,
     pub picker: Option<FilePicker>,
     /// Byte ranges of the title's words that gave the date or the repeat.
@@ -102,10 +106,11 @@ pub struct RemindForm {
 }
 
 impl RemindForm {
-    /// A form for a thread. `labels` are all known project labels, `on` those the thread has.
+    /// A form for a thread (or for a free-standing task when `thread_id` is `None`, with an
+    /// empty suggestion). `labels` are all known project labels, `on` those the thread has.
     #[must_use]
     pub fn new(
-        thread_id: &str,
+        thread_id: Option<&str>,
         suggestion: &str,
         labels: &[String],
         on: &[String],
@@ -114,7 +119,7 @@ impl RemindForm {
     ) -> Self {
         let when = smartdate::parse(suggestion, now, off);
         let mut form = Self {
-            thread_id: thread_id.to_owned(),
+            thread_id: thread_id.map(str::to_owned),
             suggestion: suggestion.to_owned(),
             title: String::new(),
             field: Field::Title,
@@ -124,6 +129,7 @@ impl RemindForm {
             notes: String::new(),
             labels: labels.iter().map(|l| (l.clone(), on.contains(l))).collect(),
             label_cursor: 0,
+            label_query: String::new(),
             attachments: Vec::new(),
             picker: None,
             marks: Vec::new(),
@@ -203,6 +209,43 @@ impl RemindForm {
         }
     }
 
+    /// The labels the typed query leaves (all of them without a query), best match first, as
+    /// indexes into `labels`. A label matches when the query's letters appear in it in order.
+    #[must_use]
+    pub fn visible_labels(&self) -> Vec<usize> {
+        let query: Vec<char> = self.label_query.to_lowercase().chars().collect();
+        if query.is_empty() {
+            return (0..self.labels.len()).collect();
+        }
+        let mut scored: Vec<(usize, usize)> = self
+            .labels
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (name, _))| {
+                let lower = name.to_lowercase();
+                let mut want = query.iter().peekable();
+                let mut last = None;
+                let mut gaps = 0;
+                for (at, c) in lower.chars().enumerate() {
+                    if want.peek() == Some(&&c) {
+                        if let Some(l) = last {
+                            gaps += at - l - 1;
+                        }
+                        last = Some(at);
+                        want.next();
+                    }
+                }
+                // a label that starts with the query comes first, then the tighter matches
+                want.peek().is_none().then(|| {
+                    let start = usize::from(!lower.starts_with(&self.label_query.to_lowercase()));
+                    (i, start * 1000 + gaps)
+                })
+            })
+            .collect();
+        scored.sort_by_key(|(i, score)| (*score, *i));
+        scored.into_iter().map(|(i, _)| i).collect()
+    }
+
     /// `Ctrl-f`: the caller lists files and opens the picker.
     pub fn open_picker(&mut self, files: Vec<PathBuf>) {
         self.picker = Some(FilePicker::new(files));
@@ -273,6 +316,11 @@ impl RemindForm {
             return Outcome::Continue;
         }
         match key {
+            Key::Esc if self.field == Field::Labels && !self.label_query.is_empty() => {
+                self.label_query.clear();
+                self.label_cursor = 0;
+                return Outcome::Continue;
+            }
             Key::Esc => return Outcome::Cancel,
             Key::Enter => {
                 if self.effective_title().trim().is_empty() {
@@ -332,15 +380,27 @@ impl RemindForm {
             (Field::Notes, Key::Backspace) => {
                 self.notes.pop();
             }
-            (Field::Labels, Key::Left) => self.label_cursor = self.label_cursor.saturating_sub(1),
-            (Field::Labels, Key::Right) => {
-                self.label_cursor =
-                    (self.label_cursor + 1).min(self.labels.len().saturating_sub(1));
+            (Field::Labels, Key::Left | Key::Up) => {
+                self.label_cursor = self.label_cursor.saturating_sub(1);
+            }
+            (Field::Labels, Key::Right | Key::Down) => {
+                let last = self.visible_labels().len().saturating_sub(1);
+                self.label_cursor = (self.label_cursor + 1).min(last);
             }
             (Field::Labels, Key::Char(' ')) => {
-                if let Some((_, on)) = self.labels.get_mut(self.label_cursor) {
-                    *on = !*on;
+                let shown = self.visible_labels();
+                if let Some(&i) = shown.get(self.label_cursor) {
+                    self.labels[i].1 = !self.labels[i].1;
                 }
+            }
+            // typing narrows the labels (fzf); deleting it all goes back to the arrows
+            (Field::Labels, Key::Char(c)) if !c.is_control() => {
+                self.label_query.push(c);
+                self.label_cursor = 0;
+            }
+            (Field::Labels, Key::Backspace) => {
+                self.label_query.pop();
+                self.label_cursor = 0;
             }
             (Field::Files, Key::Backspace) => {
                 self.attachments.pop();
@@ -367,7 +427,7 @@ mod tests {
 
     fn form(suggestion: &str) -> RemindForm {
         RemindForm::new(
-            "t1",
+            Some("t1"),
             suggestion,
             &["haste".to_owned(), "work".to_owned()],
             &["work".to_owned()],
@@ -413,7 +473,7 @@ mod tests {
             vec!["work".to_owned()],
             "the thread's label comes along"
         );
-        assert_eq!(task.thread_id, "t1");
+        assert_eq!(task.thread_id.as_deref(), Some("t1"));
     }
 
     #[test]
@@ -504,6 +564,50 @@ mod tests {
         f.handle(Key::Left);
         f.handle(Key::Left);
         assert_eq!(f.repeat, None);
+    }
+
+    #[test]
+    fn typing_in_the_labels_field_narrows_them_like_fzf_and_deleting_it_goes_back() {
+        let mut f = RemindForm::new(
+            Some("t1"),
+            "Mail",
+            &[
+                "haste".into(),
+                "work".into(),
+                "home-lab".into(),
+                "wow".into(),
+            ],
+            &[],
+            NOW,
+            OFF,
+        );
+        f.field = Field::Labels;
+        assert_eq!(
+            f.visible_labels(),
+            vec![0, 1, 2, 3],
+            "the arrows over all of them"
+        );
+        f.handle(Key::Char('w'));
+        assert_eq!(f.visible_labels(), vec![1, 3], "work and wow start with w");
+        f.handle(Key::Char('r'));
+        assert_eq!(f.visible_labels(), vec![1], "w..r is only work");
+        f.handle(Key::Char(' '));
+        assert!(f.labels[1].1, "Space toggles the highlighted match");
+        f.handle(Key::Backspace);
+        f.handle(Key::Backspace);
+        assert_eq!(
+            f.visible_labels(),
+            vec![0, 1, 2, 3],
+            "empty again: all labels"
+        );
+        for c in "hl".chars() {
+            f.handle(Key::Char(c));
+        }
+        assert_eq!(f.visible_labels(), vec![2], "h...l matches home-lab");
+        // Esc clears the query first and keeps the form
+        assert_eq!(f.handle(Key::Esc), Outcome::Continue);
+        assert!(f.label_query.is_empty());
+        assert_eq!(f.handle(Key::Esc), Outcome::Cancel);
     }
 
     #[test]

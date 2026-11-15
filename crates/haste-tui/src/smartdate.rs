@@ -122,6 +122,18 @@ fn day_number(word: &str) -> Option<i64> {
     digits.parse::<i64>().ok().filter(|d| (1..=31).contains(d))
 }
 
+/// A lone number that is an hour: it follows a day word (`tue 10`, `tomorrow 9`) or `at`.
+fn bare_hour(word: &str, previous: Option<&str>) -> Option<i64> {
+    let h: i64 = word.parse().ok().filter(|h| (0..24).contains(h))?;
+    let after_day = previous.is_some_and(|p| {
+        matches!(
+            p,
+            "at" | "today" | "tomorrow" | "tmrw" | "tmr" | "ma" | "holnap" | "holnaputan" | "kor"
+        ) || weekday_name(p).is_some()
+    });
+    after_day.then_some(h)
+}
+
 /// `3d`, `2h`, `1w`, `+3d`: a span from now.
 fn short_span(word: &str) -> Option<(i64, char)> {
     let w = word.trim_start_matches('+');
@@ -360,6 +372,9 @@ pub fn parse(text: &str, now: i64, off: i64) -> When {
                     at = from_civil(y + 1, m, d, 0, 0);
                 }
                 day = Some(at);
+            } else if let Some(h) = bare_hour(w, i.checked_sub(1).map(|k| ws[k].text.as_str())) {
+                // "Tue 10", "tomorrow 9", "at 5": a lone number after a day word is an hour
+                minutes = Some(h * 60);
             } else {
                 took = 0;
             }
@@ -535,6 +550,20 @@ mod tests {
             .collect();
         assert_eq!(shown, ["Kedd 10:00"]);
         assert!(parse("Quarterly plan", NOW, OFF).marks.is_empty());
+    }
+
+    #[test]
+    fn a_lone_number_after_a_day_word_is_an_hour() {
+        // 2026-11-15 is a Sunday: the next Tuesday is the 17th
+        assert_eq!(due("Tue 10"), Some(at(2026, 11, 17, 10, 0)));
+        assert_eq!(due("next Tuesday 10"), Some(at(2026, 11, 17, 10, 0)));
+        assert_eq!(due("kedd 8"), Some(at(2026, 11, 17, 8, 0)));
+        assert_eq!(due("tomorrow 9"), Some(at(2026, 11, 16, 9, 0)));
+        assert_eq!(due("meet at 17"), Some(at(2026, 11, 15, 17, 0)));
+        // a day and a month still win over an hour
+        assert_eq!(due("Tue 10 nov"), Some(at(2027, 11, 10, 9, 0)));
+        // no day word: a number is just a number
+        assert_eq!(due("room 10"), None);
     }
 
     #[test]

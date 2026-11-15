@@ -605,15 +605,34 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             h
         }
         View::Channels => vec![("Enter", "open"), ("j/k", "move")],
-        View::Calendar => vec![("j/k", "move"), ("Tab", "next tab")],
+        View::Calendar => {
+            let mut h = vec![("j/k", "move")];
+            if app
+                .agenda()
+                .get(app.calendar_selected)
+                .is_some_and(|r| matches!(r, crate::app::AgendaItem::Task { .. }))
+            {
+                h.extend([("Enter", "edit"), ("e", "done (30 s to undo)")]);
+            }
+            h.push(("Tab", "next tab"));
+            h
+        }
+        View::Later if app.later_focus == TodayFocus::Todo => vec![
+            ("Enter", "edit"),
+            ("c", "new"),
+            ("Space", "select"),
+            ("e", "done (30 s to undo)"),
+            ("Tab", "to threads"),
+            ("j/k", "move"),
+        ],
         View::Later => vec![
             ("Enter", "open"),
             ("g", "back to inbox"),
             ("s", "snooze again"),
             ("e", "archive"),
             ("u", "read/unread"),
+            ("Tab", "to TODOs"),
             ("j/k", "move"),
-            ("Tab", "next tab"),
         ],
         View::Approvals => vec![
             ("a", "approve"),
@@ -968,15 +987,28 @@ fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
     notes.push(if form.notes.is_empty() {
         Span::styled("(type to add)", dim)
     } else {
-        Span::styled(inbox::sanitize(&form.notes).replace('\n', " "), text)
+        Span::styled(inbox::sanitize(&form.notes).replace('\n', " ⏎ "), text)
     });
+    if form.field == Field::Notes {
+        notes.push(Span::styled("  Ctrl-g opens the editor", dim));
+    }
     lines.push(Line::from(notes));
     let mut labels = vec![label("Labels", Field::Labels)];
     if form.labels.is_empty() {
         labels.push(Span::styled("(no project labels yet)", dim));
     }
-    for (i, (name, on)) in form.labels.iter().enumerate() {
-        let here = form.field == Field::Labels && form.label_cursor == i;
+    if !form.label_query.is_empty() {
+        labels.push(Span::styled(
+            format!("/{} ", inbox::sanitize(&form.label_query)),
+            Style::new()
+                .fg(theme::SAPPHIRE)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    let shown = form.visible_labels();
+    for (k, &i) in shown.iter().enumerate() {
+        let (name, on) = &form.labels[i];
+        let here = form.field == Field::Labels && form.label_cursor == k;
         labels.push(Span::styled(
             format!(" [{}] {name} ", if *on { "x" } else { " " }),
             if here {
@@ -988,8 +1020,18 @@ fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
             },
         ));
     }
+    if !form.label_query.is_empty() && shown.is_empty() {
+        labels.push(Span::styled("no match", dim));
+    }
     if form.field == Field::Labels {
-        labels.push(Span::styled(" ←→ move  Space toggles", dim));
+        labels.push(Span::styled(
+            if form.label_query.is_empty() {
+                " type to search · ←→ move · Space toggles"
+            } else {
+                " ←→ move · Space toggles · Esc clears"
+            },
+            dim,
+        ));
     }
     lines.push(Line::from(labels));
     let mut files = vec![label("Files", Field::Files)];
@@ -1061,9 +1103,12 @@ fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 }
 
-/// The Later tab: set-aside and snoozed threads, each with why it is here.
+/// The Later tab: set-aside and snoozed threads on top, TODO items with a later date below.
 fn draw_later(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let now = haste_core::time::now_secs();
+    let [top, bottom] =
+        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
+    let inbox_focus = app.later_focus == TodayFocus::Inbox;
     let threads = app.later_threads();
     let items: Vec<ListItem<'_>> = threads
         .iter()
@@ -1077,32 +1122,126 @@ fn draw_later(frame: &mut Frame<'_>, app: &App, area: Rect) {
             thread_line(t, now, app.is_priority(t), app.is_blocked(t), tag)
         })
         .collect();
-    let title = format!(" Later · {} set aside or snoozed ", threads.len());
+    let title = format!(
+        " Later · {} set aside or snoozed · g brings back ",
+        threads.len()
+    );
     if items.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "nothing is set aside or snoozed: g sets a thread aside, s snoozes it",
                 theme::muted(),
             )))
-            .block(theme::panel(&title).border_style(pane_border(true))),
-            area,
+            .block(theme::panel(&title).border_style(pane_border(inbox_focus))),
+            top,
         );
-        return;
+    } else {
+        draw_scrolling(
+            frame,
+            top,
+            theme::panel(&title).border_style(pane_border(inbox_focus)),
+            items,
+            (inbox_focus).then_some(app.later_selected),
+            &app.later_offset,
+            &app.list_rows,
+        );
     }
+    let todos = app.later_todos();
+    let items = todo_items(app, &todos, now);
+    let items = if items.is_empty() {
+        vec![ListItem::new(Span::styled(
+            "no TODO with a date after tomorrow",
+            theme::muted(),
+        ))]
+    } else {
+        items
+    };
+    let todo_title = format!(
+        " TODO · later than tomorrow · {} · Tab switches pane ",
+        todos.len()
+    );
     draw_scrolling(
         frame,
-        area,
-        theme::panel(&title).border_style(pane_border(true)),
+        bottom,
+        theme::panel(&todo_title).border_style(pane_border(!inbox_focus)),
         items,
-        Some(app.later_selected),
-        &app.later_offset,
+        (!inbox_focus && !todos.is_empty()).then_some(app.later_todo_selected),
+        &app.later_todo_offset,
         &app.list_rows,
     );
 }
 
+/// TODO rows: the box, the title, the due time (red when overdue) and a `tomorrow` label.
+fn todo_items<'a>(app: &App, todos: &[&haste_proto::ReminderView], now: i64) -> Vec<ListItem<'a>> {
+    let off = app.tz_offset;
+    todos
+        .iter()
+        .map(|r| {
+            let due = r
+                .reminder
+                .due_at
+                .map_or_else(|| "no date".to_owned(), |d| inbox::stamp(d, off));
+            let overdue = r.reminder.due_at.is_some_and(|d| d < now);
+            if let Some(deadline) = app.pending_done.get(&r.reminder.id) {
+                let left = deadline.saturating_duration_since(app.now).as_secs();
+                return ListItem::new(Line::from(vec![
+                    Span::styled("✓ ", Style::new().fg(theme::GREEN)),
+                    Span::styled(
+                        r.reminder.title.clone(),
+                        Style::new()
+                            .fg(theme::MUTED)
+                            .add_modifier(Modifier::CROSSED_OUT),
+                    ),
+                    Span::styled(
+                        format!("  done in {left}s · e undoes"),
+                        Style::new().fg(theme::GREEN),
+                    ),
+                ]));
+            }
+            let marked = app.todo_marked.contains(&r.reminder.id);
+            let mut spans = vec![
+                Span::styled(
+                    if marked { "▣ " } else { "☐ " },
+                    Style::new().fg(if marked { theme::PEACH } else { theme::GREEN }),
+                ),
+                Span::styled(
+                    inbox::sanitize(&r.reminder.title).replace('\n', " "),
+                    Style::new().fg(theme::TEXT),
+                ),
+            ];
+            if app.is_tomorrow(r) {
+                spans.push(Span::styled(
+                    "  tomorrow",
+                    Style::new()
+                        .fg(theme::LAVENDER)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            if let Some(rule) = r.repeat {
+                spans.push(Span::styled(
+                    format!(
+                        "  ↻ every {}{}",
+                        if rule.every == 1 {
+                            String::new()
+                        } else {
+                            format!("{} ", rule.every)
+                        },
+                        rule.freq.as_str()
+                    ),
+                    Style::new().fg(theme::LAVENDER),
+                ));
+            }
+            spans.push(Span::styled(
+                format!("  {due}"),
+                Style::new().fg(if overdue { theme::DANGER } else { theme::MUTED }),
+            ));
+            ListItem::new(Line::from(spans))
+        })
+        .collect()
+}
+
 fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let now = haste_core::time::now_secs();
-    let off = app.tz_offset;
     let [top, bottom] = Layout::vertical([
         Constraint::Max(u16::try_from(inbox::INBOX_ROWS + 2).unwrap_or(27)),
         Constraint::Min(6),
@@ -1141,56 +1280,19 @@ fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
         &app.list_rows,
     );
 
-    // TODOs for today and without a date
+    // TODOs for today, tomorrow and without a date
     let todos = app.todos();
-    let items: Vec<ListItem<'_>> = todos
-        .iter()
-        .map(|r| {
-            let due = r
-                .reminder
-                .due_at
-                .map_or_else(|| "no date".to_owned(), |d| inbox::stamp(d, off));
-            let overdue = r.reminder.due_at.is_some_and(|d| d < now);
-            if let Some(deadline) = app.pending_done.get(&r.reminder.id) {
-                let left = deadline.saturating_duration_since(app.now).as_secs();
-                return ListItem::new(Line::from(vec![
-                    Span::styled("✓ ", Style::new().fg(theme::GREEN)),
-                    Span::styled(
-                        r.reminder.title.clone(),
-                        Style::new()
-                            .fg(theme::MUTED)
-                            .add_modifier(Modifier::CROSSED_OUT),
-                    ),
-                    Span::styled(
-                        format!("  done in {left}s · e undoes"),
-                        Style::new().fg(theme::GREEN),
-                    ),
-                ]));
-            }
-            let marked = app.todo_marked.contains(&r.reminder.id);
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    if marked { "▣ " } else { "☐ " },
-                    Style::new().fg(if marked { theme::PEACH } else { theme::GREEN }),
-                ),
-                Span::styled(r.reminder.title.clone(), Style::new().fg(theme::TEXT)),
-                Span::styled(
-                    format!("  {due}"),
-                    Style::new().fg(if overdue { theme::DANGER } else { theme::MUTED }),
-                ),
-            ]))
-        })
-        .collect();
+    let items = todo_items(app, &todos, now);
     let items = if items.is_empty() {
         vec![ListItem::new(Span::styled(
-            "nothing due today, nothing without a date",
+            "nothing due today or tomorrow, nothing without a date",
             theme::muted(),
         ))]
     } else {
         items
     };
     let todo_title = format!(
-        " TODO · today and no date · {} · Tab switches pane ",
+        " TODO · today, tomorrow and no date · {} · Tab switches pane ",
         todos.len()
     );
     draw_scrolling(
@@ -1319,12 +1421,22 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
                         r.freq.as_str()
                     )
                 });
+                let done = app.pending_done.contains_key(&reminder.reminder.id);
                 Line::from(vec![
                     Span::styled(format!("  {when:<8}"), Style::new().fg(theme::PEACH)),
-                    Span::styled("☐ ", Style::new().fg(theme::PEACH)),
+                    Span::styled(
+                        if done { "✓ " } else { "☐ " },
+                        Style::new().fg(if done { theme::GREEN } else { theme::PEACH }),
+                    ),
                     Span::styled(
                         inbox::sanitize(&reminder.reminder.title).replace('\n', " "),
-                        Style::new().fg(theme::TEXT),
+                        if done {
+                            Style::new()
+                                .fg(theme::MUTED)
+                                .add_modifier(Modifier::CROSSED_OUT)
+                        } else {
+                            Style::new().fg(theme::TEXT)
+                        },
                     ),
                     Span::styled(repeat, Style::new().fg(theme::LAVENDER)),
                     Span::styled(tags, Style::new().fg(theme::MAUVE)),
@@ -1871,6 +1983,43 @@ mod tests {
             app.handle_key(Key::Char(c));
         }
         assert!(render(&app).contains("every 1 week"));
+    }
+
+    #[test]
+    fn today_labels_tomorrows_todos_and_later_has_the_far_ones() {
+        let todo = |id: &str, due: i64| haste_proto::ReminderView {
+            reminder: haste_core::model::Reminder {
+                id: id.into(),
+                external_id: id.into(),
+                title: format!("task-{id}"),
+                notes_snippet: String::new(),
+                due_at: Some(due),
+                completed: false,
+                list_name: "L".into(),
+                remote_modified_at: 0,
+                missing_since: None,
+                version: 1,
+            },
+            tags: vec![],
+            repeat: None,
+        };
+        let now = haste_core::time::now_secs();
+        let mut app = App::new();
+        app.set_reminder_list(vec![
+            todo("soon", now + 60),
+            todo("next", now + 86_400),
+            todo("far", now + 5 * 86_400),
+        ]);
+        let text = render(&app);
+        assert!(text.contains("task-soon") && text.contains("task-next"));
+        assert!(text.contains("tomorrow"), "{text}");
+        assert!(!text.contains("task-far"), "later ones are not on Today");
+        app.view = crate::app::View::Later;
+        let text = render(&app);
+        assert!(
+            text.contains("task-far") && !text.contains("task-soon"),
+            "{text}"
+        );
     }
 
     #[test]

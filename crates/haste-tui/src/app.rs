@@ -484,6 +484,10 @@ pub struct App {
     completing: BTreeSet<String>,
     pub today_focus: TodayFocus,
     pub todo_selected: usize,
+    /// The Later tab has two panes like Today: threads and, below, TODO items with a later date.
+    pub later_focus: TodayFocus,
+    pub later_todo_selected: usize,
+    pub later_todo_offset: Cell<usize>,
     /// Offset of the machine's local time from UTC (seconds), refreshed by the loop.
     pub tz_offset: i64,
     tz_checked: Option<Instant>,
@@ -627,6 +631,9 @@ impl App {
             completing: BTreeSet::new(),
             today_focus: TodayFocus::Inbox,
             todo_selected: 0,
+            later_focus: TodayFocus::Inbox,
+            later_todo_selected: 0,
+            later_todo_offset: Cell::new(0),
             tz_offset: 0,
             tz_checked: None,
             inbox_offset: Cell::new(0),
@@ -960,10 +967,26 @@ impl App {
         self.filtered_threads(false)
     }
 
-    /// TODOs for today: open reminders due by the end of today (overdue included) or undated.
+    /// Start of tomorrow, and of the day after (local midnight as unix seconds).
+    fn day_marks(&self) -> (i64, i64) {
+        let today = inbox::day_start(haste_core::time::now_secs(), self.tz_offset);
+        (today + 86_400, today + 2 * 86_400)
+    }
+
+    /// Is this TODO due tomorrow (not today, not later)?
+    #[must_use]
+    pub fn is_tomorrow(&self, r: &ReminderView) -> bool {
+        let (tomorrow, after) = self.day_marks();
+        r.reminder
+            .due_at
+            .is_some_and(|d| d >= tomorrow && d < after)
+    }
+
+    /// TODOs for the Today tab: open reminders due by the end of tomorrow (overdue included)
+    /// or undated.
     #[must_use]
     pub fn todos(&self) -> Vec<&ReminderView> {
-        let end = inbox::day_start(haste_core::time::now_secs(), self.tz_offset) + 86_400;
+        let (_, end) = self.day_marks();
         let mut out: Vec<&ReminderView> = self
             .reminder_list
             .iter()
@@ -975,6 +998,42 @@ impl App {
             .collect();
         out.sort_by_key(|r| r.reminder.due_at.unwrap_or(i64::MAX));
         out
+    }
+
+    /// TODOs with a date after tomorrow: the Later tab's second pane.
+    #[must_use]
+    pub fn later_todos(&self) -> Vec<&ReminderView> {
+        let (_, from) = self.day_marks();
+        let mut out: Vec<&ReminderView> = self
+            .reminder_list
+            .iter()
+            .filter(|r| {
+                !r.reminder.completed
+                    && !self.completing.contains(&r.reminder.id)
+                    && r.reminder.due_at.is_some_and(|d| d >= from)
+            })
+            .collect();
+        out.sort_by_key(|r| r.reminder.due_at.unwrap_or(i64::MAX));
+        out
+    }
+
+    /// The TODO list the task keys act on here, and the cursor in it: the Today or Later TODO
+    /// pane, or the one task under the cursor on the Calendar tab.
+    fn active_todos(&self) -> (Vec<&ReminderView>, usize) {
+        match self.view {
+            View::Today => (self.todos(), self.todo_selected),
+            View::Later => (self.later_todos(), self.later_todo_selected),
+            View::Calendar => match self.agenda().get(self.calendar_selected) {
+                Some(AgendaItem::Task { reminder, .. }) => (vec![*reminder], 0),
+                _ => (Vec::new(), 0),
+            },
+            _ => (Vec::new(), 0),
+        }
+    }
+
+    fn todo_under_cursor(&self) -> Option<&ReminderView> {
+        let (list, at) = self.active_todos();
+        list.get(at).copied()
     }
 
     /// Threads of channel `i` under the active filter (set-aside ones included, marked).
@@ -1030,7 +1089,9 @@ impl App {
                 .channel_threads(self.channels_selected)
                 .get(self.channel_thread_selected)
                 .copied(),
-            View::Later => self.later_threads().get(self.later_selected).copied(),
+            View::Later if self.later_focus == TodayFocus::Inbox => {
+                self.later_threads().get(self.later_selected).copied()
+            }
             _ => None,
         }
     }
@@ -1106,6 +1167,9 @@ impl App {
         self.later_selected = self
             .later_selected
             .min(self.later_threads().len().saturating_sub(1));
+        self.later_todo_selected = self
+            .later_todo_selected
+            .min(self.later_todos().len().saturating_sub(1));
     }
 
     fn selected_proposal(&self) -> Option<&Proposal> {
@@ -1124,6 +1188,7 @@ impl App {
             }
             View::Channels => inbox::CHANNELS.len(),
             View::Calendar => self.agenda().len(),
+            View::Later if self.later_focus == TodayFocus::Todo => self.later_todos().len(),
             View::Later => self.later_threads().len(),
             View::Approvals => self.rows().len(),
             View::Connectors => self.connectors.len(),
@@ -1138,6 +1203,7 @@ impl App {
             View::Channels if self.channel_inner => &mut self.channel_thread_selected,
             View::Channels => &mut self.channels_selected,
             View::Calendar => &mut self.calendar_selected,
+            View::Later if self.later_focus == TodayFocus::Todo => &mut self.later_todo_selected,
             View::Later => &mut self.later_selected,
             View::Approvals => &mut self.approvals_selected,
             View::Connectors => &mut self.connectors_selected,
@@ -1313,11 +1379,17 @@ impl App {
     fn key_normal(&mut self, key: Key) -> Option<Effect> {
         let thread_view = (self.view == View::Today && self.today_focus == TodayFocus::Inbox)
             || (self.view == View::Channels && self.channel_inner)
-            || self.view == View::Later;
+            || (self.view == View::Later && self.later_focus == TodayFocus::Inbox);
         match key {
             Key::Char('q') => return Some(Effect::Quit),
             Key::Tab if self.view == View::Today => {
                 self.today_focus = match self.today_focus {
+                    TodayFocus::Inbox => TodayFocus::Todo,
+                    TodayFocus::Todo => TodayFocus::Inbox,
+                };
+            }
+            Key::Tab if self.view == View::Later => {
+                self.later_focus = match self.later_focus {
                     TodayFocus::Inbox => TodayFocus::Todo,
                     TodayFocus::Todo => TodayFocus::Inbox,
                 };
@@ -1345,9 +1417,12 @@ impl App {
             }
             Key::Char('J') if self.view == View::Today => self.today_focus = TodayFocus::Todo,
             Key::Char('K') if self.view == View::Today => self.today_focus = TodayFocus::Inbox,
+            Key::Char('J') if self.view == View::Later => self.later_focus = TodayFocus::Todo,
+            Key::Char('K') if self.view == View::Later => self.later_focus = TodayFocus::Inbox,
             Key::Enter if thread_view => return self.open_selected(),
             Key::Enter if self.on_todos() => self.start_todo(false),
-            Key::Char('c') if self.on_todos() => self.start_todo(true),
+            // a new TODO: the same popup as `t` on a mail, with nothing filled in
+            Key::Char('c') if self.on_todos() => self.start_new_todo(),
             Key::Char('l') if thread_view => return self.start_labels(),
             Key::Char('f') if matches!(self.view, View::Today | View::Channels) => {
                 self.cycle_filter();
@@ -2126,11 +2201,7 @@ impl App {
         let form = if new {
             Compose::todo(None, "", "")
         } else {
-            let Some(r) = self
-                .todos()
-                .get(self.todo_selected)
-                .map(|r| r.reminder.clone())
-            else {
+            let Some(r) = self.todo_under_cursor().map(|r| r.reminder.clone()) else {
                 return;
             };
             let due = r
@@ -2182,6 +2253,12 @@ impl App {
 
     /// The text `$EDITOR` returned goes back into the focused field.
     pub fn compose_replace_text(&mut self, text: &str) {
+        if self.mode == Mode::RemindForm {
+            if let Some(f) = self.remind.as_mut() {
+                f.notes = text.trim_end().to_owned();
+            }
+            return;
+        }
         if let Some(c) = self.compose.as_mut() {
             c.set_focused_text(text);
         }
@@ -2252,7 +2329,15 @@ impl App {
     }
 
     fn on_todos(&self) -> bool {
-        self.view == View::Today && self.today_focus == TodayFocus::Todo
+        match self.view {
+            View::Today => self.today_focus == TodayFocus::Todo,
+            View::Later => self.later_focus == TodayFocus::Todo,
+            View::Calendar => matches!(
+                self.agenda().get(self.calendar_selected),
+                Some(AgendaItem::Task { .. })
+            ),
+            _ => false,
+        }
     }
 
     fn mute_selected(&mut self) -> Option<Effect> {
@@ -2304,11 +2389,7 @@ impl App {
     }
 
     fn toggle_todo_mark(&mut self) {
-        let Some(id) = self
-            .todos()
-            .get(self.todo_selected)
-            .map(|r| r.reminder.id.clone())
-        else {
+        let Some(id) = self.todo_under_cursor().map(|r| r.reminder.id.clone()) else {
             return;
         };
         if !self.todo_marked.remove(&id) {
@@ -2320,10 +2401,7 @@ impl App {
     /// listed, struck through, for [`DONE_GRACE`] and are then completed; `e` on one of them
     /// within that time takes it back.
     fn mark_done(&mut self) {
-        let under_cursor = self
-            .todos()
-            .get(self.todo_selected)
-            .map(|r| r.reminder.id.clone());
+        let under_cursor = self.todo_under_cursor().map(|r| r.reminder.id.clone());
         if self.todo_marked.is_empty() {
             let Some(id) = under_cursor else {
                 return;
@@ -2416,10 +2494,23 @@ impl App {
                 .unwrap_or_default();
         }
         self.remind = Some(Box::new(crate::remind::RemindForm::new(
-            &t.thread.id,
+            Some(&t.thread.id),
             &suggestion,
             &self.known_labels,
             &t.tags,
+            haste_core::time::now_secs(),
+            self.tz_offset,
+        )));
+        self.mode = Mode::RemindForm;
+    }
+
+    /// `c` on a TODO pane: the reminder popup with no thread and no suggested title.
+    fn start_new_todo(&mut self) {
+        self.remind = Some(Box::new(crate::remind::RemindForm::new(
+            None,
+            "",
+            &self.known_labels,
+            &[],
             haste_core::time::now_secs(),
             self.tz_offset,
         )));
@@ -2431,6 +2522,12 @@ impl App {
         if key == Key::Ctrl('f') {
             form.open_picker(editor::scan_files(&attach_roots()));
             return None;
+        }
+        // the notes can grow long: Ctrl-g writes them in the editor ($VISUAL, $EDITOR, else nvim)
+        if key == Key::Ctrl('g') && form.field == crate::remind::Field::Notes {
+            return Some(Effect::ExternalEdit {
+                text: form.notes.clone(),
+            });
         }
         match form.handle(key) {
             crate::remind::Outcome::Continue => None,
@@ -2829,7 +2926,7 @@ mod tests {
             panic!("Enter creates it")
         };
         assert_eq!(task.title, "Team lunch");
-        assert_eq!(task.thread_id, "t2");
+        assert_eq!(task.thread_id.as_deref(), Some("t2"));
         let tomorrow = inbox::tomorrow_morning(haste_core::time::now_secs(), app.tz_offset);
         assert!((task.due.unwrap() - tomorrow).abs() <= 1);
         assert_eq!(app.mode, Mode::Normal);
@@ -2900,6 +2997,78 @@ mod tests {
             assert!(tasks.iter().all(|(id, _)| *id != left_out), "{left_out}");
         }
         assert!(tasks.windows(2).all(|w| w[0].1 <= w[1].1), "soonest first");
+    }
+
+    #[test]
+    fn tomorrows_todos_join_today_and_later_ones_go_to_the_later_tab() {
+        let mut app = App::new();
+        let now = haste_core::time::now_secs();
+        app.set_reminder_list(vec![
+            reminder_view("today", Some(now + 60)),
+            reminder_view("tomorrow", Some(now + 86_400)),
+            reminder_view("later", Some(now + 3 * 86_400)),
+            reminder_view("undated", None),
+        ]);
+        let ids = |v: Vec<&ReminderView>| -> Vec<String> {
+            v.iter().map(|r| r.reminder.id.clone()).collect()
+        };
+        assert_eq!(ids(app.todos()), ["today", "tomorrow", "undated"]);
+        assert!(app.is_tomorrow(&app.todos()[1].clone()));
+        assert!(!app.is_tomorrow(&app.todos()[0].clone()));
+        assert_eq!(ids(app.later_todos()), ["later"]);
+        // the Later tab's TODO pane has the task keys
+        press(&mut app, "4");
+        press(&mut app, "J");
+        assert_eq!(app.later_focus, TodayFocus::Todo);
+        assert!(matches!(
+            press(&mut app, "e").as_slice(),
+            [] // marks it done for 30 s, no effect yet
+        ));
+        assert!(app.pending_done.contains_key("later"));
+        press(&mut app, "K");
+        assert_eq!(app.later_focus, TodayFocus::Inbox);
+    }
+
+    #[test]
+    fn a_task_on_the_calendar_can_be_edited_and_marked_done() {
+        let mut app = App::new();
+        let now = haste_core::time::now_secs();
+        app.set_reminder_list(vec![reminder_view("rent", Some(now + 3_600))]);
+        press(&mut app, "3");
+        assert!(app.on_todos());
+        // Enter opens the TODO form for it
+        app.handle_key(Key::Enter);
+        assert_eq!(app.mode, Mode::Compose);
+        app.handle_key(Key::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+        // e marks it done, e again takes it back
+        press(&mut app, "e");
+        assert!(app.pending_done.contains_key("rent"));
+        press(&mut app, "e");
+        assert!(app.pending_done.is_empty());
+    }
+
+    #[test]
+    fn ctrl_g_in_the_notes_field_hands_the_notes_to_the_editor_and_takes_them_back() {
+        let mut app = inbox_app();
+        press(&mut app, "t");
+        // Tab: title -> date -> repeat -> notes
+        for _ in 0..3 {
+            app.handle_key(Key::Tab);
+        }
+        press(&mut app, "first");
+        assert_eq!(
+            app.handle_key(Key::Ctrl('g')),
+            Some(Effect::ExternalEdit {
+                text: "first".into()
+            })
+        );
+        app.compose_replace_text("first\nsecond\n");
+        assert_eq!(app.remind.as_ref().unwrap().notes, "first\nsecond");
+        let Some(Effect::CreateReminder(task)) = app.handle_key(Key::Enter) else {
+            panic!()
+        };
+        assert_eq!(task.notes, "first\nsecond");
     }
 
     #[test]
@@ -3730,33 +3899,34 @@ mod tests {
     }
 
     #[test]
-    fn a_todo_form_needs_a_title_and_a_valid_date() {
+    fn c_on_the_todo_pane_opens_the_reminder_popup_with_nothing_filled_in() {
         let mut app = App::new();
+        app.known_labels = vec!["haste".into()];
         app.today_focus = TodayFocus::Todo;
         press(&mut app, "c");
-        assert_eq!(app.mode, Mode::Compose);
-        assert!(app.handle_key(Key::Ctrl('s')).is_none(), "no title");
-        press(&mut app, "pay rent");
-        app.handle_key(Key::Enter); // to the due field
-        press(&mut app, "not a date");
-        assert!(
-            app.handle_key(Key::Ctrl('s')).is_none(),
-            "bad date stays open"
-        );
-        assert_eq!(app.mode, Mode::Compose);
-        for _ in 0.."not a date".len() {
-            app.handle_key(Key::Backspace);
-        }
-        let Some(Effect::SaveTodo {
-            reminder_id,
-            title,
-            due,
-            ..
-        }) = app.handle_key(Key::Ctrl('s'))
-        else {
-            panic!("expected SaveTodo")
+        assert_eq!(app.mode, Mode::RemindForm);
+        let form = app.remind.as_ref().unwrap();
+        assert!(form.title.is_empty() && form.suggestion.is_empty());
+        assert!(form.thread_id.is_none());
+        assert!(form.labels.iter().all(|(_, on)| !on), "no label is on");
+        // without a title there is nothing to save
+        assert!(app.handle_key(Key::Enter).is_none());
+        assert_eq!(app.mode, Mode::RemindForm);
+        press(&mut app, "pay rent every month");
+        let Some(Effect::CreateReminder(task)) = app.handle_key(Key::Enter) else {
+            panic!("expected a task")
         };
-        assert_eq!((reminder_id, title.as_str(), due), (None, "pay rent", None));
+        assert_eq!(task.title, "pay rent every month");
+        assert!(task.thread_id.is_none());
+        assert_eq!(
+            task.repeat.map(|r| r.freq),
+            Some(haste_core::model::RepeatFreq::Month)
+        );
+        assert!(
+            task.due.is_some(),
+            "tomorrow morning unless the words say more"
+        );
+        assert_eq!(app.mode, Mode::Normal);
     }
 
     #[test]
@@ -4486,10 +4656,18 @@ mod tests {
         );
         // on the other tabs it cycles the tabs
         press(&mut app, "2");
-        for expected in [View::Calendar, View::Later, View::Today] {
+        for expected in [View::Calendar, View::Later] {
             app.handle_key(Key::Tab);
             assert_eq!(app.view, expected);
         }
+        // Later has two panes like Today: Tab switches between them
+        app.handle_key(Key::Tab);
+        assert_eq!((app.view, app.later_focus), (View::Later, TodayFocus::Todo));
+        app.handle_key(Key::Tab);
+        assert_eq!(
+            (app.view, app.later_focus),
+            (View::Later, TodayFocus::Inbox)
+        );
     }
 
     fn connectors() -> Vec<ConnectorView> {

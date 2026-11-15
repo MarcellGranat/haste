@@ -677,7 +677,7 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
             let mut notes = task.notes.clone();
             for line in lines
                 .into_iter()
-                .chain([format!("haste:thread/{}", task.thread_id)])
+                .chain(task.thread_id.iter().map(|t| format!("haste:thread/{t}")))
             {
                 if !notes.is_empty() {
                     notes.push('\n');
@@ -690,7 +690,7 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 notes: Some(notes),
                 repeat: task.repeat,
                 tags: task.tags,
-                thread_id: Some(task.thread_id),
+                thread_id: task.thread_id,
             })) {
                 Ok(()) => "reminder created".into(),
                 Err(e) => format!("reminder not created: {e}"),
@@ -820,6 +820,17 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
 /// Nothing is sent: the draft still needs approval and the human send flow.
 /// `Ctrl-G` in a form: the focused field's text goes to `$VISUAL`/`$EDITOR` (the one place the
 /// terminal is handed over) and comes back into the form.
+/// The editor when `$VISUAL` and `$EDITOR` are unset: `nvim` when it is installed, else `vi`.
+fn default_editor() -> &'static str {
+    let found = std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join("nvim").is_file()));
+    if found {
+        "nvim"
+    } else {
+        "vi"
+    }
+}
+
 fn edit_external(terminal: &mut ratatui::DefaultTerminal, app: &mut App, text: &str) {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -839,7 +850,7 @@ fn edit_external(terminal: &mut ratatui::DefaultTerminal, app: &mut App, text: &
     }
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| "vi".into());
+        .unwrap_or_else(|_| default_editor().into());
     let mut parts = editor.split_whitespace();
     let program = parts.next().unwrap_or("vi").to_owned();
     ratatui::restore();

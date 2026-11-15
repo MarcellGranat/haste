@@ -525,8 +525,13 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
             inbox::sanitize(m.sender_identifier.as_deref().unwrap_or("unknown sender"))
                 .replace('\n', " ")
         };
+        let count = if end > i {
+            format!("{} files · ", files.len())
+        } else {
+            String::new()
+        };
         let header = format!(
-            " {who} · {} ",
+            " {who} · {count}{} ",
             inbox::smart_stamp(m.sent_at, l.now, l.tz_offset)
         );
         let inner = body
@@ -779,6 +784,7 @@ mod tests {
             .collect();
         assert_eq!(text.iter().filter(|t| t.contains("image.jpg")).count(), 4);
         assert_eq!(text.iter().filter(|t| t.contains("╭─")).count(), 3);
+        assert!(text.iter().any(|t| t.contains("3 files")));
     }
 
     #[test]

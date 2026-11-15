@@ -108,7 +108,14 @@ impl Reader {
     /// Index of the oldest message on screen.
     #[must_use]
     pub fn first_visible(&self) -> usize {
-        self.messages.len().saturating_sub(self.shown)
+        // the newest `shown` items; a batch of attachment-only messages counts as one
+        let mut items = 0;
+        let mut at = self.messages.len();
+        while at > 0 && items < self.shown {
+            at = crate::chat::batch_start(&self.messages, at - 1);
+            items += 1;
+        }
+        at
     }
 }
 
@@ -3090,6 +3097,23 @@ mod tests {
         press(&mut app, "+");
         assert!(press(&mut app, "0").is_empty());
         assert_eq!(app.mode, Mode::Read);
+    }
+
+    #[test]
+    fn a_batch_counts_as_one_in_the_reader_window() {
+        let mut app = inbox_app();
+        let view = app.threads[1].clone();
+        let img = "[attachment: image.jpg (image/jpeg, 10 bytes)]";
+        let mut messages = vec![message("t", "a@x.com", "text", 1)];
+        for k in 0..8 {
+            messages.push(message(&format!("i{k}"), "a@x.com", img, 100 + k));
+        }
+        app.show_thread(view, messages, None);
+        let r = app.reader.as_mut().unwrap();
+        r.shown = 1;
+        assert_eq!(r.first_visible(), 1, "the whole batch is one item");
+        r.shown = 2;
+        assert_eq!(r.first_visible(), 0);
     }
 
     #[test]

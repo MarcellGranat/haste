@@ -628,6 +628,62 @@ async fn a_resync_forgets_the_local_mail_and_reads_the_inbox_again() {
 }
 
 #[tokio::test]
+async fn muting_keeps_the_mail_and_deleting_it_is_a_separate_human_only_step() {
+    let h = boot().await;
+    let thread = synced_thread(&h).await;
+    let store = &h.daemon.state.store;
+    let before = store.messages_for_thread(&thread).unwrap().len();
+    let agent = register(&h, "agent-m", PrincipalKind::Agent).await;
+    let delete = || RequestBody::MutedDelete {
+        thread_id: thread.clone(),
+    };
+    // a sender that is not muted has nothing to delete
+    assert_eq!(
+        code(&human(&h, delete()).await),
+        Some(ErrorCode::Validation)
+    );
+    // muting hides, it does not delete
+    let Response::Muted { pattern } = human(
+        &h,
+        RequestBody::IgnoreMute {
+            thread_id: thread.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("expected the mute")
+    };
+    assert_eq!(store.messages_for_thread(&thread).unwrap().len(), before);
+    // an agent cannot delete
+    assert_eq!(
+        code(&call_with(&h, &agent, delete()).await),
+        Some(ErrorCode::Denied)
+    );
+    assert_eq!(store.messages_for_thread(&thread).unwrap().len(), before);
+    // the human can: the sender's messages go, the mute stays, the mailbox is untouched
+    let Response::Deleted { messages } = human(&h, delete()).await else {
+        panic!("expected the deletion")
+    };
+    assert!(messages >= 1);
+    let mute = haste_core::ignore::IgnoreList::from_patterns(&[pattern]);
+    let left: Vec<String> = store
+        .messages_for_thread(&thread)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|m| m.sender_identifier)
+        .filter(|s| mute.is_muted(&[s.as_str()]))
+        .collect();
+    assert!(left.is_empty());
+    let Response::Ignore { patterns, .. } = human(&h, RequestBody::IgnoreList).await else {
+        panic!()
+    };
+    assert_eq!(patterns.len(), 1, "still muted");
+    assert!(audit(&h).contains("muted.delete"));
+    assert_eq!(h.google.count("/gmail/v1/users/me/threads/t100/modify"), 0);
+    h.daemon.shutdown().await;
+}
+
+#[tokio::test]
 async fn only_the_human_can_save_an_attachment_and_it_never_overwrites() {
     let h = boot().await;
     let thread = synced_thread(&h).await;

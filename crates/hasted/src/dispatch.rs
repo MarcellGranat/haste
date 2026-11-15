@@ -102,6 +102,7 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::IgnoreMute { .. }
         | RequestBody::ReadSet { .. }
         | RequestBody::SenderRules
+        | RequestBody::MutedDelete { .. }
         | RequestBody::RuleChange { .. }
         | RequestBody::ResolveExecuting { .. }
         | RequestBody::Subscribe { .. } => Action::Manage,
@@ -149,6 +150,7 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::IgnoreMute { .. } => "ignore_mute",
         RequestBody::ReadSet { .. } => "read_set",
         RequestBody::SenderRules => "sender_rules",
+        RequestBody::MutedDelete { .. } => "muted_delete",
         RequestBody::RuleChange { .. } => "rule_change",
         _ => "request",
     }
@@ -733,6 +735,7 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             }
         }
         RequestBody::IgnoreMute { thread_id } => ignore_mute(state, principal, &thread_id),
+        RequestBody::MutedDelete { thread_id } => muted_delete(state, principal, &thread_id),
         RequestBody::SenderRules => {
             let (mute, mut errors) = read_rule_file(&state.config.data_dir, ignore::IGNORE_FILE);
             let (priority, e2) = read_rule_file(&state.config.data_dir, ignore::PRIORITY_FILE);
@@ -1606,6 +1609,76 @@ fn rule_sender(state: &State, thread_id: &str) -> Result<String, &'static str> {
         .find(|s| s.to_lowercase() != own)
         .map(str::to_owned)
         .ok_or("no sender other than you")
+}
+
+/// The stored mail of the muted sender of this thread is deleted here: their messages, and a
+/// thread entirely when nothing from anyone else is left in it. The sender stays muted and the
+/// mailbox is not touched. The mute lines that match this sender decide whose mail goes.
+fn muted_delete(state: &State, actor: &Principal, thread_id: &str) -> Response {
+    let sender = match rule_sender(state, thread_id) {
+        Ok(s) => s,
+        Err(why) => return err(ErrorCode::Validation, why),
+    };
+    let (all, _) = read_ignore(&state.config.data_dir);
+    let lines: Vec<String> = all
+        .patterns()
+        .into_iter()
+        .filter(|p| {
+            haste_core::ignore::IgnoreList::from_patterns(&[p.clone()]).is_muted(&[sender.as_str()])
+        })
+        .collect();
+    if lines.is_empty() {
+        return err(ErrorCode::Validation, "this sender is not muted");
+    }
+    let mute = haste_core::ignore::IgnoreList::from_patterns(&lines);
+    let own = |source: &Source| {
+        state
+            .connector_for(source)
+            .and_then(|c| c.own_address())
+            .map(|a| haste_core::ignore::address_of(&a))
+            .unwrap_or_default()
+    };
+    let mut gone = 0;
+    for id in state.store.mail_thread_ids().unwrap_or_default() {
+        let Ok(Some((thread, _))) = state.store.get_thread(&id) else {
+            continue;
+        };
+        let messages = state.store.messages_for_thread(&id).unwrap_or_default();
+        let own = own(&thread.source);
+        let mut muted = Vec::new();
+        let mut others = false;
+        for (i, m) in messages.iter().enumerate() {
+            match m.sender_identifier.as_deref() {
+                Some(s) if mute.is_muted(&[s]) => muted.push(i),
+                Some(s) if own.is_empty() || haste_core::ignore::address_of(s) != own => {
+                    others = true;
+                }
+                None => others = true,
+                Some(_) => {}
+            }
+        }
+        if muted.is_empty() {
+            continue;
+        }
+        gone += muted.len();
+        if others {
+            let ids: Vec<String> = muted.iter().map(|i| messages[*i].id.clone()).collect();
+            let _ = state.store.delete_messages(&ids);
+        } else {
+            let _ = state.store.delete_threads(&[id]);
+        }
+    }
+    state.audit(
+        &actor.id,
+        "muted.delete",
+        "deleted",
+        Some(thread_id),
+        Some(&format!("messages={gone}")),
+    );
+    state.publish(Event::ThreadChanged {
+        thread_id: thread_id.to_owned(),
+    });
+    Response::Deleted { messages: gone }
 }
 
 fn mute_pattern(state: &State, thread_id: &str) -> Result<String, &'static str> {

@@ -933,6 +933,7 @@ fn kind(body: &RequestBody) -> Kind {
         | RequestBody::IgnoreMute { .. }
         | RequestBody::ReadSet { .. }
         | RequestBody::SenderRules
+        | RequestBody::MutedDelete { .. }
         | RequestBody::RuleChange { .. }
         | RequestBody::Execute { .. }
         | RequestBody::ResolveExecuting { .. }

@@ -275,6 +275,10 @@ pub enum Effect {
         thread_id: String,
         read: bool,
     },
+    /// Delete the stored mail of a muted sender (here only; the sender stays muted).
+    DeleteMuted {
+        thread_id: String,
+    },
     /// Let a blocked sender through: out of the mute list, into the allowed list, thread read.
     Unblock {
         thread_id: String,
@@ -365,6 +369,12 @@ pub enum Mode {
     ConfirmBatch(Vec<String>),
     ConfirmStaleApprove(String),
     ConfirmRelease(String),
+    /// `d` on the Muted screen: delete the muted sender's stored mail here, after a yes.
+    ConfirmDeleteMuted {
+        thread_id: String,
+        sender: String,
+        threads: usize,
+    },
     /// A normal send is not confirmed with a key: it runs after [`SEND_DELAY`] unless the human
     /// cancels with any key. The recipients shown are the ones the daemon resolved and the digest
     /// binds the send to them.
@@ -1301,6 +1311,9 @@ impl App {
                 },
             ),
             Mode::ConfirmRelease(source) => self.confirm(key, Effect::ReleaseConnector { source }),
+            Mode::ConfirmDeleteMuted { thread_id, .. } => {
+                self.confirm(key, Effect::DeleteMuted { thread_id })
+            }
             Mode::ConfirmStaleApprove(id) => self.confirm(
                 key,
                 Effect::Approve {
@@ -1430,6 +1443,7 @@ impl App {
             Key::Ctrl('p') if thread_view => return self.priority_sender(true),
             Key::Char('u') if thread_view => return self.toggle_read(),
             Key::Char('b') if thread_view => return self.unblock_selected(),
+            Key::Char('d') if self.view == View::Muted => return self.start_delete_muted(),
             Key::Ctrl('r') => return Some(Effect::Refresh),
             Key::Char('s') if thread_view => self.start_snooze(),
             Key::Char('t') if thread_view => self.start_remind(),
@@ -2354,6 +2368,33 @@ impl App {
         Some(Effect::SetRead { thread_id, read })
     }
 
+    /// `d` on the Muted screen: ask before deleting the sender's stored mail.
+    fn start_delete_muted(&mut self) -> Option<Effect> {
+        let t = self.selected_thread()?;
+        let subjects = inbox::rule_subjects(t);
+        // every mute line that matches this sender decides whose mail goes
+        let lines: Vec<String> = self
+            .ignore
+            .patterns()
+            .into_iter()
+            .filter(|p| IgnoreList::from_patterns(&[p.clone()]).is_muted(&subjects))
+            .collect();
+        let rule = IgnoreList::from_patterns(&lines);
+        let threads = self
+            .muted_threads()
+            .iter()
+            .filter(|o| rule.is_muted(&inbox::rule_subjects(o)))
+            .count();
+        self.mode = Mode::ConfirmDeleteMuted {
+            thread_id: t.thread.id.clone(),
+            sender: inbox::short_sender_or_address(&inbox::sanitize(
+                subjects.first().copied().unwrap_or("this sender"),
+            )),
+            threads,
+        };
+        None
+    }
+
     /// `b`: let a blocked sender through.
     fn unblock_selected(&mut self) -> Option<Effect> {
         let t = self.selected_thread()?;
@@ -2615,6 +2656,12 @@ impl App {
             }
             Mode::ConfirmRelease(source) => Some(format!(
                 "Release {source}? It will sync again from its saved cursor. [y/N]"
+            )),
+            Mode::ConfirmDeleteMuted {
+                sender, threads, ..
+            } => Some(format!(
+                "Delete the {threads} stored thread{} from {sender} here? The mailbox is not touched and the sender stays muted. [y/N]",
+                if *threads == 1 { "" } else { "s" }
             )),
             Mode::ConfirmStaleApprove(id) => {
                 Some(format!("Thread changed. Approve {id} anyway? [y/N]"))
@@ -3140,6 +3187,33 @@ mod tests {
             vec!["line 3: not a valid regular expression".into()],
         );
         assert_eq!(app.ignore_errors.len(), 1);
+    }
+
+    #[test]
+    fn d_on_the_muted_screen_asks_before_deleting_the_senders_mail() {
+        let mut app = inbox_app();
+        app.threads[1].sender = Some("b@x.com".into());
+        app.set_ignore(&["^b@x\\.com$".to_owned()], vec![]);
+        // d does nothing outside the Muted screen
+        assert!(press(&mut app, "d").is_empty());
+        assert_eq!(app.mode, Mode::Normal);
+        press(&mut app, "7");
+        assert!(press(&mut app, "d").is_empty());
+        let Mode::ConfirmDeleteMuted { threads, .. } = app.mode.clone() else {
+            panic!("{:?}", app.mode)
+        };
+        assert_eq!(threads, 1);
+        assert!(app.confirm_prompt().unwrap().contains("not touched"));
+        // anything but y cancels
+        assert!(press(&mut app, "n").is_empty());
+        assert_eq!(app.mode, Mode::Normal);
+        press(&mut app, "d");
+        assert_eq!(
+            press(&mut app, "y"),
+            vec![Effect::DeleteMuted {
+                thread_id: "t2".into()
+            }]
+        );
     }
 
     fn rules(app: &mut App, mute: &[&str], priority: &[&str], allowed: &[&str]) {

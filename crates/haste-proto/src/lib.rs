@@ -310,6 +310,11 @@ pub enum RequestBody {
         thread_id: String,
         read: bool,
     },
+    /// Human-only: delete the stored mail of the muted sender of this thread (here only; the
+    /// mailbox is untouched). The sender stays muted.
+    MutedDelete {
+        thread_id: String,
+    },
     /// Human-only: the local sender rule files (mute, priority, allowed).
     SenderRules,
     /// Human-only: add or remove the thread's sender (or its whole domain) in a rule file.
@@ -599,6 +604,10 @@ pub enum Response {
     },
     Muted {
         pattern: String,
+    },
+    /// Mail messages deleted from the local store.
+    Deleted {
+        messages: usize,
     },
     /// The patterns of the three sender rule files, and bad lines in them (numbers only).
     Rules {

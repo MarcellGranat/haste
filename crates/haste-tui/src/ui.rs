@@ -626,6 +626,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         ],
         View::Muted => vec![
             ("b", "let the sender back"),
+            ("d", "delete their mail"),
             ("Enter", "open (read only)"),
             ("Esc", "back"),
             ("j/k", "move"),
@@ -1112,7 +1113,7 @@ fn draw_muted(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let now = haste_core::time::now_secs();
     let threads = app.muted_threads();
     let title = format!(
-        " Muted · {} from muted senders · b lets the sender back · Esc goes back ",
+        " Muted · {} from muted senders · b lets the sender back · d deletes their mail ",
         threads.len()
     );
     if threads.is_empty() {

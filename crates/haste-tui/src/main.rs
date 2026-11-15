@@ -473,6 +473,17 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
             };
             load_rules(app, client);
         }
+        Effect::DeleteMuted { thread_id } => {
+            app.status = match client.call(RequestBody::MutedDelete { thread_id }) {
+                Ok(Response::Deleted { messages }) => format!(
+                    "deleted {messages} stored mail{} here (the mailbox is untouched; the sender stays muted)",
+                    if messages == 1 { "" } else { "s" }
+                ),
+                other => describe(other)
+                    .err()
+                    .unwrap_or_else(|| "nothing was deleted".into()),
+            };
+        }
         Effect::SetRead { thread_id, read } => {
             app.status = match describe(client.call(RequestBody::ReadSet { thread_id, read })) {
                 Ok(()) if read => "marked read".into(),

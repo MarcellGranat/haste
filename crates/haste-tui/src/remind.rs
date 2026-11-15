@@ -87,6 +87,11 @@ pub struct RemindForm {
     pub label_cursor: usize,
     pub attachments: Vec<PathBuf>,
     pub picker: Option<FilePicker>,
+    /// Byte ranges of the title's words that gave the date or the repeat.
+    pub marks: Vec<(usize, usize)>,
+    /// The date, or the repeat, was read from the title (and not set by hand).
+    pub due_from_title: bool,
+    pub repeat_from_title: bool,
     /// The date or the repeat was set by hand: the words of the title no longer change them.
     date_touched: bool,
     repeat_touched: bool,
@@ -121,6 +126,9 @@ impl RemindForm {
             label_cursor: 0,
             attachments: Vec::new(),
             picker: None,
+            marks: Vec::new(),
+            due_from_title: false,
+            repeat_from_title: false,
             date_touched: false,
             repeat_touched: false,
             subject_due: when.due,
@@ -153,6 +161,9 @@ impl RemindForm {
         if !self.repeat_touched {
             self.repeat = when.repeat;
         }
+        self.due_from_title = !self.date_touched && when.due.is_some();
+        self.repeat_from_title = !self.repeat_touched && when.repeat.is_some();
+        self.marks = when.marks;
     }
 
     /// The date as three texts: day, hour, minute.
@@ -430,6 +441,25 @@ mod tests {
                 every: 1
             })
         );
+    }
+
+    #[test]
+    fn the_words_that_gave_the_date_are_marked_as_they_are_typed() {
+        let mut f = form("Mail");
+        type_text(&mut f, "call Ana in 3 days");
+        assert!(f.due_from_title);
+        let shown: Vec<&str> = f.marks.iter().map(|(s, e)| &f.title[*s..*e]).collect();
+        assert_eq!(shown, ["3 days"]);
+        assert_eq!(f.due, Some(at(18, 9, 0)));
+        // a half-typed phrase says nothing yet, and what the words gave goes when they do
+        type_text(&mut f, " every");
+        assert_eq!(f.repeat, None);
+        type_text(&mut f, " month");
+        assert_eq!(f.repeat.map(|r| r.freq), Some(RepeatFreq::Month));
+        for _ in 0..6 {
+            f.handle(Key::Backspace);
+        }
+        assert_eq!(f.repeat, None, "the repeat went with its words");
     }
 
     #[test]

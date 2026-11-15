@@ -905,10 +905,19 @@ fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ));
         title.push(Span::styled("   → edit  Tab/Enter use", dim));
     } else {
-        title.push(Span::styled(
-            inbox::sanitize(&form.title).replace('\n', " "),
-            text,
-        ));
+        // the words that gave the date or the repeat stand out
+        let found = Style::new()
+            .fg(theme::SAPPHIRE)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        let mut at = 0;
+        for &(s, e) in &form.marks {
+            if s >= at && e <= form.title.len() {
+                title.push(Span::styled(inbox::sanitize(&form.title[at..s]), text));
+                title.push(Span::styled(inbox::sanitize(&form.title[s..e]), found));
+                at = e;
+            }
+        }
+        title.push(Span::styled(inbox::sanitize(&form.title[at..]), text));
     }
     lines.push(Line::from(title));
     // date: day │ hour │ minute
@@ -926,6 +935,8 @@ fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
             when.push(part(minute, DatePart::Minute));
             if form.field == Field::Date {
                 when.push(Span::styled("  ←→ part  ↑↓ change  ⌫ no date", dim));
+            } else if form.due_from_title {
+                when.push(Span::styled("  ← from the title", dim));
             }
         }
         None => when.push(Span::styled(
@@ -949,6 +960,8 @@ fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
     });
     if form.field == Field::Repeat {
         repeat.push(Span::styled("  ←→ unit  ↑↓ every", dim));
+    } else if form.repeat_from_title {
+        repeat.push(Span::styled("  ← from the title", dim));
     }
     lines.push(Line::from(repeat));
     let mut notes = vec![label("Notes", Field::Notes)];

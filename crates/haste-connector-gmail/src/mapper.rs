@@ -76,13 +76,23 @@ pub fn truncate_utf8(text: &str, max: usize) -> &str {
     &text[..end]
 }
 
-fn plain_text(part: &ApiPart) -> Option<String> {
-    if part.mime_type.eq_ignore_ascii_case("text/plain") {
+fn part_text(part: &ApiPart, mime: &str) -> Option<String> {
+    if part.mime_type.eq_ignore_ascii_case(mime) {
         let data = part.body.data.as_deref()?;
         let bytes = URL_SAFE_NO_PAD.decode(data.trim_end_matches('=')).ok()?;
         return Some(String::from_utf8_lossy(&bytes).into_owned());
     }
-    part.parts.iter().find_map(plain_text)
+    part.parts.iter().find_map(|p| part_text(p, mime))
+}
+
+/// The readable body: `text/plain` when there is one, otherwise the `text/html` part reduced to
+/// text (nothing is rendered).
+fn plain_text(part: &ApiPart) -> Option<String> {
+    part_text(part, "text/plain").or_else(|| {
+        part_text(part, "text/html")
+            .map(|html| haste_core::html::to_text(&html))
+            .filter(|text| !text.is_empty())
+    })
 }
 
 /// One stored line per attachment part (see [`haste_core::attachment`]), carrying Gmail's
@@ -305,13 +315,51 @@ mod tests {
         );
     }
 
+    fn html_thread(html: &str) -> ApiThread {
+        let data = URL_SAFE_NO_PAD.encode(html);
+        serde_json::from_value(serde_json::json!({
+            "id": "t",
+            "messages": [{
+                "id": "m",
+                "snippet": "Köszönjük regisztrációját!",
+                "payload": {
+                    "mimeType": "multipart/alternative",
+                    "parts": [{ "mimeType": "text/html", "body": { "data": data } }]
+                }
+            }]
+        }))
+        .unwrap()
+    }
+
     #[test]
-    fn html_only_message_keeps_the_snippet_and_is_marked() {
+    fn html_only_message_is_reduced_to_text() {
+        let html = "<html><head><style>p{color:red}</style></head><body>\
+            <p>Köszönjük <b>regisztrációját</b>!</p><script>alert(1)</script>\
+            <a href=\"https://x.org/a\">Aktiválás</a></body></html>";
+        let mapped = map_thread(&html_thread(html));
+        let body = &mapped.messages[0].body_text;
+        assert!(!body.starts_with(BODY_UNAVAILABLE_MARKER), "{body}");
+        assert!(body.contains("Köszönjük regisztrációját!"), "{body}");
+        assert!(body.contains("Aktiválás"), "{body}");
+        assert!(!body.contains('<') && !body.contains("alert") && !body.contains("color"));
+    }
+
+    #[test]
+    fn a_message_with_no_readable_part_keeps_the_snippet_and_is_marked() {
         let mapped = map_thread(&fixture("thread_html_only.json"));
         let body = &mapped.messages[0].body_text;
-        assert!(body.starts_with(BODY_UNAVAILABLE_MARKER), "{body}");
-        assert!(body.contains("Your invoice is ready"));
-        assert!(!body.contains('<'), "no HTML is stored: {body}");
+        assert!(body.contains("Your invoice is ready"), "{body}");
+        let empty: ApiThread = serde_json::from_value(serde_json::json!({
+            "id": "t",
+            "messages": [{ "id": "m", "snippet": "Hi there",
+                "payload": { "mimeType": "text/html", "body": {} } }]
+        }))
+        .unwrap();
+        let body = &map_thread(&empty).messages[0].body_text;
+        assert!(
+            body.starts_with(BODY_UNAVAILABLE_MARKER) && body.contains("Hi there"),
+            "{body}"
+        );
     }
 
     #[test]

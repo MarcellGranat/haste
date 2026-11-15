@@ -76,48 +76,6 @@ fn safe_token(value: &str) -> String {
         .collect()
 }
 
-/// Remove `<style>` and `<script>` blocks and `<!-- comments -->` (case-insensitive). The
-/// parser's own HTML-to-text keeps `<style>` text that sits inside `<body>`, so this runs first.
-/// An unterminated block drops the rest of the input.
-fn drop_blocks(html: &str) -> String {
-    let lower = html.to_ascii_lowercase(); // same byte offsets as `html`
-    let mut out = String::with_capacity(html.len());
-    let mut at = 0;
-    while at < html.len() {
-        let rest = &lower[at..];
-        let next = ["<!--", "<style", "<script"]
-            .iter()
-            .filter_map(|open| rest.find(open).map(|i| (i, *open)))
-            .min_by_key(|(i, _)| *i);
-        let Some((i, open)) = next else {
-            out.push_str(&html[at..]);
-            break;
-        };
-        out.push_str(&html[at..at + i]);
-        let close = match open {
-            "<!--" => "-->",
-            "<style" => "</style",
-            _ => "</script",
-        };
-        let from = at + i + open.len();
-        match lower[from..].find(close) {
-            Some(j) => {
-                let after_close = from + j + close.len();
-                // For tags, skip to the end of the closing tag (`</style >`).
-                at = if close == "-->" {
-                    after_close
-                } else {
-                    lower[after_close..]
-                        .find('>')
-                        .map_or(html.len(), |k| after_close + k + 1)
-                };
-            }
-            None => break,
-        }
-    }
-    out
-}
-
 /// Decode a fetched text part by wrapping it in a minimal MIME entity, so charset and
 /// transfer-encoding handling comes from the parser. For `text/html` the decoded markup is then
 /// reduced to text (style/script/comment blocks dropped, tags removed, entities decoded).
@@ -133,11 +91,7 @@ fn decode_text(body: &[u8], charset: &str, encoding: &str, html: bool) -> Option
     let message = MessageParser::default().parse(&raw)?;
     let decoded = message.body_text(0)?.into_owned();
     if html {
-        Some(
-            mail_parser::decoders::html::html_to_text(&drop_blocks(&decoded))
-                .trim()
-                .to_owned(),
-        )
+        Some(haste_core::html::to_text(&decoded))
     } else {
         Some(decoded)
     }
@@ -426,12 +380,6 @@ mod tests {
         let m = html_message(html, "7bit", "utf-8");
         let words = m.body_text.split_whitespace().collect::<Vec<_>>().join(" ");
         assert_eq!(words, "Keep this and this", "{:?}", m.body_text);
-    }
-
-    #[test]
-    fn drop_blocks_is_safe_on_non_ascii_text() {
-        assert_eq!(drop_blocks("é<style>x</style>ü<!--c-->ß"), "éüß");
-        assert_eq!(drop_blocks("plain"), "plain");
     }
 
     #[test]

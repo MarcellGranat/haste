@@ -713,6 +713,7 @@ dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
  "hex",
+ "mail-parser",
  "regex",
  "serde",
  "serde_json",

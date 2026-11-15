@@ -245,6 +245,7 @@ mod tests {
                     text: Some(TextPart {
                         html: false, section: vec![1], charset: "utf-8".into(), encoding: "7bit".into(), octets: 4 }),
                     attachments: Vec::new(),
+                    seen: true,
                 })
                 .collect())
         }

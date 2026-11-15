@@ -144,7 +144,43 @@ fn read_history(
         }]
     };
     batch.next_cursor = None;
+    // reading old mail again says nothing about what is unread now
+    batch.unread.clear();
     Ok(batch)
+}
+
+/// The UIDs of the INBOX messages these provider ids name. A message is found by its Message-ID
+/// header; an id of the form `INBOX:<uidvalidity>:<uid>` (a message without one) names its UID
+/// directly.
+fn inbox_uids(
+    session: &mut dyn crate::session::MailSession,
+    folder: &str,
+    info: &crate::session::FolderInfo,
+    ids: &[String],
+) -> Result<Vec<u32>, ConnectorError> {
+    let mut uids: Vec<u32> = Vec::new();
+    for id in ids {
+        let mut parts = id.rsplitn(3, ':');
+        let (uid, validity, name) = (parts.next(), parts.next(), parts.next());
+        let direct = match (uid, validity, name) {
+            (Some(u), Some(v), Some(n)) if n == folder => {
+                u.parse::<u32>().ok().zip(v.parse::<u32>().ok())
+            }
+            _ => None,
+        };
+        match direct {
+            Some((uid, validity)) if validity == info.uid_validity => uids.push(uid),
+            Some(_) => {}
+            None => uids.extend(
+                session
+                    .uid_search_message_id(id.trim_matches(['<', '>']))
+                    .map_err(to_connector_error)?,
+            ),
+        }
+    }
+    uids.sort_unstable();
+    uids.dedup();
+    Ok(uids)
 }
 
 /// Short, secret-free label for the audit entry of a failed cycle.
@@ -405,6 +441,49 @@ impl Connector for IcloudConnector {
         })
     }
 
+    /// Mark a thread's INBOX messages read or unread (`UID STORE \Seen`), one session, one
+    /// attempt. Messages of other folders are left alone.
+    fn set_thread_read<'a>(
+        &'a self,
+        target: &'a haste_core::connector::ReadTarget,
+    ) -> BoxFuture<'a, Result<(), ConnectorError>> {
+        Box::pin(async move {
+            let password = match self.secrets.get(&self.config.address) {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    return Err(ConnectorError::Checkpoint(
+                        "no app-specific password stored; run the iCloud auth verb".into(),
+                    ))
+                }
+                Err(_) => return Err(ConnectorError::Other("keychain unavailable".into())),
+            };
+            let (config, opener) = (self.config.clone(), Arc::clone(&self.opener));
+            let (ids, read) = (target.message_external_ids.clone(), target.read);
+            tokio::task::spawn_blocking(move || {
+                let mut session = opener
+                    .open(&config, &password)
+                    .map_err(to_connector_error)?;
+                let result = (|| {
+                    let folder = crate::config::DEFAULT_FOLDER;
+                    let info = session.select(folder).map_err(to_connector_error)?;
+                    let uids = inbox_uids(session.as_mut(), folder, &info, &ids)?;
+                    if uids.is_empty() {
+                        return Err(ConnectorError::Other(
+                            "no inbox messages of this thread to mark".into(),
+                        ));
+                    }
+                    session
+                        .uid_set_seen(&uids, read)
+                        .map_err(to_connector_error)
+                })();
+                session.logout();
+                result
+            })
+            .await
+            .unwrap_or_else(|_| Err(ConnectorError::Other("read mark task failed".into())))
+        })
+    }
+
     /// The human's archive: `UID MOVE` the thread's INBOX messages into the Archive folder, one
     /// session, one attempt. Messages of other folders and ids that do not parse are left alone.
     fn archive_thread<'a>(
@@ -430,30 +509,7 @@ impl Connector for IcloudConnector {
                 let result = (|| {
                     let folder = crate::config::DEFAULT_FOLDER;
                     let info = session.select(folder).map_err(to_connector_error)?;
-                    // a message is found by its Message-ID header; an id of the form
-                    // `INBOX:<uidvalidity>:<uid>` (a message without one) names its UID directly
-                    let mut uids: Vec<u32> = Vec::new();
-                    for id in &ids {
-                        let mut parts = id.rsplitn(3, ':');
-                        let (uid, validity, name) = (parts.next(), parts.next(), parts.next());
-                        let direct = match (uid, validity, name) {
-                            (Some(u), Some(v), Some(n)) if n == folder => {
-                                u.parse::<u32>().ok().zip(v.parse::<u32>().ok())
-                            }
-                            _ => None,
-                        };
-                        match direct {
-                            Some((uid, validity)) if validity == info.uid_validity => {
-                                uids.push(uid)
-                            }
-                            Some(_) => {}
-                            None => uids.extend(
-                                session
-                                    .uid_search_message_id(id.trim_matches(['<', '>']))
-                                    .map_err(to_connector_error)?,
-                            ),
-                        }
-                    }
+                    let mut uids = inbox_uids(session.as_mut(), folder, &info, &ids)?;
                     uids.sort_unstable();
                     uids.dedup();
                     if uids.is_empty() {

@@ -29,6 +29,8 @@ pub struct ParsedMessage {
     pub date: i64,
     pub body_text: String,
     pub attachments: Vec<AttachmentMeta>,
+    /// Not read yet (no `\Seen` flag).
+    pub unread: bool,
 }
 
 /// Truncate to at most `max` bytes without splitting a UTF-8 character.
@@ -148,6 +150,7 @@ pub fn parse_message(
             .map_or(0, mail_parser::DateTime::to_timestamp),
         body_text,
         attachments: fetch.attachments.clone(),
+        unread: !fetch.seen,
     })
 }
 
@@ -201,6 +204,7 @@ pub fn build_batch(mut parsed: Vec<ParsedMessage>) -> Batch {
     let mut threads: Vec<Thread> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
     let mut messages = Vec::new();
+    let mut unread_at: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (m, key) in parsed.iter().zip(keys) {
         let at = *index.entry(key.clone()).or_insert_with(|| {
             threads.push(Thread {
@@ -232,6 +236,9 @@ pub fn build_batch(mut parsed: Vec<ParsedMessage>) -> Batch {
             }
         }
         t.last_activity_at = t.last_activity_at.max(m.date);
+        if m.unread {
+            unread_at.insert(at);
+        }
 
         let mut body = m.body_text.clone();
         for a in &m.attachments {
@@ -258,9 +265,15 @@ pub fn build_batch(mut parsed: Vec<ParsedMessage>) -> Batch {
             is_own: false,
         });
     }
+    let unread = threads
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.external_id.clone(), unread_at.contains(&i)))
+        .collect();
     Batch {
         threads,
         messages,
+        unread,
         next_cursor: None,
         ..Batch::default()
     }
@@ -291,6 +304,7 @@ mod tests {
                 octets: 10,
             }),
             attachments: Vec::new(),
+            seen: true,
         }
     }
 

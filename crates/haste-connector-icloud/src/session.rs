@@ -68,6 +68,8 @@ pub struct HeaderFetch {
     /// The part to read: `text/plain` if present, else `text/html`.
     pub text: Option<TextPart>,
     pub attachments: Vec<AttachmentMeta>,
+    /// The `\Seen` flag is set on the server.
+    pub seen: bool,
 }
 
 pub trait MailSession {
@@ -121,6 +123,14 @@ pub trait MailSession {
     /// # Errors
     /// See [`ImapFailure`].
     fn uid_move(&mut self, uids: &[u32], target: &str) -> Result<(), ImapFailure>;
+    /// Set or clear the `\Seen` flag of messages of the open folder (`UID STORE`; nothing is
+    /// deleted). Servers and test doubles that cannot do it keep the default refusal.
+    ///
+    /// # Errors
+    /// See [`ImapFailure`].
+    fn uid_set_seen(&mut self, _uids: &[u32], _seen: bool) -> Result<(), ImapFailure> {
+        Err(ImapFailure::Protocol("flags cannot be changed".into()))
+    }
     fn logout(&mut self);
 }
 
@@ -147,6 +157,7 @@ enum Stage {
     FetchBody,
     Append,
     Move,
+    Store,
 }
 
 impl Stage {
@@ -161,6 +172,7 @@ impl Stage {
             Self::FetchBody => "fetch body",
             Self::Append => "append",
             Self::Move => "move",
+            Self::Store => "store flags",
         }
     }
 }
@@ -383,7 +395,7 @@ impl<T: Read + Write> MailSession for Imap<T> {
         }
         let fetches = self
             .session
-            .uid_fetch(uid_set(uids), "(UID BODYSTRUCTURE BODY.PEEK[HEADER])")
+            .uid_fetch(uid_set(uids), "(UID FLAGS BODYSTRUCTURE BODY.PEEK[HEADER])")
             .map_err(|e| classify(&e, Stage::FetchHeaders))?;
         let mut out = Vec::new();
         for f in fetches.iter() {
@@ -400,6 +412,10 @@ impl<T: Read + Write> MailSession for Imap<T> {
                 header: header.to_vec(),
                 text,
                 attachments,
+                seen: f
+                    .flags()
+                    .iter()
+                    .any(|fl| matches!(fl, imap::types::Flag::Seen)),
             });
         }
         Ok(out)
@@ -492,6 +508,21 @@ impl<T: Read + Write> MailSession for Imap<T> {
         self.session
             .uid_mv(uid_set(uids), target)
             .map_err(|e| classify(&e, Stage::Move))
+    }
+
+    fn uid_set_seen(&mut self, uids: &[u32], seen: bool) -> Result<(), ImapFailure> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let query = if seen {
+            "+FLAGS.SILENT (\\Seen)"
+        } else {
+            "-FLAGS.SILENT (\\Seen)"
+        };
+        self.session
+            .uid_store(uid_set(uids), query)
+            .map(|_| ())
+            .map_err(|e| classify(&e, Stage::Store))
     }
 
     fn logout(&mut self) {

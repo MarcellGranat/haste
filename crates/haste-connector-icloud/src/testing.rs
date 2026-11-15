@@ -275,6 +275,9 @@ fn handle(stream: TcpStream, state: &Arc<Mutex<FakeState>>) {
                     format!("{tag} OK MOVE completed\r\n").into_bytes()
                 }
             }
+            "UID" if rest.to_uppercase().starts_with("STORE") => {
+                format!("{tag} OK STORE completed\r\n").into_bytes()
+            }
             "UID" if rest.to_uppercase().starts_with("SEARCH") => {
                 let present: Vec<u32> = selected
                     .as_ref()

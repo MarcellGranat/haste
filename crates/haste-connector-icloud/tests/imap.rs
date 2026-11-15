@@ -116,6 +116,38 @@ fn capabilities_are_read_send_and_the_humans_archive() {
 }
 
 #[tokio::test]
+async fn marking_read_or_unread_stores_the_seen_flag_on_the_inbox_messages_only() {
+    use haste_core::connector::ReadTarget;
+    let r = rig_with(
+        state(vec![("INBOX", 42, messages(&[1, 2]))], PASSWORD),
+        |_| {},
+    );
+    let target = |ids: &[&str], read: bool| ReadTarget {
+        thread_external_id: "t".into(),
+        message_external_ids: ids.iter().map(|s| (*s).to_owned()).collect(),
+        read,
+    };
+    r.connector
+        .set_thread_read(&target(&["INBOX:42:1", "INBOX:42:2"], true))
+        .await
+        .unwrap();
+    r.connector
+        .set_thread_read(&target(&["INBOX:42:2"], false))
+        .await
+        .unwrap();
+    // a recycled folder (other UIDVALIDITY) changes nothing
+    assert!(r
+        .connector
+        .set_thread_read(&target(&["INBOX:99:1"], true))
+        .await
+        .is_err());
+    let cmds = commands(&r).join("\n");
+    assert!(cmds.contains("STORE 1,2 +FLAGS.SILENT (\\Seen)"), "{cmds}");
+    assert!(cmds.contains("STORE 2 -FLAGS.SILENT (\\Seen)"), "{cmds}");
+    assert_eq!(cmds.matches("STORE").count(), 2, "{cmds}");
+}
+
+#[tokio::test]
 async fn archiving_moves_the_threads_inbox_messages_to_the_archive_folder_and_nothing_else() {
     use haste_core::connector::ArchiveTarget;
     let r = rig_with(

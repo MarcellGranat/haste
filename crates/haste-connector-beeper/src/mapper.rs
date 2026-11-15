@@ -53,6 +53,15 @@ impl BeeperSource {
     }
 }
 
+/// A plain web address: `http(s)` with no whitespace or control characters.
+fn web_url(url: &str) -> Option<&str> {
+    let url = url.trim();
+    ((url.starts_with("https://") || url.starts_with("http://"))
+        && url.len() > 8
+        && !url.chars().any(|c| c.is_control() || c.is_whitespace()))
+    .then_some(url)
+}
+
 /// Cut text to `max` bytes at a character boundary, adding a marker when something was cut.
 #[must_use]
 pub fn truncate_body(text: &str, max: usize) -> String {
@@ -113,12 +122,48 @@ pub fn map_message(chat_id: &str, source: &Source, wire: &WireMessage) -> Option
         .kind
         .as_deref()
         .is_none_or(|k| k.eq_ignore_ascii_case("text") || k.is_empty());
-    let mut body = match (&wire.text, is_text) {
-        (Some(t), true) if !t.is_empty() => truncate_body(t, BEEPER_BODY_MAX_BYTES),
+    let text = wire.text.as_deref().filter(|t| !t.trim().is_empty());
+    // a message that holds a link comes with a preview card (an image of the page): the link is
+    // what was sent, so the card's image is not shown as a file
+    let links: Vec<&crate::wire::WireLink> = wire
+        .links
+        .iter()
+        .filter(|l| web_url(l.original_url.as_deref().unwrap_or(&l.url)).is_some())
+        .collect();
+    let has_link =
+        !links.is_empty() || text.is_some_and(|t| t.contains("http://") || t.contains("https://"));
+    let shown: Vec<&crate::wire::WireAttachment> = wire
+        .attachments
+        .iter()
+        .filter(|a| !a.id.is_empty())
+        .filter(|a| {
+            !(has_link
+                && a.mime_type
+                    .as_deref()
+                    .is_some_and(|m| m.to_ascii_lowercase().starts_with("image/")))
+        })
+        .collect();
+    let mut body = match text {
+        Some(t) if is_text || has_link => truncate_body(t, BEEPER_BODY_MAX_BYTES),
         _ if !wire.attachments.is_empty() => String::new(),
         _ => ATTACHMENT_LABEL.to_owned(),
     };
-    for a in wire.attachments.iter().filter(|a| !a.id.is_empty()) {
+    // each link on its own line unless the text already holds it, with the page's title
+    for l in &links {
+        let url = web_url(l.original_url.as_deref().unwrap_or(&l.url)).unwrap_or_default();
+        if body.contains(url) {
+            continue;
+        }
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        if let Some(title) = l.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            body.push_str(&truncate_body(title, 200).replace('\n', " "));
+            body.push(' ');
+        }
+        body.push_str(url);
+    }
+    for a in shown {
         if !body.is_empty() {
             body.push('\n');
         }
@@ -279,6 +324,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(empty.message.body_text, ATTACHMENT_LABEL);
+    }
+
+    #[test]
+    fn a_link_with_a_preview_card_shows_the_link_and_not_the_card_image() {
+        // text is empty on the message itself; the link only comes as a preview, with its image
+        let wire: WireMessage = serde_json::from_str(
+            r#"{"id":"m","type":"IMAGE","timestamp":"2026-11-09T10:00:00Z","sortKey":"1",
+                "attachments":[{"id":"mxc://x/1","fileName":"card_n.jpg","mimeType":"image/jpeg"}],
+                "links":[{"url":"https://www.instagram.com/reel/abc/","title":"A reel by Ana"}]}"#,
+        )
+        .unwrap();
+        let body = map_message("c", &Source::Whatsapp, &wire)
+            .unwrap()
+            .message
+            .body_text;
+        assert_eq!(body, "A reel by Ana https://www.instagram.com/reel/abc/");
+        assert!(!body.contains("[attachment"), "{body}");
+        // the link already in the text is not added twice, and a real photo stays a file
+        let with_text: WireMessage = serde_json::from_str(
+            r#"{"id":"m","type":"TEXT","text":"look https://x.org/a","timestamp":"2026-11-09T10:00:00Z",
+                "sortKey":"1","links":[{"url":"https://x.org/a","title":"T"}]}"#,
+        )
+        .unwrap();
+        let body = map_message("c", &Source::Whatsapp, &with_text)
+            .unwrap()
+            .message
+            .body_text;
+        assert_eq!(body, "look https://x.org/a");
+        let photo: WireMessage = serde_json::from_str(
+            r#"{"id":"m","type":"IMAGE","timestamp":"2026-11-09T10:00:00Z","sortKey":"1",
+                "attachments":[{"id":"mxc://x/2","fileName":"p.jpg","mimeType":"image/jpeg"}]}"#,
+        )
+        .unwrap();
+        let body = map_message("c", &Source::Whatsapp, &photo)
+            .unwrap()
+            .message
+            .body_text;
+        assert!(body.contains("[attachment: p.jpg"), "{body}");
     }
 
     #[test]

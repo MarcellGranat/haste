@@ -41,7 +41,7 @@ pub struct BeeperCursor {
 }
 
 /// Bump when the stored message fields change and old chats should be read again.
-pub const CURSOR_VERSION: u32 = 4;
+pub const CURSOR_VERSION: u32 = 5;
 
 impl BeeperCursor {
     #[must_use]

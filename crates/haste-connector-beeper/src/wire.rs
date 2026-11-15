@@ -92,9 +92,23 @@ pub struct WireMessage {
     pub is_hidden: bool,
     #[serde(default)]
     pub attachments: Vec<WireAttachment>,
+    /// Link previews Beeper adds to a message that holds a link.
+    #[serde(default)]
+    pub links: Vec<WireLink>,
     /// Who reacted with what (`reactions` in the local API).
     #[serde(default)]
     pub reactions: Vec<WireReaction>,
+}
+
+/// A link preview: where it points and what the page is called.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WireLink {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default, alias = "originalURL")]
+    pub original_url: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 /// One person's reaction to a message.

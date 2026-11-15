@@ -30,6 +30,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         View::Channels => draw_channels(frame, app, body),
         View::Calendar => draw_calendar(frame, app, body),
         View::Later => draw_later(frame, app, body),
+        View::Blocked => draw_blocked(frame, app, body),
         View::Approvals => draw_approvals(frame, app, body),
         View::Connectors => draw_connectors(frame, app, body),
     }
@@ -531,10 +532,14 @@ fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
             &format!("4 Later {}", app.later_threads().len()),
             app.view == View::Later,
         ),
+        tab(
+            &format!("5 Blocked {}", app.blocked_threads().len()),
+            app.view == View::Blocked,
+        ),
         Span::styled(" │ ", theme::muted()),
     ];
     let pending = app.proposals.len();
-    let approvals = format!("5 Approvals {pending}");
+    let approvals = format!("6 Approvals {pending}");
     spans.push(if pending > 0 && app.view != View::Approvals {
         Span::styled(
             format!(" {approvals} "),
@@ -544,7 +549,7 @@ fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
         tab(&approvals, app.view == View::Approvals)
     });
     spans.push(tab(
-        &format!("6 Connectors {}", app.connectors.len()),
+        &format!("7 Connectors {}", app.connectors.len()),
         app.view == View::Connectors,
     ));
     frame.render_widget(Paragraph::new(Line::from(spans)).style(theme::text()), area);
@@ -617,6 +622,13 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ("Space", "select"),
             ("e", "done (30 s to undo)"),
             ("Tab", "to threads"),
+            ("j/k", "move"),
+        ],
+        View::Blocked => vec![
+            ("b", "accept sender"),
+            ("x", "mute and delete"),
+            ("Enter", "open (read only)"),
+            ("Tab", "next tab"),
             ("j/k", "move"),
         ],
         View::Later => vec![
@@ -1094,6 +1106,40 @@ fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
             &mut st,
         );
     }
+}
+
+/// The Blocked tab: mail from senders that are not accepted yet.
+fn draw_blocked(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let now = haste_core::time::now_secs();
+    let threads = app.blocked_threads();
+    let title = format!(
+        " Blocked · {} not accepted yet · b accepts the sender · x mutes and deletes ",
+        threads.len()
+    );
+    if threads.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "no mail is waiting for you to accept its sender",
+                theme::muted(),
+            )))
+            .block(theme::panel(&title).border_style(pane_border(true))),
+            area,
+        );
+        return;
+    }
+    let items: Vec<ListItem<'_>> = threads
+        .iter()
+        .map(|t| thread_line(t, now, app.is_priority(t), true, None))
+        .collect();
+    draw_scrolling(
+        frame,
+        area,
+        theme::panel(&title).border_style(pane_border(true)),
+        items,
+        Some(app.blocked_selected),
+        &app.blocked_offset,
+        &app.list_rows,
+    );
 }
 
 /// The Later tab: set-aside and snoozed threads on top, TODO items with a later date below.
@@ -2002,6 +2048,37 @@ mod tests {
             text.contains("task-far") && !text.contains("task-soon"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn mail_from_unaccepted_senders_is_listed_on_the_blocked_tab_only() {
+        let thread = |id: &str, known: bool| haste_proto::ThreadView {
+            thread: haste_core::model::Thread {
+                id: id.into(),
+                source: haste_core::model::Source::Gmail,
+                external_id: id.into(),
+                subject: format!("subject-{id}"),
+                participants: vec![],
+                last_activity_at: 1,
+                version: 1,
+            },
+            triage: haste_core::model::Triage::new(id, haste_core::model::ObjectKind::Thread),
+            tags: vec![],
+            last: None,
+            unread: false,
+            replied: false,
+            sender_known: known,
+            sender: Some(format!("{id}@x.org")),
+        };
+        let mut app = App::new();
+        app.set_threads(vec![thread("friend", true), thread("stranger", false)]);
+        let today = render(&app);
+        assert!(today.contains("subject-friend") && !today.contains("subject-stranger"));
+        assert!(today.contains("5 Blocked 1"), "{today}");
+        app.view = crate::app::View::Blocked;
+        let blocked = render(&app);
+        assert!(blocked.contains("subject-stranger") && !blocked.contains("subject-friend"));
+        assert!(blocked.contains("b accepts the sender"), "{blocked}");
     }
 
     #[test]

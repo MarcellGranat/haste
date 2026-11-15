@@ -42,14 +42,22 @@ pub enum View {
     Calendar,
     /// Tab 4: threads set aside or snoozed.
     Later,
-    /// Secondary screens, opened with 5 and 6.
+    /// Tab 5: mail from senders not accepted yet (`b` accepts them).
+    Blocked,
+    /// Secondary screens, opened with 6 and 7.
     Approvals,
     Connectors,
 }
 
 impl View {
-    /// The four main tabs, in order.
-    pub const TABS: [Self; 4] = [Self::Today, Self::Channels, Self::Calendar, Self::Later];
+    /// The five main tabs, in order.
+    pub const TABS: [Self; 5] = [
+        Self::Today,
+        Self::Channels,
+        Self::Calendar,
+        Self::Later,
+        Self::Blocked,
+    ];
 
     #[must_use]
     pub fn is_tab(self) -> bool {
@@ -493,6 +501,7 @@ pub struct App {
     pub todo_offset: Cell<usize>,
     pub channel_offset: Cell<usize>,
     pub later_offset: Cell<usize>,
+    pub blocked_offset: Cell<usize>,
     /// Rows the list on screen shows (set while drawing), for Ctrl-d and Ctrl-u.
     pub list_rows: Cell<usize>,
     pub channels_selected: usize,
@@ -511,6 +520,7 @@ pub struct App {
     pub events: Vec<EventView>,
     pub calendar_selected: usize,
     pub later_selected: usize,
+    pub blocked_selected: usize,
     /// Open reminders (read-only; add or change them through proposals).
     pub reminder_list: Vec<ReminderView>,
     pub group_by: GroupBy,
@@ -636,6 +646,7 @@ impl App {
             todo_offset: Cell::new(0),
             channel_offset: Cell::new(0),
             later_offset: Cell::new(0),
+            blocked_offset: Cell::new(0),
             list_rows: Cell::new(0),
             channels_selected: 0,
             channel_inner: false,
@@ -649,6 +660,7 @@ impl App {
             events: Vec::new(),
             calendar_selected: 0,
             later_selected: 0,
+            blocked_selected: 0,
             reminder_list: Vec::new(),
             group_by: GroupBy::Agent,
             blocked_collapsed: false,
@@ -918,8 +930,9 @@ impl App {
                 !t.triage.archived && (include_aside || !t.triage.set_aside) && !self.is_snoozed(t)
             })
             .filter(|t| inbox::matches(filter, t))
-            // a muted sender's mail does not reach the lists at all
-            .filter(|t| !self.is_muted(t))
+            // a muted sender's mail does not reach the lists at all; mail from senders not
+            // accepted yet waits on the Blocked tab
+            .filter(|t| !self.is_blocked(t))
             .collect();
         // blocked senders last; then priority; then the newest
         out.sort_by_key(|t| {
@@ -1033,6 +1046,18 @@ impl App {
             .is_some_and(|until| until > haste_core::time::now_secs())
     }
 
+    /// The Blocked tab: mail from senders not accepted yet (muted ones are gone), newest first.
+    #[must_use]
+    pub fn blocked_threads(&self) -> Vec<&ThreadView> {
+        let mut out: Vec<&ThreadView> = self
+            .threads
+            .iter()
+            .filter(|t| !t.triage.archived && !self.is_muted(t) && self.is_blocked(t))
+            .collect();
+        out.sort_by_key(|t| std::cmp::Reverse(t.thread.last_activity_at));
+        out
+    }
+
     /// The Later tab: threads set aside or snoozed, the ones waking soonest first, then the
     /// rest by recent activity.
     #[must_use]
@@ -1041,7 +1066,7 @@ impl App {
             .threads
             .iter()
             .filter(|t| !t.triage.archived && (t.triage.set_aside || self.is_snoozed(t)))
-            .filter(|t| !self.is_muted(t))
+            .filter(|t| !self.is_blocked(t))
             .collect();
         out.sort_by_key(|t| {
             (
@@ -1070,6 +1095,7 @@ impl App {
             View::Later if self.later_focus == TodayFocus::Inbox => {
                 self.later_threads().get(self.later_selected).copied()
             }
+            View::Blocked => self.blocked_threads().get(self.blocked_selected).copied(),
             _ => None,
         }
     }
@@ -1142,6 +1168,9 @@ impl App {
         self.later_selected = self
             .later_selected
             .min(self.later_threads().len().saturating_sub(1));
+        self.blocked_selected = self
+            .blocked_selected
+            .min(self.blocked_threads().len().saturating_sub(1));
         self.later_todo_selected = self
             .later_todo_selected
             .min(self.later_todos().len().saturating_sub(1));
@@ -1165,6 +1194,7 @@ impl App {
             View::Calendar => self.agenda().len(),
             View::Later if self.later_focus == TodayFocus::Todo => self.later_todos().len(),
             View::Later => self.later_threads().len(),
+            View::Blocked => self.blocked_threads().len(),
             View::Approvals => self.rows().len(),
             View::Connectors => self.connectors.len(),
         }
@@ -1179,6 +1209,7 @@ impl App {
             View::Calendar => &mut self.calendar_selected,
             View::Later if self.later_focus == TodayFocus::Todo => &mut self.later_todo_selected,
             View::Later => &mut self.later_selected,
+            View::Blocked => &mut self.blocked_selected,
             View::Approvals => &mut self.approvals_selected,
             View::Connectors => &mut self.connectors_selected,
         }
@@ -1353,7 +1384,8 @@ impl App {
     fn key_normal(&mut self, key: Key) -> Option<Effect> {
         let thread_view = (self.view == View::Today && self.today_focus == TodayFocus::Inbox)
             || (self.view == View::Channels && self.channel_inner)
-            || (self.view == View::Later && self.later_focus == TodayFocus::Inbox);
+            || (self.view == View::Later && self.later_focus == TodayFocus::Inbox)
+            || self.view == View::Blocked;
         match key {
             Key::Char('q') => return Some(Effect::Quit),
             Key::Tab if self.view == View::Today => {
@@ -1378,8 +1410,9 @@ impl App {
             Key::Char('2') => self.view = View::Channels,
             Key::Char('3') => self.view = View::Calendar,
             Key::Char('4') => self.view = View::Later,
-            Key::Char('5') => self.view = View::Approvals,
-            Key::Char('6') => self.view = View::Connectors,
+            Key::Char('5') => self.view = View::Blocked,
+            Key::Char('6') => self.view = View::Approvals,
+            Key::Char('7') => self.view = View::Connectors,
             Key::Esc | Key::Char('h') if self.view == View::Channels && self.channel_inner => {
                 self.channel_inner = false;
             }
@@ -3220,27 +3253,23 @@ mod tests {
     }
 
     #[test]
-    fn strangers_are_blocked_until_unblocked_and_the_reader_refuses_actions() {
+    fn strangers_wait_on_the_blocked_tab_until_accepted_and_the_reader_refuses_actions() {
         let mut app = inbox_app();
         app.threads[1].sender_known = false;
         app.threads[1].sender = Some("new@shop.example".into());
-        let ids: Vec<String> = app
-            .today_threads()
-            .iter()
-            .map(|t| t.thread.id.clone())
-            .collect();
-        assert_eq!(ids, ["t1", "t2"], "the stranger is last");
-        assert!(app.is_blocked(&app.threads[1].clone()));
+        let ids = |v: Vec<&ThreadView>| -> Vec<String> {
+            v.iter().map(|t| t.thread.id.clone()).collect()
+        };
+        assert_eq!(ids(app.today_threads()), ["t1"], "not in the inbox");
+        assert_eq!(ids(app.blocked_threads()), ["t2"]);
         // priority or allowed senders are let through
         rules(&mut app, &[], &[], &["^new@shop\\.example$"]);
-        assert!(!app.is_blocked(&app.threads[1].clone()));
+        assert!(app.blocked_threads().is_empty());
+        assert_eq!(app.today_threads().len(), 2);
         rules(&mut app, &[], &[], &[]);
-        // b only works on a blocked thread
-        assert!(
-            press(&mut app, "b").is_empty(),
-            "t1 is first and not blocked"
-        );
-        press(&mut app, "j");
+        // the Blocked tab: b accepts the sender, x asks before muting
+        press(&mut app, "5");
+        assert_eq!(app.view, View::Blocked);
         assert_eq!(
             press(&mut app, "b"),
             vec![Effect::Unblock {
@@ -4657,7 +4686,7 @@ mod tests {
     fn connectors_app() -> App {
         let mut app = approvals_app();
         app.set_connectors(connectors());
-        press(&mut app, "6");
+        press(&mut app, "7");
         assert_eq!(app.view, View::Connectors);
         app
     }

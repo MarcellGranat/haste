@@ -622,6 +622,12 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
 /// The scroll offset that keeps the selected message in view, moving as little as possible.
 #[must_use]
 pub fn scroll_to(current: usize, laid: &Laid, height: usize, total: usize) -> usize {
+    if laid.end.saturating_sub(laid.start) > height {
+        // taller than the screen: any position inside it is fine (Ctrl-d and Ctrl-u read it)
+        return current
+            .clamp(laid.start, laid.end - height)
+            .min(total.saturating_sub(height));
+    }
     let mut s = current;
     if laid.end > s + height {
         s = laid.end.saturating_sub(height);
@@ -946,5 +952,18 @@ mod tests {
         assert_eq!(scroll_to(0, &laid, 20, 100), 20);
         assert_eq!(scroll_to(35, &laid, 20, 100), 30);
         assert_eq!(scroll_to(25, &laid, 20, 100), 25);
+        // a message taller than the screen can be scrolled through
+        let tall = Laid {
+            start: 10,
+            end: 70,
+            links: Vec::new(),
+        };
+        assert_eq!(
+            scroll_to(0, &tall, 20, 100),
+            10,
+            "arriving from above: its top"
+        );
+        assert_eq!(scroll_to(30, &tall, 20, 100), 30);
+        assert_eq!(scroll_to(90, &tall, 20, 100), 50, "its bottom, not past it");
     }
 }

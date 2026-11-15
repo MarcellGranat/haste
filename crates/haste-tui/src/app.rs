@@ -83,6 +83,9 @@ pub struct Reader {
     pub messages: Vec<Message>,
     /// First visible line (set while drawing, which knows the width).
     pub scroll: Cell<usize>,
+    /// Half pages asked for with Ctrl-d (down) and Ctrl-u (up), applied when drawing, which
+    /// knows the height. This is how a message taller than the screen is read.
+    pub half_pages: Cell<isize>,
     /// The message the cursor is on.
     pub selected: usize,
     /// The account's own address (mail), to tell which messages are yours.
@@ -1474,6 +1477,7 @@ impl App {
             view,
             messages,
             scroll: Cell::new(0),
+            half_pages: Cell::new(0),
             selected,
             own,
             expanded: std::collections::HashSet::new(),
@@ -1644,6 +1648,8 @@ impl App {
             Key::Char('j') | Key::Down => p.scroll = (p.scroll + 1).min(last),
             Key::Char('k') | Key::Up => p.scroll = p.scroll.saturating_sub(1),
             Key::Char(' ' | 'd') => p.scroll = (p.scroll + PREVIEW_PAGE).min(last),
+            Key::Ctrl('d') => p.scroll = (p.scroll + PREVIEW_PAGE / 2).min(last),
+            Key::Ctrl('u') => p.scroll = p.scroll.saturating_sub(PREVIEW_PAGE / 2),
             Key::Char('b' | 'u') => p.scroll = p.scroll.saturating_sub(PREVIEW_PAGE),
             Key::Char('g') => p.scroll = 0,
             Key::Char('G') => p.scroll = last,

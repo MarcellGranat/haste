@@ -1046,6 +1046,12 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
             theme::muted(),
         )));
     }
+    let pages = reader.half_pages.replace(0);
+    if pages != 0 {
+        let step = isize::try_from((height / 2).max(1)).unwrap_or(1);
+        let moved = isize::try_from(reader.scroll.get()).unwrap_or(0) + pages * step;
+        reader.scroll.set(usize::try_from(moved).unwrap_or(0));
+    }
     let scroll = match laid.get(reader.selected.saturating_sub(first)) {
         Some(l) => crate::chat::scroll_to(reader.scroll.get(), l, height, lines.len()),
         None => 0,
@@ -1053,7 +1059,7 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
     reader.scroll.set(scroll);
     *reader.links.borrow_mut() = laid.iter().flat_map(|l| l.links.clone()).collect();
     let hint =
-        " j/k message · a attachments · + react · x fold · o older · r reply · n note · l label · e archive · Esc ";
+        " j/k message · C-d/C-u scroll · a attachments · + react · x fold · o older · r reply · n note · l label · e archive · Esc ";
     frame.render_widget(
         Paragraph::new(lines)
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))

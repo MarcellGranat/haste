@@ -1057,6 +1057,8 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
         None => 0,
     };
     reader.scroll.set(scroll);
+    *reader.spans.borrow_mut() = laid.iter().map(|l| (l.start, l.end)).collect();
+    reader.view_height.set(height);
     *reader.links.borrow_mut() = laid.iter().flat_map(|l| l.links.clone()).collect();
     let hint =
         " j/k message · C-d/C-u scroll · a attachments · + react · x fold · o older · r reply · n note · l label · e archive · Esc ";
@@ -1415,6 +1417,35 @@ mod tests {
             render(&app);
         }
         assert!(render(&app).contains("line-number-000"), "and back up");
+    }
+
+    #[test]
+    fn ctrl_d_and_ctrl_u_jump_over_many_small_messages() {
+        let mut app = App::new();
+        let many: Vec<_> = (0..40)
+            .map(|i| {
+                msg(
+                    &format!("m{i}"),
+                    &format!("tiny-{i:02}"),
+                    100 + i64::from(i),
+                )
+            })
+            .collect();
+        open_thread(&mut app, many);
+        app.handle_key(Key::Char('o')); // 12 shown
+        app.handle_key(Key::Char('g'));
+        render(&app);
+        let before = app.reader.as_ref().unwrap().selected;
+        app.handle_key(Key::Ctrl('d'));
+        render(&app);
+        let after = app.reader.as_ref().unwrap().selected;
+        assert!(
+            after >= before + 2,
+            "jumped several messages: {before} -> {after}"
+        );
+        app.handle_key(Key::Ctrl('u'));
+        render(&app);
+        assert!(app.reader.as_ref().unwrap().selected < after);
     }
 
     #[test]

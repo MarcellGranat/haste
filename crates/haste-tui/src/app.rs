@@ -86,6 +86,10 @@ pub struct Reader {
     /// Half pages asked for with Ctrl-d (down) and Ctrl-u (up), applied when drawing, which
     /// knows the height. This is how a message taller than the screen is read.
     pub half_pages: Cell<isize>,
+    /// `(first line, end line)` of each shown message and the height of the view, set while
+    /// drawing; Ctrl-d and Ctrl-u use them to jump over several small messages.
+    pub spans: std::cell::RefCell<Vec<(usize, usize)>>,
+    pub view_height: Cell<usize>,
     /// The message the cursor is on.
     pub selected: usize,
     /// The account's own address (mail), to tell which messages are yours.
@@ -1482,6 +1486,8 @@ impl App {
             messages,
             scroll: Cell::new(0),
             half_pages: Cell::new(0),
+            spans: std::cell::RefCell::new(Vec::new()),
+            view_height: Cell::new(0),
             selected,
             own,
             expanded: std::collections::HashSet::new(),
@@ -1696,8 +1702,41 @@ impl App {
                 reader.selected = crate::chat::batch_end(&reader.messages, first)
             }
             Key::Char('G') => reader.selected = last,
-            Key::Ctrl('d') => reader.half_pages.set(reader.half_pages.get() + 1),
-            Key::Ctrl('u') => reader.half_pages.set(reader.half_pages.get() - 1),
+            Key::Ctrl(c @ ('d' | 'u')) => {
+                let down = c == 'd';
+                let h = reader.view_height.get();
+                let rel = reader.selected.saturating_sub(first);
+                let span = reader.spans.borrow().get(rel).copied();
+                let scroll = reader.scroll.get();
+                match span {
+                    // a message taller than the screen is scrolled through first
+                    Some((s, e))
+                        if e - s > h && (if down { scroll + h < e } else { scroll > s }) =>
+                    {
+                        reader
+                            .half_pages
+                            .set(reader.half_pages.get() + if down { 1 } else { -1 });
+                    }
+                    Some((s, _)) => {
+                        // many small messages: jump about half a screen of them
+                        let half = (h / 2).max(1);
+                        let spans = reader.spans.borrow();
+                        let target = if down {
+                            (rel + 1..spans.len())
+                                .find(|j| spans[*j].0 >= s + half)
+                                .unwrap_or(spans.len().saturating_sub(1))
+                        } else {
+                            (0..rel)
+                                .rev()
+                                .find(|j| spans[*j].0 + half <= s)
+                                .unwrap_or(0)
+                        };
+                        drop(spans);
+                        reader.selected = crate::chat::batch_end(&reader.messages, first + target);
+                    }
+                    None => {}
+                }
+            }
             Key::Char('a') => {
                 let from = crate::chat::batch_start(&reader.messages, reader.selected);
                 let mut files = Vec::new();

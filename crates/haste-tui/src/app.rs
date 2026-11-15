@@ -42,10 +42,9 @@ pub enum View {
     Calendar,
     /// Tab 4: threads set aside or snoozed.
     Later,
-    /// Secondary screens, opened with 5, 6 and 7.
+    /// Secondary screens, opened with 5 and 6.
     Approvals,
     Connectors,
-    Agents,
 }
 
 impl View {
@@ -436,14 +435,6 @@ pub enum Row {
     Blocked(usize),
 }
 
-/// A row of the Agents panel.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AgentRow {
-    Machine { name: String, state: MachineState },
-    Workspace(String),
-    Agent(AgentStatusRecord),
-}
-
 pub struct App {
     pub view: View,
     pub mode: Mode,
@@ -510,7 +501,6 @@ pub struct App {
     pub pending_archive: std::collections::HashSet<String>,
     pub connectors_selected: usize,
     pub machines: Vec<MachineView>,
-    pub agents_selected: usize,
     /// Upcoming calendar events, soonest first (read-only).
     pub events: Vec<EventView>,
     pub calendar_selected: usize,
@@ -650,7 +640,6 @@ impl App {
             pending_archive: std::collections::HashSet::new(),
             connectors_selected: 0,
             machines: Vec::new(),
-            agents_selected: 0,
             events: Vec::new(),
             calendar_selected: 0,
             later_selected: 0,
@@ -805,6 +794,14 @@ impl App {
                 })
             }
             Event::ProposalChanged { .. } | Event::ThreadChanged { .. } => Some(Effect::Refresh),
+            // agents finishing or getting blocked in herdr are not announced here; a herdr
+            // problem (a protocol mismatch) still is
+            Event::Notice { message }
+                if message.starts_with("[herdr:")
+                    && (message.contains(" is done") || message.contains(" is blocked")) =>
+            {
+                None
+            }
             Event::Notice { message } => {
                 self.notices.push(message.clone());
                 Some(Effect::Refresh)
@@ -895,40 +892,6 @@ impl App {
         });
         if !self.blocked_collapsed {
             rows.extend((0..blocked.len()).map(Row::Blocked));
-        }
-        rows
-    }
-
-    /// Rows of the Agents panel: each machine with its state, and while it is connected its
-    /// workspaces (by label) with their agents.
-    #[must_use]
-    pub fn agent_rows(&self) -> Vec<AgentRow> {
-        let mut rows = Vec::new();
-        for m in &self.machines {
-            rows.push(AgentRow::Machine {
-                name: m.machine.clone(),
-                state: m.state.clone(),
-            });
-            if m.state != MachineState::Connected {
-                continue; // never show stale agents as current
-            }
-            let mut labels: Vec<&str> = m
-                .agents
-                .iter()
-                .map(|a| a.workspace_label.as_str())
-                .collect();
-            labels.sort_unstable();
-            labels.dedup();
-            for label in labels {
-                rows.push(AgentRow::Workspace(label.to_owned()));
-                let mut agents: Vec<&AgentStatusRecord> = m
-                    .agents
-                    .iter()
-                    .filter(|a| a.workspace_label == label)
-                    .collect();
-                agents.sort_by(|a, b| a.pane_id.cmp(&b.pane_id));
-                rows.extend(agents.into_iter().map(|a| AgentRow::Agent(a.clone())));
-            }
         }
         rows
     }
@@ -1158,9 +1121,6 @@ impl App {
         self.connectors_selected = self
             .connectors_selected
             .min(self.connectors.len().saturating_sub(1));
-        self.agents_selected = self
-            .agents_selected
-            .min(self.agent_rows().len().saturating_sub(1));
         self.calendar_selected = self
             .calendar_selected
             .min(self.agenda().len().saturating_sub(1));
@@ -1192,7 +1152,6 @@ impl App {
             View::Later => self.later_threads().len(),
             View::Approvals => self.rows().len(),
             View::Connectors => self.connectors.len(),
-            View::Agents => self.agent_rows().len(),
         }
     }
 
@@ -1207,7 +1166,6 @@ impl App {
             View::Later => &mut self.later_selected,
             View::Approvals => &mut self.approvals_selected,
             View::Connectors => &mut self.connectors_selected,
-            View::Agents => &mut self.agents_selected,
         }
     }
 
@@ -1406,7 +1364,6 @@ impl App {
             Key::Char('4') => self.view = View::Later,
             Key::Char('5') => self.view = View::Approvals,
             Key::Char('6') => self.view = View::Connectors,
-            Key::Char('7') => self.view = View::Agents,
             Key::Esc | Key::Char('h') if self.view == View::Channels && self.channel_inner => {
                 self.channel_inner = false;
             }
@@ -4319,6 +4276,24 @@ mod tests {
             Some(Effect::Refresh)
         );
         assert_eq!(app.notices, vec!["connector stopped".to_owned()]);
+        // an agent finishing or being blocked in herdr is not announced; a herdr problem is
+        for quiet in [
+            "[herdr:local] claude in 'website' is done",
+            "[herdr:m1] codex in 'api' is blocked (+2 suppressed)",
+        ] {
+            assert_eq!(
+                app.on_event(&Event::Notice {
+                    message: quiet.into()
+                }),
+                None
+            );
+        }
+        assert_eq!(app.notices.len(), 1);
+        assert!(app
+            .on_event(&Event::Notice {
+                message: "[herdr:local] protocol mismatch: expected 22, saw 23".into()
+            })
+            .is_some());
     }
 
     fn agent(
@@ -4582,80 +4557,8 @@ mod tests {
     }
 
     #[test]
-    fn the_agents_panel_lists_machines_then_workspaces_then_agents_and_hides_stale_rows() {
-        let mut app = approvals_app();
-        app.set_machines(vec![
-            machine(
-                "local",
-                MachineState::Connected,
-                vec![
-                    agent("local", "notes", "w2:p1", AgentStatus::Idle, 1),
-                    agent("local", "haste", "w1:p1", AgentStatus::Blocked, 1),
-                ],
-            ),
-            machine(
-                "m1",
-                MachineState::Unreachable,
-                vec![agent("m1", "stale", "w1:p1", AgentStatus::Blocked, 1)],
-            ),
-            machine(
-                "mbp",
-                MachineState::Mismatch {
-                    expected: 22,
-                    observed: 23,
-                },
-                vec![],
-            ),
-        ]);
-        let rows = app.agent_rows();
-        let shape: Vec<String> = rows
-            .iter()
-            .map(|r| match r {
-                AgentRow::Machine { name, .. } => format!("M:{name}"),
-                AgentRow::Workspace(l) => format!("W:{l}"),
-                AgentRow::Agent(a) => format!("A:{}", a.pane_id),
-            })
-            .collect();
-        assert_eq!(
-            shape,
-            ["M:local", "W:haste", "A:w1:p1", "W:notes", "A:w2:p1", "M:m1", "M:mbp"]
-        );
-        assert!(
-            !shape.iter().any(|r| r.contains("stale")),
-            "an unreachable machine's rows are never shown"
-        );
-        assert!(matches!(
-            &rows[6],
-            AgentRow::Machine {
-                state: MachineState::Mismatch {
-                    expected: 22,
-                    observed: 23
-                },
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn the_agents_panel_is_reached_with_tab_navigates_with_vi_keys_and_offers_no_actions() {
+    fn tab_switches_the_panes_on_today_and_later_and_cycles_the_other_tabs() {
         let mut app = App::new();
-        app.set_machines(vec![machine(
-            "local",
-            MachineState::Connected,
-            vec![agent("local", "haste", "w1:p1", AgentStatus::Working, 1)],
-        )]);
-        press(&mut app, "7");
-        assert_eq!(app.view, View::Agents);
-        press(&mut app, "G");
-        assert_eq!(app.agents_selected, 2);
-        press(&mut app, "g");
-        assert_eq!(app.agents_selected, 0);
-        for keys in ["a", "A", "s", "r", "x", "R", "E"] {
-            assert!(press(&mut app, keys).is_empty(), "{keys:?}");
-        }
-        assert_eq!(app.mode, Mode::Normal);
-        app.handle_key(Key::Esc);
-        assert_eq!(app.view, View::Today);
         // on Today, Tab switches between the Incoming and TODO panes
         app.handle_key(Key::Tab);
         assert_eq!((app.view, app.today_focus), (View::Today, TodayFocus::Todo));

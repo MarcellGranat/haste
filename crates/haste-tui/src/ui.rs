@@ -9,10 +9,9 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::app::{summary, AgentRow, App, Mode, Row, TodayFocus, View};
+use crate::app::{summary, App, Mode, Row, TodayFocus, View};
 use crate::inbox::{self, CHANNELS};
 use crate::theme;
-use haste_core::herdr::{AgentStatus, MachineState};
 use haste_core::proposal::ProposalState;
 use haste_proto::ThreadView;
 
@@ -33,7 +32,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         View::Later => draw_later(frame, app, body),
         View::Approvals => draw_approvals(frame, app, body),
         View::Connectors => draw_connectors(frame, app, body),
-        View::Agents => draw_agents(frame, app, body),
     }
     if let Mode::Detail(id) = &app.mode {
         draw_detail(frame, app, id, body);
@@ -549,10 +547,6 @@ fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
         &format!("6 Connectors {}", app.connectors.len()),
         app.view == View::Connectors,
     ));
-    spans.push(tab(
-        &format!("7 Agents {}", app.blocked().len()),
-        app.view == View::Agents,
-    ));
     frame.render_widget(Paragraph::new(Line::from(spans)).style(theme::text()), area);
 }
 
@@ -643,7 +637,6 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ("Esc", "back"),
         ],
         View::Connectors => vec![("R", "release"), ("E", "engage"), ("Esc", "back")],
-        View::Agents => vec![("Esc", "back")],
     }
 }
 
@@ -1636,52 +1629,6 @@ fn draw_connectors(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_stateful_widget(
         List::new(items)
             .block(theme::panel("R release (asks) · E engage · u refresh"))
-            .highlight_style(theme::selected())
-            .highlight_symbol("▌ "),
-        area,
-        &mut state,
-    );
-}
-
-fn draw_agents(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let now = haste_core::time::now_secs();
-    let items: Vec<ListItem<'_>> = app
-        .agent_rows()
-        .iter()
-        .map(|row| match row {
-            AgentRow::Machine { name, state } => {
-                let (text, color) = match state {
-                    MachineState::Connected => (format!("● {name} · connected"), theme::OK),
-                    MachineState::Unreachable => (format!("○ {name} · unreachable"), theme::DANGER),
-                    MachineState::Mismatch { expected, observed } => (
-                        format!("✕ {name} · protocol mismatch (expected {expected}, observed {observed})"),
-                        theme::DANGER,
-                    ),
-                };
-                ListItem::new(Line::from(Span::styled(text, Style::new().fg(color).add_modifier(Modifier::BOLD))))
-            }
-            AgentRow::Workspace(label) => ListItem::new(format!("  ▾ {label}")),
-            AgentRow::Agent(a) => {
-                let since = now.saturating_sub(a.status_since);
-                let color = match a.status {
-                    AgentStatus::Blocked => theme::WARNING,
-                    AgentStatus::Working => theme::SAPPHIRE,
-                    _ => theme::SUBTEXT0,
-                };
-                ListItem::new(Line::from(vec![
-                    Span::raw(format!("      {:<12}", a.agent.as_deref().unwrap_or("agent"))),
-                    Span::styled(format!("{:<9}", a.status.as_str()), Style::new().fg(color)),
-                    Span::raw(human_duration(since)),
-                ]))
-            }
-        })
-        .collect();
-    let mut state = ListState::default().with_selected(Some(app.agents_selected));
-    frame.render_stateful_widget(
-        List::new(items)
-            .block(theme::panel(
-                "Agents by machine and workspace · read-only · u refresh",
-            ))
             .highlight_style(theme::selected())
             .highlight_symbol("▌ "),
         area,

@@ -470,6 +470,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
     if app.mode == Mode::Read {
         return vec![
             ("j/k", "message"),
+            ("o", "older"),
             ("g/G", "first/last"),
             ("r", "reply"),
             ("e", "archive"),
@@ -943,11 +944,13 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let block = theme::panel(&title).border_style(pane_border(true));
     let inner = block.inner(area);
     let height = usize::from(inner.height);
+    let first = reader.first_visible();
     let (mut lines, laid) = crate::chat::layout(
-        &reader.messages,
+        &reader.messages[first..],
         &crate::chat::Layout {
             width: usize::from(inner.width),
-            selected: reader.selected,
+            selected: reader.selected.saturating_sub(first),
+            hidden: first,
             own: reader.own.as_deref(),
             tz_offset: app.tz_offset,
             now: haste_core::time::now_secs(),
@@ -960,14 +963,14 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
             theme::muted(),
         )));
     }
-    let scroll = match laid.get(reader.selected) {
+    let scroll = match laid.get(reader.selected.saturating_sub(first)) {
         Some(l) => crate::chat::scroll_to(reader.scroll.get(), l, height, lines.len()),
         None => 0,
     };
     reader.scroll.set(scroll);
     *reader.links.borrow_mut() = laid.iter().flat_map(|l| l.links.clone()).collect();
     let hint =
-        " j/k message · a attachments · x fold · r reply · n note · l label · e archive · Esc ";
+        " j/k message · a attachments · x fold · o older · r reply · n note · l label · e archive · Esc ";
     frame.render_widget(
         Paragraph::new(lines)
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
@@ -1299,7 +1302,7 @@ mod tests {
     }
 
     #[test]
-    fn a_long_thread_opens_on_the_newest_message_and_scrolls_to_the_older_ones() {
+    fn a_long_thread_shows_the_newest_six_and_o_loads_older_ones() {
         let mut app = App::new();
         let many: Vec<_> = (0..40)
             .map(|i| {
@@ -1313,11 +1316,23 @@ mod tests {
         open_thread(&mut app, many);
         let text = render(&app);
         assert!(text.contains("body-number-39"), "newest is visible");
-        assert!(!text.contains("body-number-00"), "oldest is scrolled out");
+        assert!(!text.contains("body-number-00"), "older ones are not shown");
         app.handle_key(Key::Char('g'));
         let text = render(&app);
-        assert!(text.contains("body-number-00"), "g goes to the top");
-        assert!(!text.contains("body-number-39"));
+        assert!(
+            text.contains("body-number-34"),
+            "g goes to the top of the shown ones"
+        );
+        assert!(!text.contains("body-number-00"));
+        assert!(
+            text.contains("34 older messages"),
+            "a marker says what is hidden"
+        );
+        // `o` shows six more, from the stored copy
+        app.handle_key(Key::Char('o'));
+        app.handle_key(Key::Char('g'));
+        let text = render(&app);
+        assert!(text.contains("body-number-28") && text.contains("28 older messages"));
     }
 }
 

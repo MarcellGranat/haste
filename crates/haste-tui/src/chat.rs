@@ -244,6 +244,8 @@ pub struct Layout<'a> {
     pub tz_offset: i64,
     /// The current time (Unix seconds), for recent times such as `3 hours ago`.
     pub now: i64,
+    /// How many older messages are not laid out (a marker line says so).
+    pub hidden: usize,
     /// Messages (by id) shown in full, with their quoted history and recipient lists open.
     pub expanded: &'a std::collections::HashSet<String>,
 }
@@ -419,6 +421,17 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
     let mut laid = Vec::new();
     let max_inner = (l.width * 3 / 4).clamp(16, 100).saturating_sub(4);
     let mut day = None;
+    if l.hidden > 0 {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "▲ {} older message{} · o shows {} more",
+                l.hidden,
+                if l.hidden == 1 { "" } else { "s" },
+                crate::app::READER_WINDOW
+            ),
+            Style::new().fg(theme::LAVENDER),
+        )));
+    }
     for (i, m) in messages.iter().enumerate() {
         let this_day = inbox::day_start(m.sent_at, l.tz_offset);
         if day != Some(this_day) {
@@ -616,6 +629,7 @@ mod tests {
                 own: None,
                 tz_offset: 0,
                 now: 0,
+                hidden: 0,
                 expanded: &std::collections::HashSet::new(),
             },
         );
@@ -680,6 +694,7 @@ mod tests {
                 own: None,
                 tz_offset: 0,
                 now: 0,
+                hidden: 0,
                 expanded: &std::collections::HashSet::new(),
             },
         );
@@ -777,6 +792,7 @@ mod tests {
                 own: None,
                 tz_offset: 0,
                 now: 0,
+                hidden: 0,
                 expanded: &std::collections::HashSet::new(),
             },
         );

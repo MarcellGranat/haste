@@ -89,9 +89,24 @@ pub struct Reader {
     pub own: Option<String>,
     /// Messages (by id) opened in full: their quoted history and recipient lists are shown.
     pub expanded: std::collections::HashSet<String>,
+    /// How many of the newest messages are shown; `o` shows more. The older ones are already
+    /// stored, so showing them reads nothing again.
+    pub shown: usize,
     /// `(shown text, address)` of the links on screen, set while drawing; the terminal makes
     /// them clickable after the frame is drawn.
     pub links: std::cell::RefCell<Vec<(String, String)>>,
+}
+
+/// How many of the newest messages of a thread the reader shows at first, and how many more
+/// each press of `o` adds.
+pub const READER_WINDOW: usize = 6;
+
+impl Reader {
+    /// Index of the oldest message on screen.
+    #[must_use]
+    pub fn first_visible(&self) -> usize {
+        self.messages.len().saturating_sub(self.shown)
+    }
 }
 
 /// The attachment menu: the files of one message, one selected; and, while choosing where to
@@ -1415,6 +1430,7 @@ impl App {
             own,
             expanded: std::collections::HashSet::new(),
             links: std::cell::RefCell::new(Vec::new()),
+            shown: READER_WINDOW,
         });
         self.mode = Mode::Read;
     }
@@ -1438,6 +1454,7 @@ impl App {
             None => reader.selected.min(messages.len().saturating_sub(1)),
         };
         reader.messages = messages;
+        reader.selected = reader.selected.max(reader.first_visible());
     }
 
     /// Keys in the attachment menu: move, `p` preview, Enter or `d` download the one, `D` or `A`
@@ -1543,14 +1560,15 @@ impl App {
         };
         let thread_id = reader.view.thread.id.clone();
         let last = reader.messages.len().saturating_sub(1);
-        let step = |at: usize, by: isize| at.saturating_add_signed(by).min(last);
+        let first = reader.first_visible();
+        let step = |at: usize, by: isize| at.saturating_add_signed(by).clamp(first, last);
         match key {
             Key::Esc | Key::Enter | Key::Char('q' | 'h') => self.close_reader(),
             Key::Char('j') | Key::Down => reader.selected = step(reader.selected, 1),
             Key::Char('k') | Key::Up => reader.selected = step(reader.selected, -1),
             Key::Char(' ' | 'd') => reader.selected = step(reader.selected, READER_PAGE),
             Key::Char('b' | 'u') => reader.selected = step(reader.selected, -READER_PAGE),
-            Key::Char('g' | '0') => reader.selected = 0,
+            Key::Char('g' | '0') => reader.selected = first,
             Key::Char('G') => reader.selected = last,
             Key::Char('a') => {
                 let found = reader.messages.get(reader.selected).map(|m| {
@@ -1570,6 +1588,19 @@ impl App {
                         self.mode = Mode::Attachments;
                     }
                     _ => self.status = "no attachment on this message".into(),
+                }
+            }
+            Key::Char('o') => {
+                let hidden = reader.first_visible();
+                if hidden == 0 {
+                    self.status = "no older messages are stored for this thread".into();
+                } else {
+                    reader.shown += READER_WINDOW;
+                    self.status = format!(
+                        "showing {} of {} messages",
+                        reader.messages.len() - reader.first_visible(),
+                        reader.messages.len()
+                    );
                 }
             }
             Key::Char('x') => {
@@ -2915,6 +2946,32 @@ mod tests {
                 attachments: vec![std::path::PathBuf::from("/a/report.pdf")],
             })
         );
+    }
+
+    #[test]
+    fn the_reader_shows_six_messages_and_o_shows_six_more() {
+        let mut app = inbox_app();
+        let view = app.threads[1].clone();
+        let messages: Vec<Message> = (0..15)
+            .map(|i| message(&format!("m{i:02}"), "a@x.com", "hi", i64::from(i) * 100))
+            .collect();
+        app.show_thread(view, messages, None);
+        let r = app.reader.as_ref().unwrap();
+        assert_eq!((r.first_visible(), r.selected), (9, 14));
+        // moving up stops at the oldest shown message
+        for _ in 0..20 {
+            press(&mut app, "k");
+        }
+        assert_eq!(app.reader.as_ref().unwrap().selected, 9);
+        press(&mut app, "o");
+        assert_eq!(app.reader.as_ref().unwrap().first_visible(), 3);
+        assert!(app.status.contains("12 of 15"), "{}", app.status);
+        press(&mut app, "o");
+        assert_eq!(app.reader.as_ref().unwrap().first_visible(), 0);
+        press(&mut app, "o");
+        assert!(app.status.contains("no older"), "{}", app.status);
+        press(&mut app, "g");
+        assert_eq!(app.reader.as_ref().unwrap().selected, 0);
     }
 
     #[test]

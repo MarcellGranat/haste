@@ -243,6 +243,9 @@ impl BeeperConnector {
         let mut found: Vec<Mapped> = Vec::new();
         let mut older = 0_usize;
         let mut cursor: Option<String> = None;
+        let mut walked = 0_usize;
+        let mut returned = 0_usize;
+        let mut more_left = false;
         let pages = if request.deep {
             BEEPER_HISTORY_DEEP_PAGES
         } else {
@@ -253,6 +256,9 @@ impl BeeperConnector {
                 .client
                 .messages(chat_id, BEEPER_PAGE_SIZE, cursor.as_deref())
                 .await?;
+            walked += 1;
+            returned += items.len();
+            more_left = more;
             for wire in &items {
                 if let Some(mapped) = map_message(chat_id, &self.which.source(), wire) {
                     // messages already stored are returned too: they come back with their
@@ -271,6 +277,19 @@ impl BeeperConnector {
                 _ => break,
             }
         }
+        // how far Beeper's own store goes back is the usual answer to "why no older messages"
+        haste_core::log::info(
+            "beeper",
+            "history_read",
+            &[
+                haste_core::log::id("network", self.which.name()),
+                haste_core::log::l("deep", if request.deep { "yes" } else { "no" }),
+                haste_core::log::n("pages", walked),
+                haste_core::log::n("returned", returned),
+                haste_core::log::n("older_than_stored", older),
+                haste_core::log::l("more_available", if more_left { "yes" } else { "no" }),
+            ],
+        );
         let mut batch = Batch::default();
         if found.is_empty() {
             return Ok(batch);

@@ -375,6 +375,7 @@ proposal **and** run it. haste never deletes or edits a reminder.
 
 ### Using it
 
+- Leave a list out (groceries, say): `haste connector reminders exclude "Groceries"` (the name as Reminders shows it, any case). Its reminders are no longer read or shown, and what was stored from it disappears within a minute; no restart. `include` brings it back, `excluded` lists them. The setting is `reminders.json` in the data folder.
 - Email to reminder: `haste email to-reminder <thread-id> [--title ..] [--project ..] [--due ..]`
   (or `T` on a thread in the TUI). It creates a proposal; approve it (`a`), then run it (`s`, or
   `haste proposal execute <id>`).

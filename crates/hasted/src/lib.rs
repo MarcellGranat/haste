@@ -315,8 +315,10 @@ pub fn start_reminders_with(
     if let Ok(mut slot) = state.reminders_helper.write() {
         *slot = Some(Arc::clone(&helper));
     }
-    let connector: Arc<dyn haste_core::connector::Connector> =
-        Arc::new(RemindersConnector::new(helper, audit));
+    let connector: Arc<dyn haste_core::connector::Connector> = Arc::new(
+        RemindersConnector::new(helper, audit)
+            .with_settings(state.config.data_dir.join("reminders.json")),
+    );
     state.register_connector(Arc::clone(&connector));
     tokio::spawn(scheduler::sync_loop(
         Arc::clone(state),

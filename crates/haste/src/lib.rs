@@ -405,6 +405,16 @@ pub enum RemindersCmd {
     Auth,
     /// Permission, kill switch and counts (never titles).
     Status,
+    /// Leave a Reminders list out of haste (for example groceries): its reminders are no
+    /// longer read or shown. Takes effect within a minute; no restart.
+    Exclude {
+        /// The list's name as Reminders shows it (case does not matter).
+        list: String,
+    },
+    /// Show a previously excluded list again.
+    Include { list: String },
+    /// The excluded lists.
+    Excluded,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1073,6 +1083,21 @@ pub fn build_body(command: &Command) -> Result<RequestBody, CliError> {
             },
         } => RequestBody::RemindersAuth,
         #[cfg(feature = "human")]
+        Command::Connector {
+            cmd:
+                ConnectorCmd::Reminders {
+                    cmd:
+                        RemindersCmd::Exclude { .. }
+                        | RemindersCmd::Include { .. }
+                        | RemindersCmd::Excluded,
+                },
+        } => {
+            // these edit a local file and never reach the daemon (see `run_reminders_lists`)
+            return Err(CliError::Usage(
+                "the Reminders list settings are a local file edit".into(),
+            ));
+        }
+        #[cfg(feature = "human")]
         Command::Agent {
             cmd: AgentCmd::Register {
                 id, kind, allow, ..
@@ -1267,6 +1292,15 @@ pub fn run(cli: &Cli) -> Result<String, CliError> {
     }
     #[cfg(feature = "human")]
     if let Command::Connector {
+        cmd: ConnectorCmd::Reminders { cmd },
+    } = &cli.command
+    {
+        if let Some(text) = run_reminders_lists(&base, cmd)? {
+            return Ok(text);
+        }
+    }
+    #[cfg(feature = "human")]
+    if let Command::Connector {
         cmd: ConnectorCmd::Gcal { cmd: GcalCmd::Auth },
     } = &cli.command
     {
@@ -1452,6 +1486,66 @@ pub fn run_gcal_auth(base: &Path) -> Result<String, CliError> {
             "{GCAL_AUTH_HELPER} failed with {status}"
         )))
     }
+}
+
+/// `exclude`, `include` and `excluded`: edit the list exclusions in `reminders.json` in the data
+/// folder (the daemon reads it again every cycle). `None` for the other Reminders verbs.
+///
+/// # Errors
+/// [`CliError::Usage`] when the file cannot be read or written.
+#[cfg(feature = "human")]
+fn run_reminders_lists(base: &Path, cmd: &RemindersCmd) -> Result<Option<String>, CliError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let (list, add) = match cmd {
+        RemindersCmd::Exclude { list } => (Some(list.trim()), true),
+        RemindersCmd::Include { list } => (Some(list.trim()), false),
+        RemindersCmd::Excluded => (None, false),
+        _ => return Ok(None),
+    };
+    let path = base.join("reminders.json");
+    let mut lists: Vec<String> = match fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
+            .map_err(|_| CliError::Usage("reminders.json is not valid JSON".into()))?
+            .get("exclude_lists")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(CliError::Usage(format!("cannot read reminders.json: {e}"))),
+    };
+    if let Some(list) = list {
+        if list.is_empty() {
+            return Err(CliError::Usage("give the list's name".into()));
+        }
+        let same = |a: &String| a.trim().to_lowercase() == list.to_lowercase();
+        if add {
+            if !lists.iter().any(same) {
+                lists.push(list.to_owned());
+            }
+        } else {
+            lists.retain(|a| !same(a));
+        }
+        let text = serde_json::to_string_pretty(&serde_json::json!({ "exclude_lists": lists }))
+            .map_err(|e| CliError::Usage(e.to_string()))?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| CliError::Usage(format!("cannot write reminders.json: {e}")))?;
+        std::io::Write::write_all(&mut file, text.as_bytes())
+            .map_err(|e| CliError::Usage(format!("cannot write reminders.json: {e}")))?;
+    }
+    Ok(Some(if lists.is_empty() {
+        "no Reminders list is excluded".to_owned()
+    } else {
+        format!("excluded Reminders lists: {}", lists.join(", "))
+    }))
 }
 
 /// The subject of a thread, used as the default reminder title.
@@ -2058,5 +2152,39 @@ mod tests {
         assert!(load_token(dir.path(), Some("../human"), None, false).is_err());
         // No hint and no file: no token.
         assert!(load_token(dir.path(), None, None, false).is_err());
+    }
+
+    #[cfg(feature = "human")]
+    #[test]
+    fn reminders_lists_are_excluded_and_included_in_a_local_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |cmd: &RemindersCmd| run_reminders_lists(dir.path(), cmd).unwrap().unwrap();
+        assert_eq!(
+            run(&RemindersCmd::Excluded),
+            "no Reminders list is excluded"
+        );
+        let add = |l: &str| RemindersCmd::Exclude { list: l.into() };
+        assert_eq!(
+            run(&add("Groceries")),
+            "excluded Reminders lists: Groceries"
+        );
+        // the same list in another case is not added twice
+        assert_eq!(
+            run(&add("groceries")),
+            "excluded Reminders lists: Groceries"
+        );
+        assert_eq!(
+            run(&add("Home")),
+            "excluded Reminders lists: Groceries, Home"
+        );
+        let text = std::fs::read_to_string(dir.path().join("reminders.json")).unwrap();
+        assert!(text.contains("exclude_lists") && text.contains("Groceries"));
+        let off = RemindersCmd::Include {
+            list: "GROCERIES".into(),
+        };
+        assert_eq!(run(&off), "excluded Reminders lists: Home");
+        assert!(run_reminders_lists(dir.path(), &RemindersCmd::Status)
+            .unwrap()
+            .is_none());
     }
 }

@@ -4,7 +4,9 @@
 pub mod connector;
 pub mod protocol;
 pub mod runner;
+pub mod settings;
 
 pub use connector::{CycleAudit, RemindersConnector, RemindersCursor};
 pub use protocol::{AuthStatus, RemindersRequest, RemindersResponse, WireReminder};
 pub use runner::{Helper, HelperError, ProcessHelper};
+pub use settings::Settings;

@@ -34,6 +34,10 @@ pub struct RemindersCursor {
     /// Counter used to make each sweep id unique.
     #[serde(default)]
     pub sweeps_started: u64,
+    /// The excluded-lists digest the stored reminders were read under; a different one means a
+    /// sweep now, which drops what the new setting leaves out.
+    #[serde(default)]
+    pub excluded_digest: u64,
 }
 
 impl RemindersCursor {
@@ -56,12 +60,25 @@ impl RemindersCursor {
 pub struct RemindersConnector {
     helper: Arc<dyn Helper>,
     audit: CycleAudit,
+    /// Where the list exclusions are read from each cycle (none: nothing is excluded).
+    settings_path: Option<std::path::PathBuf>,
 }
 
 impl RemindersConnector {
     #[must_use]
     pub fn new(helper: Arc<dyn Helper>, audit: CycleAudit) -> Self {
-        Self { helper, audit }
+        Self {
+            helper,
+            audit,
+            settings_path: None,
+        }
+    }
+
+    /// Leave out the lists named in this settings file (`reminders.json`), read every cycle.
+    #[must_use]
+    pub fn with_settings(mut self, path: std::path::PathBuf) -> Self {
+        self.settings_path = Some(path);
+        self
     }
 }
 
@@ -94,10 +111,16 @@ fn run_cycle(
     helper: &dyn Helper,
     audit: &CycleAudit,
     cursor: Option<Cursor>,
+    settings: &crate::settings::Settings,
 ) -> Result<Batch, ConnectorError> {
     let mut state = cursor
         .map(|c| RemindersCursor::decode(&c.0))
         .unwrap_or_default();
+    // a changed exclusion set starts a sweep at once: it drops what is no longer wanted
+    if state.excluded_digest != settings.digest() {
+        state.cycles_since_sweep = None;
+        state.excluded_digest = settings.digest();
+    }
     let sweeping = state.sweep_due();
     let since = if sweeping { 0 } else { state.since };
     let mut reminders = Vec::new();
@@ -147,6 +170,9 @@ fn run_cycle(
     for r in &reminders {
         state.since = state.since.max(r.modified);
     }
+    let before = reminders.len();
+    reminders.retain(|r| !settings.excludes(&r.list));
+    let left_out = before - reminders.len();
     let sweep = if sweeping {
         state.sweeps_started += 1;
         Some(Sweep {
@@ -164,7 +190,7 @@ fn run_cycle(
     audit(
         "ok",
         &format!(
-            "reminders={} pages={} sweep={}{}",
+            "reminders={} pages={} sweep={}{}{}",
             reminders.len(),
             pages,
             if sweeping { "yes" } else { "no" },
@@ -172,6 +198,11 @@ fn run_cycle(
                 " (truncated)"
             } else {
                 ""
+            },
+            if left_out > 0 {
+                format!(" left_out={left_out}")
+            } else {
+                String::new()
             }
         ),
     );
@@ -208,9 +239,16 @@ impl Connector for RemindersConnector {
         Box::pin(async move {
             let helper = Arc::clone(&self.helper);
             let audit = Arc::clone(&self.audit);
-            tokio::task::spawn_blocking(move || run_cycle(helper.as_ref(), &audit, cursor))
-                .await
-                .unwrap_or_else(|_| Err(ConnectorError::Transient("sync task failed".into())))
+            let settings = self
+                .settings_path
+                .as_deref()
+                .map(crate::settings::Settings::load)
+                .unwrap_or_default();
+            tokio::task::spawn_blocking(move || {
+                run_cycle(helper.as_ref(), &audit, cursor, &settings)
+            })
+            .await
+            .unwrap_or_else(|_| Err(ConnectorError::Transient("sync task failed".into())))
         })
     }
 
@@ -302,6 +340,7 @@ impl Connector for RemindersConnector {
 mod tests {
     use super::*;
     use crate::protocol::WireReminder;
+    use crate::settings::Settings;
     use std::sync::Mutex;
 
     struct Fake {
@@ -363,12 +402,18 @@ mod tests {
             page(vec![wire("a", 10), wire("b", 20)], false),
             page(vec![wire("b", 30)], false),
         ]);
-        let first = run_cycle(fake.as_ref(), &audit, None).unwrap();
+        let first = run_cycle(fake.as_ref(), &audit, None, &Settings::default()).unwrap();
         assert_eq!(first.sweep.as_ref().map(|s| s.complete), Some(true));
         assert_eq!(first.reminders.len(), 2);
         let cursor = RemindersCursor::decode(&first.next_cursor.clone().unwrap().0);
         assert_eq!((cursor.since, cursor.cycles_since_sweep), (20, Some(0)));
-        let second = run_cycle(fake.as_ref(), &audit, first.next_cursor).unwrap();
+        let second = run_cycle(
+            fake.as_ref(),
+            &audit,
+            first.next_cursor,
+            &Settings::default(),
+        )
+        .unwrap();
         assert!(second.sweep.is_none(), "deltas never mark anything missing");
         let requests = fake.requests.lock().unwrap();
         assert!(matches!(
@@ -400,7 +445,7 @@ mod tests {
             .map(|i| page(vec![wire(&format!("r{i}"), 1)], true))
             .collect();
         let fake = Fake::new(pages);
-        let batch = run_cycle(fake.as_ref(), &audit, None).unwrap();
+        let batch = run_cycle(fake.as_ref(), &audit, None, &Settings::default()).unwrap();
         assert_eq!(batch.sweep.as_ref().map(|s| s.complete), Some(false));
         let cursor = RemindersCursor::decode(&batch.next_cursor.unwrap().0);
         assert_eq!(
@@ -416,9 +461,16 @@ mod tests {
             since: 5,
             cycles_since_sweep: Some(SWEEP_EVERY_CYCLES),
             sweeps_started: 1,
+            excluded_digest: 0,
         };
         let fake = Fake::new(vec![page(vec![], false)]);
-        let batch = run_cycle(fake.as_ref(), &audit, Some(Cursor(cursor.encode()))).unwrap();
+        let batch = run_cycle(
+            fake.as_ref(),
+            &audit,
+            Some(Cursor(cursor.encode())),
+            &Settings::default(),
+        )
+        .unwrap();
         let sweep = batch.sweep.unwrap();
         assert!(sweep.complete);
         assert_eq!(sweep.id, "sweep-2", "each sweep has its own id");
@@ -431,7 +483,7 @@ mod tests {
             kind: "not_authorized".into(),
             message: String::new(),
         })]);
-        let err = run_cycle(fake.as_ref(), &audit, None).unwrap_err();
+        let err = run_cycle(fake.as_ref(), &audit, None, &Settings::default()).unwrap_err();
         assert!(matches!(err, ConnectorError::Authorization(_)));
         assert_eq!(log.lock().unwrap().as_slice(), ["permission_needed:"]);
     }
@@ -441,12 +493,12 @@ mod tests {
         let (audit, _log) = audited();
         let timed_out = Fake::new(vec![Err(HelperError::TimedOut)]);
         assert!(matches!(
-            run_cycle(timed_out.as_ref(), &audit, None),
+            run_cycle(timed_out.as_ref(), &audit, None, &Settings::default()),
             Err(ConnectorError::Transient(_))
         ));
         let missing = Fake::new(vec![Err(HelperError::Missing("x".into()))]);
         assert!(matches!(
-            run_cycle(missing.as_ref(), &audit, None),
+            run_cycle(missing.as_ref(), &audit, None, &Settings::default()),
             Err(ConnectorError::Other(_))
         ));
     }
@@ -491,5 +543,48 @@ mod tests {
             &requests[0],
             RemindersRequest::CreateReminder { notes: Some(n), .. } if n == "haste:thread/x"
         ));
+    }
+
+    #[test]
+    fn excluded_lists_are_never_returned_and_a_changed_setting_sweeps_again() {
+        let mut groceries = wire("g1", 5);
+        groceries.list = "Groceries".into();
+        let mut work = wire("w1", 6);
+        work.list = "Work".into();
+        let fake = Fake::new(vec![
+            page(vec![groceries.clone(), work.clone()], false),
+            page(vec![groceries, work], false),
+        ]);
+        let audits = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&audits);
+        let audit: CycleAudit = Arc::new(move |o, d| sink.lock().unwrap().push(format!("{o} {d}")));
+        let hide = Settings {
+            exclude_lists: vec!["groceries".into()],
+        };
+        let first = run_cycle(fake.as_ref(), &audit, None, &hide).unwrap();
+        let ids: Vec<&str> = first
+            .reminders
+            .iter()
+            .map(|r| r.external_id.as_str())
+            .collect();
+        assert_eq!(ids, ["w1"], "only the other list is kept");
+        assert!(audits.lock().unwrap()[0].contains("left_out=1"));
+        // the cursor still moves past the hidden reminder, and remembers the setting
+        let cursor = RemindersCursor::decode(&first.next_cursor.clone().unwrap().0);
+        assert_eq!(cursor.since, 6);
+        assert_eq!(cursor.excluded_digest, hide.digest());
+        // the same setting: a delta cycle. A different setting: a sweep again, from the start.
+        let second = run_cycle(
+            fake.as_ref(),
+            &audit,
+            first.next_cursor,
+            &Settings::default(),
+        )
+        .unwrap();
+        assert!(
+            second.sweep.is_some(),
+            "a changed exclusion set sweeps at once"
+        );
+        assert_eq!(second.reminders.len(), 2);
     }
 }

@@ -400,7 +400,8 @@ pub enum EmailCmd {
 #[cfg(feature = "human")]
 #[derive(Subcommand, Debug)]
 pub enum RemindersCmd {
-    /// Ask macOS for Reminders access. Run this from a normal Terminal window.
+    /// Ask macOS for Reminders access through the daemon. The dialog appears on the Mac's
+    /// screen and names hasted; answer it there (or over Screen Sharing).
     Auth,
     /// Permission, kill switch and counts (never titles).
     Status,
@@ -1070,11 +1071,7 @@ pub fn build_body(command: &Command) -> Result<RequestBody, CliError> {
             cmd: ConnectorCmd::Reminders {
                 cmd: RemindersCmd::Auth,
             },
-        } => {
-            return Err(CliError::Usage(
-                "reminders auth runs the helper from your terminal, not a daemon request".into(),
-            ));
-        }
+        } => RequestBody::RemindersAuth,
         #[cfg(feature = "human")]
         Command::Agent {
             cmd: AgentCmd::Register {
@@ -1270,15 +1267,6 @@ pub fn run(cli: &Cli) -> Result<String, CliError> {
     }
     #[cfg(feature = "human")]
     if let Command::Connector {
-        cmd: ConnectorCmd::Reminders {
-            cmd: RemindersCmd::Auth,
-        },
-    } = &cli.command
-    {
-        return run_reminders_auth(&base);
-    }
-    #[cfg(feature = "human")]
-    if let Command::Connector {
         cmd: ConnectorCmd::Gcal { cmd: GcalCmd::Auth },
     } = &cli.command
     {
@@ -1462,59 +1450,6 @@ pub fn run_gcal_auth(base: &Path) -> Result<String, CliError> {
     } else {
         Err(CliError::Usage(format!(
             "{GCAL_AUTH_HELPER} failed with {status}"
-        )))
-    }
-}
-
-/// Where the Reminders helper is: `$HASTE_REMINDERS_HELPER`, next to this executable, or in
-/// the data directory.
-#[cfg(feature = "human")]
-fn reminders_helper_path(base: &Path) -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("HASTE_REMINDERS_HELPER") {
-        return Some(PathBuf::from(p));
-    }
-    let beside = std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(|d| d.join("haste-reminders-helper")));
-    [beside, Some(base.join("haste-reminders-helper"))]
-        .into_iter()
-        .flatten()
-        .find(|p| p.is_file())
-}
-
-/// Ask macOS for Reminders access by running the helper from this terminal, so the system
-/// prompt names the terminal. Prints the resulting status only.
-///
-/// # Errors
-/// [`CliError::Usage`] when the helper is missing or fails.
-#[cfg(feature = "human")]
-pub fn run_reminders_auth(base: &Path) -> Result<String, CliError> {
-    use std::io::Write;
-    let program = reminders_helper_path(base).ok_or_else(|| {
-        CliError::Usage(
-            "reminders helper not found; build it with crates/haste-connector-reminders/helper/build.sh"
-                .into(),
-        )
-    })?;
-    let mut child = std::process::Command::new(&program)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| CliError::Usage(format!("cannot start the reminders helper: {e}")))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(br#"{"op":"authorization","prompt":true}"#);
-    }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| CliError::Usage(e.to_string()))?;
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout)
-        .map_err(|_| CliError::Usage("the reminders helper gave no answer".into()))?;
-    let status = value["status"].as_str().unwrap_or("unknown");
-    if status == "granted" {
-        Ok("reminders access: granted".to_owned())
-    } else {
-        Err(CliError::Usage(format!(
-            "reminders access: {status} (System Settings > Privacy & Security > Reminders)"
         )))
     }
 }

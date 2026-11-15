@@ -93,6 +93,7 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::EventTagAdd { .. }
         | RequestBody::EventTagRemove { .. }
         | RequestBody::RemindersStatus
+        | RequestBody::RemindersAuth
         | RequestBody::TriageSet { .. }
         | RequestBody::FilterList
         | RequestBody::IgnoreList
@@ -134,6 +135,7 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::EventTagRemove { .. } => "event_tag_remove",
         RequestBody::ReminderTagRemove { .. } => "reminder_tag_remove",
         RequestBody::RemindersStatus => "reminders_status",
+        RequestBody::RemindersAuth => "reminders_auth",
         RequestBody::ResolveExecuting { .. } => "resolve_executing",
         RequestBody::TriageSet { .. } => "triage_set",
         RequestBody::FilterList => "filter_list",
@@ -673,6 +675,7 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             change_event_tag(state, principal, &event_id, &tag, false)
         }
         RequestBody::RemindersStatus => reminders_status(state),
+        RequestBody::RemindersAuth => reminders_auth(state, principal),
         RequestBody::IgnoreList => {
             let (list, errors) = read_ignore(&state.config.data_dir);
             Response::Ignore {
@@ -945,6 +948,32 @@ fn change_event_tag(
             map_store(&e)
         }
     }
+}
+
+/// How long the system dialog may stay unanswered.
+const REMINDERS_AUTH_WAIT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Run the Reminders helper with the prompt enabled, from this daemon's own process, so macOS
+/// attributes the permission to the daemon and shows its dialog on the Mac's screen.
+fn reminders_auth(state: &State, actor: &Principal) -> Response {
+    use haste_connector_reminders::{Helper, ProcessHelper, RemindersRequest, RemindersResponse};
+    let Some(bin) = crate::find_reminders_helper(&state.config.data_dir) else {
+        return err(ErrorCode::NotFound, "the Reminders helper was not found");
+    };
+    let mut helper = ProcessHelper::new(bin);
+    helper.timeout = REMINDERS_AUTH_WAIT;
+    let status = match helper.call(&RemindersRequest::Authorization { prompt: true }) {
+        Ok(RemindersResponse::Authorization { status }) => status.as_str().to_owned(),
+        _ => "unknown".to_owned(),
+    };
+    state.audit(
+        &actor.id,
+        "reminders.auth",
+        &status,
+        Some("reminders"),
+        None,
+    );
+    Response::RemindersAccess { status }
 }
 
 fn reminders_status(state: &State) -> Response {

@@ -5,6 +5,10 @@
 # the signature (your certificate and the binary's name), which does not change when the code
 # does. Unsigned rebuilds look like a new program every time and ask again.
 #
+# hasted runs from a small app bundle (~/Applications/Haste.app) so macOS gives it its own
+# privacy identity: a Reminders permission granted to Terminal does not reach a launchd job.
+# ~/.cargo/bin/hasted is a symlink to the bundle's executable, so the launchd job is unchanged.
+#
 # Usage: scripts/deploy.sh [hasted] [tui] [cli] [helpers] [reminders]   (default: all but reminders)
 # Env:   HASTE_SIGN_IDENTITY  certificate hash to sign with (default: the first Apple Development
 #                             identity found by `security find-identity`)
@@ -33,8 +37,17 @@ sign() {
 for t in "${targets[@]}"; do
     case "$t" in
     hasted)
+        # cargo would write through the symlink into the signed bundle: remove it first
+        [ -L "$bin/hasted" ] && rm "$bin/hasted"
         cargo install --path crates/hasted --features gmail,icloud,gcal,beeper --locked
-        sign hasted
+        app="$HOME/Applications/Haste.app"
+        mkdir -p "$app/Contents/MacOS"
+        cp "$bin/hasted" "$app/Contents/MacOS/hasted"
+        cp packaging/Haste-Info.plist "$app/Contents/Info.plist"
+        codesign --force --sign "$identity" "$app"
+        rm "$bin/hasted"
+        ln -s "$app/Contents/MacOS/hasted" "$bin/hasted"
+        signed+=(Haste.app)
         ;;
     tui)
         cargo install --path crates/haste-tui --locked

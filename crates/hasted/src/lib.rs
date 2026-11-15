@@ -281,7 +281,13 @@ pub fn find_reminders_helper(base: &Path) -> Option<std::path::PathBuf> {
     let beside = std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(|d| d.join(REMINDERS_HELPER_NAME)));
-    [beside, Some(base.join(REMINDERS_HELPER_NAME))]
+    // hasted runs from an app bundle, so the helper is also looked up in the cargo bin folder
+    let cargo_bin = std::env::var_os("HOME").map(|h| {
+        std::path::PathBuf::from(h)
+            .join(".cargo/bin")
+            .join(REMINDERS_HELPER_NAME)
+    });
+    [beside, Some(base.join(REMINDERS_HELPER_NAME)), cargo_bin]
         .into_iter()
         .flatten()
         .find(|p| p.is_file())

@@ -10,7 +10,7 @@ use haste_core::policy::PrincipalKind;
 use haste_core::proposal::{Payload, Proposal, ProposalState};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 /// Largest frame either side accepts.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
@@ -228,6 +228,9 @@ pub enum RequestBody {
     },
     /// Human-only: counts and permission state of the Reminders connector (no titles).
     RemindersStatus,
+    /// Human-only: ask macOS for Reminders access from the daemon's own identity (the system
+    /// dialog appears on the Mac's screen and names the daemon, so the grant is the daemon's).
+    RemindersAuth,
     /// Human-only: read a note under the notes folder (same containment and hidden-path rules).
     NoteShow {
         path: String,
@@ -551,6 +554,10 @@ pub enum Response {
     },
     RemindersStatus {
         status: RemindersStatusView,
+    },
+    /// The Reminders permission after the request: `granted`, `denied`, `not_determined`, ...
+    RemindersAccess {
+        status: String,
     },
     Agents {
         machines: Vec<MachineView>,

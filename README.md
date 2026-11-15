@@ -364,8 +364,11 @@ proposal **and** run it. haste never deletes or edits a reminder.
 1. Build the helper (a small EventKit program, ad-hoc signed, with a usage description):
    `crates/haste-connector-reminders/helper/build.sh` (writes `target/helper/haste-reminders-helper`).
    Put it next to `hasted` or point `HASTE_REMINDERS_HELPER` at it.
-2. From a **normal Terminal window** (not an agent shell) run `haste connector reminders auth`
-   and allow access. macOS attributes the grant to the process that asks.
+2. Deploy with `scripts/deploy.sh hasted reminders`: `hasted` then runs from
+   `~/Applications/Haste.app`, which gives it its own macOS privacy identity. Run
+   `haste connector reminders auth` (from anywhere, including SSH): the daemon asks macOS and
+   the dialog appears **on the Mac's screen** (use Screen Sharing if you are away). Allow it
+   there. A grant given to Terminal does not reach a launchd job, which is why the daemon asks.
 3. Start `hasted`. The Reminders connector starts **engaged** (nothing runs) the first time.
    Release it with `haste connector release reminders`; `haste connector reminders status` then
    shows permission, kill switch and counts (never titles).
@@ -393,7 +396,7 @@ proposal **and** run it. haste never deletes or edits a reminder.
 
 ### Manual smoke check (real Reminders)
 
-1. `haste connector reminders auth` from Terminal prints `granted`.
+1. `haste connector reminders auth` prints `granted` (after you allow the dialog on the Mac).
 2. Release the kill switch; `haste connector reminders status` shows counts only.
 3. `haste tag add-reminder <id> <project>` on one reminder; a machine principal sees it only on that machine.
 4. `haste email to-reminder <thread>`, approve, run: the reminder appears with only the identifier in its notes.

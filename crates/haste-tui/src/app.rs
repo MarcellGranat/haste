@@ -363,6 +363,12 @@ pub enum Mode {
     ConfirmBatch(Vec<String>),
     ConfirmStaleApprove(String),
     ConfirmRelease(String),
+    /// `x` on a mail: mute its sender and delete their stored mail here, after a yes.
+    ConfirmMute {
+        thread_id: String,
+        sender: String,
+        threads: usize,
+    },
     /// A normal send is not confirmed with a key: it runs after [`SEND_DELAY`] unless the human
     /// cancels with any key. The recipients shown are the ones the daemon resolved and the digest
     /// binds the send to them.
@@ -728,12 +734,18 @@ impl App {
         }
     }
 
-    /// Is this thread's sender blocked: muted, or (mail) a stranger whose mail was never read
-    /// or answered and who is not let through.
+    /// Is the sender on the mute list? Such mail is not shown anywhere.
+    #[must_use]
+    pub fn is_muted(&self, t: &ThreadView) -> bool {
+        self.ignore.is_muted(&inbox::rule_subjects(t))
+    }
+
+    /// Is this thread's sender blocked: (mail) not accepted yet with `b`, and not on the
+    /// priority list.
     #[must_use]
     pub fn is_blocked(&self, t: &ThreadView) -> bool {
         let subjects = inbox::rule_subjects(t);
-        if self.ignore.is_muted(&subjects) {
+        if self.is_muted(t) {
             return true;
         }
         inbox::is_mail(&t.thread.source.as_name())
@@ -906,6 +918,8 @@ impl App {
                 !t.triage.archived && (include_aside || !t.triage.set_aside) && !self.is_snoozed(t)
             })
             .filter(|t| inbox::matches(filter, t))
+            // a muted sender's mail does not reach the lists at all
+            .filter(|t| !self.is_muted(t))
             .collect();
         // blocked senders last; then priority; then the newest
         out.sort_by_key(|t| {
@@ -1027,6 +1041,7 @@ impl App {
             .threads
             .iter()
             .filter(|t| !t.triage.archived && (t.triage.set_aside || self.is_snoozed(t)))
+            .filter(|t| !self.is_muted(t))
             .collect();
         out.sort_by_key(|t| {
             (
@@ -1268,6 +1283,7 @@ impl App {
                 },
             ),
             Mode::ConfirmRelease(source) => self.confirm(key, Effect::ReleaseConnector { source }),
+            Mode::ConfirmMute { thread_id, .. } => self.confirm(key, Effect::Mute { thread_id }),
             Mode::ConfirmStaleApprove(id) => self.confirm(
                 key,
                 Effect::Approve {
@@ -2294,9 +2310,27 @@ impl App {
         }
     }
 
+    /// `x`: mute the sender. For mail that also deletes their stored mail here, so it asks.
     fn mute_selected(&mut self) -> Option<Effect> {
         let (thread_id, _) = self.thread_under_cursor()?;
-        Some(Effect::Mute { thread_id })
+        let t = self.selected_thread()?;
+        if !inbox::is_mail(&t.thread.source.as_name()) {
+            return Some(Effect::Mute { thread_id });
+        }
+        let subject = inbox::rule_subjects(t).first().map(|s| (*s).to_owned())?;
+        let rule = IgnoreList::from_patterns(&[haste_core::ignore::pattern_for(&subject)]);
+        let threads = self
+            .threads
+            .iter()
+            .filter(|o| inbox::is_mail(&o.thread.source.as_name()))
+            .filter(|o| rule.is_muted(&inbox::rule_subjects(o)))
+            .count();
+        self.mode = Mode::ConfirmMute {
+            thread_id,
+            sender: inbox::short_sender_or_address(&inbox::sanitize(&subject)),
+            threads,
+        };
+        None
     }
 
     fn thread_mut(&mut self, id: &str) -> Option<&mut ThreadView> {
@@ -2579,6 +2613,13 @@ impl App {
             }
             Mode::ConfirmRelease(source) => Some(format!(
                 "Release {source}? It will sync again from its saved cursor. [y/N]"
+            )),
+            Mode::ConfirmMute {
+                sender, threads, ..
+            } => Some(format!(
+                "Mute {sender}? Its mail stops arriving and {threads} stored thread{} from it {} deleted here (the mailbox is not touched). [y/N]",
+                if *threads == 1 { "" } else { "s" },
+                if *threads == 1 { "is" } else { "are" }
             )),
             Mode::ConfirmStaleApprove(id) => {
                 Some(format!("Thread changed. Approve {id} anyway? [y/N]"))
@@ -3068,14 +3109,28 @@ mod tests {
     }
 
     #[test]
-    fn x_mutes_and_a_muted_sender_drops_to_the_bottom_marked_blocked() {
+    fn x_asks_then_mutes_and_a_muted_senders_mail_is_not_shown_anywhere() {
         let mut app = inbox_app();
+        // the daemon names the newest sender of each mail thread
+        app.threads[0].sender = Some("a@x.com".into());
+        app.threads[1].sender = Some("b@x.com".into());
+        // mail: a confirmation first, naming how many stored threads go
+        assert!(press(&mut app, "x").is_empty());
+        let Mode::ConfirmMute { threads, .. } = app.mode.clone() else {
+            panic!("{:?}", app.mode)
+        };
+        assert_eq!(threads, 1);
+        assert!(app.confirm_prompt().unwrap().contains("deleted here"));
         assert_eq!(
-            press(&mut app, "x"),
+            press(&mut app, "y"),
             vec![Effect::Mute {
                 thread_id: "t2".into()
             }]
         );
+        // anything but y cancels
+        press(&mut app, "x");
+        assert!(press(&mut app, "n").is_empty());
+        assert_eq!(app.mode, Mode::Normal);
         // the daemon answers with the pattern; the next refresh delivers the list
         app.set_ignore(&["^b@x\\.com$".to_owned()], vec![]);
         let ids: Vec<&str> = app
@@ -3083,8 +3138,9 @@ mod tests {
             .iter()
             .map(|t| t.thread.id.as_str())
             .collect();
-        assert_eq!(ids, ["t1", "t2"], "t2 has b@x.com among its senders: last");
-        assert!(app.is_blocked(&app.threads[1].clone()));
+        assert_eq!(ids, ["t1"], "t2 has b@x.com among its senders: gone");
+        press(&mut app, "2");
+        assert_eq!(app.channel_threads(0).len(), 1);
         // an invalid line is reported and the rest still applies
         app.set_ignore(
             &["^b@x\\.com$".to_owned()],

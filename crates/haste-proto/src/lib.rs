@@ -599,6 +599,9 @@ pub enum Response {
     },
     Muted {
         pattern: String,
+        /// Mail messages deleted from the local store because of it (the mailbox is untouched).
+        #[serde(default)]
+        deleted: usize,
     },
     /// The patterns of the three sender rule files, and bad lines in them (numbers only).
     Rules {

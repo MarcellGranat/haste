@@ -628,6 +628,65 @@ async fn a_resync_forgets_the_local_mail_and_reads_the_inbox_again() {
 }
 
 #[tokio::test]
+async fn muting_a_sender_deletes_their_stored_mail_and_keeps_it_from_coming_back() {
+    let h = boot().await;
+    let thread = synced_thread(&h).await;
+    let store = &h.daemon.state.store;
+    let before = store.messages_for_thread(&thread).unwrap();
+    let Response::Muted { pattern, deleted } = human(
+        &h,
+        RequestBody::IgnoreMute {
+            thread_id: thread.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("expected the mute")
+    };
+    assert!(deleted >= 1, "the muted sender's mail is gone");
+    let mute = haste_core::ignore::IgnoreList::from_patterns(&[pattern]);
+    let left_over = |h: &Harness| -> Vec<String> {
+        h.daemon
+            .state
+            .store
+            .messages_for_thread(&thread)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|m| m.sender_identifier)
+            .filter(|s| mute.is_muted(&[s.as_str()]))
+            .collect()
+    };
+    assert!(left_over(&h).is_empty(), "none of their messages is stored");
+    let after = store.messages_for_thread(&thread).unwrap_or_default();
+    assert!(after.len() + deleted <= before.len());
+    assert!(audit(&h).contains("ignore.delete"));
+    // the mailbox was not touched: no label change, no delete
+    assert_eq!(h.google.count("/gmail/v1/users/me/threads/t100/modify"), 0);
+    // reading the mailbox again from scratch does not bring their mail back
+    assert!(matches!(
+        human(
+            &h,
+            RequestBody::ConnectorResync {
+                source: "gmail".into()
+            }
+        )
+        .await,
+        Response::Done
+    ));
+    sync_once(&h.daemon.state, &h.connector).await.unwrap();
+    let stored_again: Vec<String> = store
+        .mail_thread_ids()
+        .unwrap()
+        .iter()
+        .flat_map(|id| store.messages_for_thread(id).unwrap())
+        .filter_map(|m| m.sender_identifier)
+        .filter(|s| mute.is_muted(&[s.as_str()]))
+        .collect();
+    assert!(stored_again.is_empty());
+    h.daemon.shutdown().await;
+}
+
+#[tokio::test]
 async fn only_the_human_can_save_an_attachment_and_it_never_overwrites() {
     let h = boot().await;
     let thread = synced_thread(&h).await;

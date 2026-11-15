@@ -1479,7 +1479,7 @@ async fn muting_is_human_only_local_and_never_mutes_the_human() {
     let refused = human(&rig, RequestBody::IgnoreMute { thread_id: mail }).await;
     assert_eq!(code(&refused), Some(ErrorCode::Validation));
 
-    let Response::Muted { pattern } = human(
+    let Response::Muted { pattern, .. } = human(
         &rig,
         RequestBody::IgnoreMute {
             thread_id: chat.clone(),

@@ -1779,12 +1779,81 @@ fn ignore_mute(state: &State, actor: &Principal, thread_id: &str) -> Response {
         // The pattern holds an address or chat name: the audit records only that it happened.
         state.audit(&actor.id, "ignore.add", "added", Some(thread_id), None);
     }
+    // the muted sender's mail is dropped from the local store (never from the mailbox)
+    let deleted = delete_muted_mail(state);
+    if deleted > 0 {
+        state.audit(
+            &actor.id,
+            "ignore.delete",
+            "deleted",
+            Some(thread_id),
+            Some(&format!("messages={deleted}")),
+        );
+    }
     state.publish(Event::ThreadChanged {
         thread_id: thread_id.to_owned(),
     });
-    Response::Muted { pattern }
+    Response::Muted { pattern, deleted }
 }
 
+/// Which of a mail thread's senders are muted, and does anything incoming (from someone other
+/// than the human) remain besides them? Returns `(muted positions, others remain)`.
+pub(crate) fn split_muted(
+    senders: &[Option<String>],
+    own: &str,
+    mute: &haste_core::ignore::IgnoreList,
+) -> (Vec<usize>, bool) {
+    let mut muted = Vec::new();
+    let mut others = false;
+    for (i, s) in senders.iter().enumerate() {
+        match s {
+            Some(s) if mute.is_muted(&[s.as_str()]) => muted.push(i),
+            Some(s) if own.is_empty() || haste_core::ignore::address_of(s) != own => others = true,
+            None => others = true,
+            _ => {}
+        }
+    }
+    (muted, others)
+}
+
+/// Delete the stored mail of muted senders: their messages, and the whole thread when nothing
+/// from anyone else is left in it. Returns how many messages of muted senders went.
+fn delete_muted_mail(state: &State) -> usize {
+    let (mute, _) = read_ignore(&state.config.data_dir);
+    if mute.is_empty() {
+        return 0;
+    }
+    let own = |source: &Source| {
+        state
+            .connector_for(source)
+            .and_then(|c| c.own_address())
+            .map(|a| haste_core::ignore::address_of(&a))
+            .unwrap_or_default()
+    };
+    let mut gone = 0;
+    for id in state.store.mail_thread_ids().unwrap_or_default() {
+        let Ok(Some((thread, _))) = state.store.get_thread(&id) else {
+            continue;
+        };
+        let messages = state.store.messages_for_thread(&id).unwrap_or_default();
+        let senders: Vec<Option<String>> = messages
+            .iter()
+            .map(|m| m.sender_identifier.clone())
+            .collect();
+        let (muted, others) = split_muted(&senders, &own(&thread.source), &mute);
+        if muted.is_empty() {
+            continue;
+        }
+        gone += muted.len();
+        if others {
+            let ids: Vec<String> = muted.iter().map(|i| messages[*i].id.clone()).collect();
+            let _ = state.store.delete_messages(&ids);
+        } else {
+            let _ = state.store.delete_threads(&[id]);
+        }
+    }
+    gone
+}
 /// Highest priority a human can set from the TUI.
 const MAX_TRIAGE_PRIORITY: i32 = 9;
 

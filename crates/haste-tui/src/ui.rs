@@ -17,6 +17,11 @@ use haste_proto::ThreadView;
 
 pub fn draw(frame: &mut Frame<'_>, app: &App) {
     frame.render_widget(Block::new().style(theme::text()), frame.area());
+    // under the emoji keyboard the screen it was opened from stays as it was
+    let base = match &app.mode {
+        Mode::Emoji { back } => back.as_ref(),
+        other => other,
+    };
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
@@ -31,31 +36,32 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         View::Calendar => draw_calendar(frame, app, body),
         View::Later => draw_later(frame, app, body),
         View::Muted => draw_muted(frame, app, body),
+        View::Logs => draw_logs(frame, app, body),
         View::Approvals => draw_approvals(frame, app, body),
         View::Connectors => draw_connectors(frame, app, body),
     }
-    if let Mode::Detail(id) = &app.mode {
+    if let Mode::Detail(id) = &base {
         draw_detail(frame, app, id, body);
     }
     if matches!(
-        app.mode,
+        base,
         Mode::Read | Mode::Attachments | Mode::Preview | Mode::React { .. }
     ) {
         draw_reader(frame, app, body);
     }
-    if matches!(app.mode, Mode::React { .. }) {
-        draw_reactions(frame, frame.area());
+    if matches!(base, Mode::React { .. }) {
+        draw_emoji(frame, frame.area(), " React · press a key · Esc ");
     }
-    if matches!(app.mode, Mode::Attachments | Mode::Preview) {
+    if matches!(base, Mode::Attachments | Mode::Preview) {
         draw_attachments(frame, app, frame.area());
     }
-    if app.mode == Mode::Preview {
+    if *base == Mode::Preview {
         draw_preview(frame, app, frame.area());
     }
-    if app.mode == Mode::RemindForm {
+    if *base == Mode::RemindForm {
         draw_remind(frame, app, frame.area());
     }
-    if app.mode == Mode::Compose {
+    if *base == Mode::Compose {
         let replying = app
             .compose
             .as_ref()
@@ -74,10 +80,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
             draw_compose(frame, app, frame.area(), false);
         }
     }
-    if app.mode == Mode::Label {
+    if *base == Mode::Label {
         draw_labels(frame, app, frame.area());
     }
     draw_footer(frame, app, footer);
+    if matches!(app.mode, Mode::Emoji { .. }) {
+        draw_emoji(frame, frame.area(), " Emoji · press a key · Esc goes back ");
+    }
 }
 
 /// A rectangle `w` x `h` (clamped) in the middle of `area`.
@@ -266,23 +275,52 @@ fn draw_compose(frame: &mut Frame<'_>, app: &App, area: Rect, docked: bool) {
 
 /// The attachments of the message under the cursor; while choosing where to save, the folder
 /// picker on top.
-fn draw_reactions(frame: &mut Frame<'_>, area: Rect) {
-    let rect = centered(area, 46, 5.min(area.height));
+/// The emoji keyboard: every letter and digit key but `y` and `z`, each with its emoji. `title`
+/// says what a key does here (react, or type into the text).
+fn draw_emoji(frame: &mut Frame<'_>, area: Rect, title: &str) {
+    use unicode_width::UnicodeWidthStr;
+    const KEY_W: usize = 7;
+    let rows = crate::emoji::ROWS;
+    let widest = rows.iter().map(|r| r.len()).max().unwrap_or(10);
+    let w = u16::try_from(widest * KEY_W + 12).unwrap_or(80);
+    let h = u16::try_from(rows.len() * 3 + 4).unwrap_or(16);
+    let rect = centered(area, w.min(area.width), h.min(area.height));
     frame.render_widget(Clear, rect);
-    let block = theme::panel(" React · 1-8 sends · Esc ").border_style(pane_border(true));
+    let block = theme::panel(title).border_style(pane_border(true));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
-    let line: Vec<Span<'static>> = crate::app::REACTIONS
-        .iter()
-        .enumerate()
-        .flat_map(|(i, e)| {
-            [
-                Span::styled(format!("{} ", i + 1), Style::new().fg(theme::MUTED)),
-                Span::raw(format!("{e}  ")),
-            ]
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(Line::from(line)), inner);
+    let edge = Style::new().fg(theme::SURFACE2);
+    let key_style = Style::new().fg(theme::MAUVE).add_modifier(Modifier::BOLD);
+    let mut lines: Vec<Line<'static>> = vec![Line::default()];
+    for (r, row) in rows.iter().enumerate() {
+        // a keyboard's rows are shifted a little more each: 0, 2, 4, 6 columns
+        let pad = " ".repeat(2 + r * 2);
+        let top: String = row
+            .iter()
+            .map(|_| format!("┌{}┐", "─".repeat(KEY_W - 2)))
+            .collect();
+        let bottom: String = row
+            .iter()
+            .map(|_| format!("└{}┘", "─".repeat(KEY_W - 2)))
+            .collect();
+        lines.push(Line::from(Span::styled(format!("{pad}{top}"), edge)));
+        let mut mid = vec![Span::raw(pad.clone())];
+        for (key, emoji) in row.iter() {
+            // letter, then the emoji centred in what is left of the key
+            let space = (KEY_W - 2).saturating_sub(2 + emoji.width());
+            mid.push(Span::styled("│", edge));
+            mid.push(Span::styled(format!(" {key}"), key_style));
+            mid.push(Span::raw(format!("{emoji}{}", " ".repeat(space))));
+            mid.push(Span::styled("│", edge));
+        }
+        lines.push(Line::from(mid));
+        lines.push(Line::from(Span::styled(format!("{pad}{bottom}"), edge)));
+    }
+    lines.push(Line::from(Span::styled(
+        "  a key picks its emoji · Esc goes back without one",
+        theme::muted(),
+    )));
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_attachments(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -552,6 +590,7 @@ fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
         &format!("7 Muted {}", app.muted_threads().len()),
         app.view == View::Muted,
     ));
+    spans.push(tab("8 Logs", app.view == View::Logs));
     frame.render_widget(Paragraph::new(Line::from(spans)).style(theme::text()), area);
 }
 
@@ -623,6 +662,13 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ("e", "done (30 s to undo)"),
             ("Tab", "to threads"),
             ("j/k", "move"),
+        ],
+        View::Logs => vec![
+            ("j/k", "scroll"),
+            ("G", "follow the end"),
+            ("g", "top"),
+            ("w", "warnings only"),
+            ("Esc", "back"),
         ],
         View::Muted => vec![
             ("b", "let the sender back"),
@@ -1106,6 +1152,76 @@ fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
             &mut st,
         );
     }
+}
+
+/// What the daemon has been doing, newest at the bottom; the cursor on the last line follows it.
+fn draw_logs(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let off = app.tz_offset;
+    let lines = app.shown_logs();
+    let title = format!(
+        " Logs · {} lines{} · j/k scroll · G follows · w warnings only ",
+        lines.len(),
+        if app.logs_problems {
+            " (warnings and errors)"
+        } else {
+            ""
+        }
+    );
+    if lines.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "no log lines yet (is hasted running?)",
+                theme::muted(),
+            )))
+            .block(theme::panel(&title).border_style(pane_border(true))),
+            area,
+        );
+        return;
+    }
+    let items: Vec<ListItem<'_>> = lines
+        .iter()
+        .map(|l| {
+            let local = l.at + off;
+            let (_, _, _, h, m) = haste_core::time::to_civil(local);
+            let s = local.rem_euclid(60);
+            let level = match l.level.as_str() {
+                "error" => Style::new().fg(theme::DANGER).add_modifier(Modifier::BOLD),
+                "warn" => Style::new().fg(theme::WARNING),
+                _ => theme::muted(),
+            };
+            let who = if l.proc == "hasted" {
+                String::new()
+            } else {
+                format!("[{}] ", l.proc)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{h:02}:{m:02}:{s:02} "), theme::muted()),
+                Span::styled(format!("{:<5} ", l.level), level),
+                Span::styled(who, Style::new().fg(theme::LAVENDER)),
+                Span::styled(
+                    format!("{} ", inbox::sanitize(&l.component)),
+                    Style::new().fg(theme::SAPPHIRE),
+                ),
+                Span::styled(
+                    inbox::sanitize(&l.event),
+                    Style::new().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {}", inbox::sanitize(&l.fields)),
+                    Style::new().fg(theme::SUBTEXT0),
+                ),
+            ]))
+        })
+        .collect();
+    draw_scrolling(
+        frame,
+        area,
+        theme::panel(&title).border_style(pane_border(true)),
+        items,
+        Some(app.logs_selected),
+        &app.logs_offset,
+        &app.list_rows,
+    );
 }
 
 /// The last screen: mail from senders on the mute list, kept out of every other list.
@@ -2092,6 +2208,52 @@ mod tests {
         app.view = crate::app::View::Muted;
         let muted = render(&app);
         assert!(muted.contains("subject-noisy") && !muted.contains("subject-friend"));
+    }
+
+    #[test]
+    fn the_emoji_keyboard_shows_every_key_but_y_and_z_with_its_emoji() {
+        let mut app = App::new();
+        app.set_threads(vec![]);
+        app.mode = Mode::Emoji {
+            back: Box::new(Mode::Filter),
+        };
+        let text = render(&app);
+        for (key, emoji) in crate::emoji::ROWS.iter().flat_map(|r| r.iter()) {
+            assert!(text.contains(*emoji), "{key}: {emoji}");
+        }
+        assert!(text.contains("Esc"), "{text}");
+        assert!(!text.contains(" y") && !text.contains(" z"));
+    }
+
+    #[test]
+    fn the_logs_screen_lists_the_daemons_lines_with_their_level() {
+        let mut app = App::new();
+        app.view = crate::app::View::Logs;
+        app.set_logs(vec![
+            crate::logs::LogLine {
+                at: 1_794_762_040,
+                level: "warn".into(),
+                proc: "hasted".into(),
+                component: "connector".into(),
+                event: "call".into(),
+                fields: "source=imessage outcome=ambiguous".into(),
+            },
+            crate::logs::LogLine {
+                at: 1_794_762_041,
+                level: "info".into(),
+                proc: "haste-tui".into(),
+                component: "tui".into(),
+                event: "send_requested".into(),
+                fields: String::new(),
+            },
+        ]);
+        let text = render(&app);
+        assert!(text.contains("Logs · 2 lines"), "{text}");
+        assert!(text.contains("connector") && text.contains("outcome=ambiguous"));
+        assert!(
+            text.contains("[haste-tui]"),
+            "other programs are marked: {text}"
+        );
     }
 
     #[test]

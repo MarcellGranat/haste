@@ -56,6 +56,9 @@ fn load_reminders(app: &mut App, client: &Client) {
 /// Reminders app, or one the daemon finished syncing, shows up without a restart.
 const REMINDERS_EVERY: Duration = Duration::from_secs(20);
 
+/// How often the Logs screen reads the daemon's log again while it is open.
+const LOGS_EVERY: Duration = Duration::from_secs(1);
+
 fn refresh(app: &mut App, client: &Client) {
     app.refresh_tz();
     match client.call(RequestBody::ProposalList {
@@ -1109,6 +1112,7 @@ fn main() -> io::Result<()> {
     let mut app = App::new();
     refresh(&mut app, &client);
     let mut last_reminders = Instant::now();
+    let mut last_logs = Instant::now() - LOGS_EVERY;
     let (archive_jobs, archive_done) = archive_worker(client.clone());
     let (react_jobs, react_done) = react_worker(client.clone());
 
@@ -1164,6 +1168,13 @@ fn main() -> io::Result<()> {
                         }
                     }
                 }
+            }
+            // the daemon's log is read again every second while its screen is open
+            if app.view == haste_tui::app::View::Logs && last_logs.elapsed() >= LOGS_EVERY {
+                last_logs = Instant::now();
+                app.set_logs(haste_tui::logs::read_tail(
+                    &base_dir().join("logs").join("hasted.log"),
+                ));
             }
             if last_reminders.elapsed() >= REMINDERS_EVERY {
                 last_reminders = Instant::now();

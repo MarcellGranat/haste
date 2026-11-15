@@ -45,8 +45,10 @@ pub enum View {
     /// Secondary screens, opened with 5, 6 and 7.
     Approvals,
     Connectors,
-    /// The last screen: mail from muted senders (hidden everywhere else).
+    /// Mail from muted senders (hidden everywhere else).
     Muted,
+    /// The last screen: what the daemon has been doing (its log), for debugging.
+    Logs,
 }
 
 impl View {
@@ -135,9 +137,6 @@ pub struct Reader {
     /// them clickable after the frame is drawn.
     pub links: std::cell::RefCell<Vec<(String, String)>>,
 }
-
-/// The reactions offered by `+` in the reader, in the order of the digit keys.
-pub const REACTIONS: [&str; 8] = ["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "🎉"];
 
 /// How many of the newest messages of a thread the reader shows at first, and how many more
 /// each press of `o` adds.
@@ -424,6 +423,11 @@ pub enum Mode {
     },
     /// The reminder popup (`app.remind` holds it).
     RemindForm,
+    /// The emoji keyboard, opened with Ctrl-e in a text field: a key types its emoji into the
+    /// field of `back`, Esc goes back without one.
+    Emoji {
+        back: Box<Mode>,
+    },
     /// A mail thread with several people: reply to the sender or to everyone.
     ReplyChoice {
         thread_id: String,
@@ -501,6 +505,11 @@ pub struct App {
     /// Reactions sent and not answered yet, per message: how many, and the body before them.
     pub reactions_pending: std::collections::HashMap<String, (usize, String)>,
     pub muted_offset: Cell<usize>,
+    pub logs_offset: Cell<usize>,
+    pub logs: Vec<crate::logs::LogLine>,
+    pub logs_selected: usize,
+    /// Show only warnings and errors.
+    pub logs_problems: bool,
     /// Rows the list on screen shows (set while drawing), for Ctrl-d and Ctrl-u.
     pub list_rows: Cell<usize>,
     pub channels_selected: usize,
@@ -647,6 +656,10 @@ impl App {
             later_offset: Cell::new(0),
             reactions_pending: std::collections::HashMap::new(),
             muted_offset: Cell::new(0),
+            logs_offset: Cell::new(0),
+            logs: Vec::new(),
+            logs_selected: 0,
+            logs_problems: false,
             list_rows: Cell::new(0),
             channels_selected: 0,
             channel_inner: false,
@@ -1045,6 +1058,28 @@ impl App {
             .is_some_and(|until| until > haste_core::time::now_secs())
     }
 
+    /// The log lines on the Logs screen: all of them, or only warnings and errors.
+    #[must_use]
+    pub fn shown_logs(&self) -> Vec<&crate::logs::LogLine> {
+        self.logs
+            .iter()
+            .filter(|l| !self.logs_problems || l.is_problem())
+            .collect()
+    }
+
+    /// The log read again. A cursor on the last line stays on the last line, so the screen
+    /// follows the daemon; one higher up stays where it is.
+    pub fn set_logs(&mut self, logs: Vec<crate::logs::LogLine>) {
+        let at_end = self.logs_selected + 1 >= self.shown_logs().len();
+        self.logs = logs;
+        let len = self.shown_logs().len();
+        self.logs_selected = if at_end {
+            len.saturating_sub(1)
+        } else {
+            self.logs_selected.min(len.saturating_sub(1))
+        };
+    }
+
     /// The Muted screen: mail from senders on the mute list, newest first.
     #[must_use]
     pub fn muted_threads(&self) -> Vec<&ThreadView> {
@@ -1167,6 +1202,9 @@ impl App {
         self.later_selected = self
             .later_selected
             .min(self.later_threads().len().saturating_sub(1));
+        self.logs_selected = self
+            .logs_selected
+            .min(self.shown_logs().len().saturating_sub(1));
         self.muted_selected = self
             .muted_selected
             .min(self.muted_threads().len().saturating_sub(1));
@@ -1194,6 +1232,7 @@ impl App {
             View::Later if self.later_focus == TodayFocus::Todo => self.later_todos().len(),
             View::Later => self.later_threads().len(),
             View::Muted => self.muted_threads().len(),
+            View::Logs => self.shown_logs().len(),
             View::Approvals => self.rows().len(),
             View::Connectors => self.connectors.len(),
         }
@@ -1209,6 +1248,7 @@ impl App {
             View::Later if self.later_focus == TodayFocus::Todo => &mut self.later_todo_selected,
             View::Later => &mut self.later_selected,
             View::Muted => &mut self.muted_selected,
+            View::Logs => &mut self.logs_selected,
             View::Approvals => &mut self.approvals_selected,
             View::Connectors => &mut self.connectors_selected,
         }
@@ -1288,6 +1328,13 @@ impl App {
 
     /// Handle one key press; returns an effect for the caller to run against the daemon.
     pub fn handle_key(&mut self, key: Key) -> Option<Effect> {
+        // Ctrl-e in a text field opens the emoji keyboard
+        if key == Key::Ctrl('e') && self.takes_emoji() {
+            self.mode = Mode::Emoji {
+                back: Box::new(self.mode.clone()),
+            };
+            return None;
+        }
         match self.mode.clone() {
             Mode::Filter => self.key_filter(key),
             Mode::Read => self.key_read(key),
@@ -1298,6 +1345,7 @@ impl App {
             Mode::Preview => self.key_preview(key),
             Mode::Snooze { thread_id, input } => self.key_snooze(key, thread_id, input),
             Mode::RemindForm => self.key_remind_form(key),
+            Mode::Emoji { back } => self.key_emoji(key, *back),
             Mode::ReplyChoice { thread_id } => self.key_reply_choice(key, thread_id),
             Mode::Detail(_) => {
                 if matches!(key, Key::Esc | Key::Char('q') | Key::Enter) {
@@ -1414,6 +1462,11 @@ impl App {
             Key::Char('5') => self.view = View::Approvals,
             Key::Char('6') => self.view = View::Connectors,
             Key::Char('7') => self.view = View::Muted,
+            Key::Char('8') => self.view = View::Logs,
+            Key::Char('w') if self.view == View::Logs => {
+                self.logs_problems = !self.logs_problems;
+                self.logs_selected = self.shown_logs().len().saturating_sub(1);
+            }
             Key::Esc | Key::Char('h') if self.view == View::Channels && self.channel_inner => {
                 self.channel_inner = false;
             }
@@ -1850,23 +1903,58 @@ impl App {
         }
     }
 
+    /// Is a text being typed that an emoji can go into?
+    fn takes_emoji(&self) -> bool {
+        match &self.mode {
+            Mode::Compose | Mode::Filter => true,
+            Mode::RemindForm => self.remind.as_ref().is_some_and(|f| {
+                matches!(
+                    f.field,
+                    crate::remind::Field::Title | crate::remind::Field::Notes
+                ) && f.picker.is_none()
+            }),
+            _ => false,
+        }
+    }
+
+    /// The emoji keyboard in a text field: a letter or digit types its emoji, Esc cancels.
+    fn key_emoji(&mut self, key: Key, back: Mode) -> Option<Effect> {
+        match key {
+            Key::Esc => {
+                self.mode = back;
+            }
+            Key::Char(c) => {
+                if let Some(emoji) = crate::emoji::emoji_for(c) {
+                    self.mode = back;
+                    // typed like any other text into the field that was open
+                    for ch in emoji.chars() {
+                        self.handle_key(Key::Char(ch));
+                    }
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// The emoji keyboard for a reaction: a letter or digit sends its emoji, Esc cancels.
     fn key_react(&mut self, key: Key, message_id: &str) -> Option<Effect> {
         match key {
-            Key::Char(c) if c.is_ascii_digit() => {
+            Key::Esc => {
                 self.mode = Mode::Read;
-                let pick = usize::try_from(c.to_digit(10)?.checked_sub(1)?).ok()?;
-                let emoji = REACTIONS.get(pick)?;
+                None
+            }
+            Key::Char(c) => {
+                let emoji = crate::emoji::emoji_for(c)?;
+                self.mode = Mode::Read;
                 self.begin_reaction(message_id, emoji);
                 self.status = format!("reacted {emoji} (sending …)");
                 Some(Effect::React {
                     message_id: message_id.to_owned(),
-                    key: (*emoji).to_owned(),
+                    key: emoji.to_owned(),
                 })
             }
-            _ => {
-                self.mode = Mode::Read;
-                None
-            }
+            _ => None,
         }
     }
 
@@ -3826,12 +3914,69 @@ mod tests {
             }]
         );
         assert_eq!(app.mode, Mode::Read);
-        // an unknown digit and Esc send nothing
+        // letters work too; y and z have no emoji and punctuation none: the keyboard stays open
         press(&mut app, "+");
-        assert!(press(&mut app, "9").is_empty());
+        assert_eq!(
+            press(&mut app, "q"),
+            vec![Effect::React {
+                message_id: "m1".into(),
+                key: "❓".into()
+            }]
+        );
         press(&mut app, "+");
-        assert!(press(&mut app, "0").is_empty());
+        for key in ["y", "z", "-", " "] {
+            assert!(press(&mut app, key).is_empty(), "{key:?}");
+            assert!(matches!(app.mode, Mode::React { .. }), "{key:?}");
+        }
+        // Esc leaves it without sending anything
+        assert!(app.handle_key(Key::Esc).is_none());
         assert_eq!(app.mode, Mode::Read);
+    }
+
+    #[test]
+    fn ctrl_e_opens_the_emoji_keyboard_in_a_text_field_and_a_key_types_its_emoji() {
+        let mut app = inbox_app();
+        // not in a list: nothing opens
+        assert!(app.handle_key(Key::Ctrl('e')).is_none());
+        assert_eq!(app.mode, Mode::Normal);
+        // the filter line is a text field
+        press(&mut app, "5");
+        press(&mut app, "/");
+        assert_eq!(app.mode, Mode::Filter);
+        press(&mut app, "ab");
+        app.handle_key(Key::Ctrl('e'));
+        assert!(matches!(app.mode, Mode::Emoji { .. }));
+        // y has none; Esc goes back without inserting
+        press(&mut app, "y");
+        assert!(matches!(app.mode, Mode::Emoji { .. }));
+        app.handle_key(Key::Esc);
+        assert_eq!(app.mode, Mode::Filter);
+        assert_eq!(app.filter, "ab");
+        // a key types its emoji
+        app.handle_key(Key::Ctrl('e'));
+        press(&mut app, "1");
+        assert_eq!(app.mode, Mode::Filter);
+        assert_eq!(app.filter, "ab👍");
+        // the reminder popup: in the title and the notes, not in the date
+        app.handle_key(Key::Enter);
+        press(&mut app, "1");
+        press(&mut app, "t");
+        app.handle_key(Key::Ctrl('e'));
+        press(&mut app, "f");
+        let form = app.remind.as_ref().unwrap();
+        assert_eq!(form.title, "🙌");
+        app.handle_key(Key::Tab); // to the date
+        app.handle_key(Key::Ctrl('e'));
+        assert_eq!(app.mode, Mode::RemindForm, "no emoji keyboard on a date");
+        // an emoji in a mail reply: the compose form
+        app.handle_key(Key::Esc);
+        app.open_reply_form("t2");
+        assert_eq!(app.mode, Mode::Compose);
+        app.handle_key(Key::Ctrl('e'));
+        assert!(matches!(app.mode, Mode::Emoji { .. }));
+        press(&mut app, "5");
+        assert_eq!(app.mode, Mode::Compose);
+        assert!(app.compose.as_ref().unwrap().focused_text().contains("😢"));
     }
 
     #[test]
@@ -3859,6 +4004,51 @@ mod tests {
         assert!(!body(&app).contains("❤️"), "{}", body(&app));
         assert!(app.status.contains("taken back"), "{}", app.status);
         assert!(app.reactions_pending.is_empty());
+    }
+
+    fn log(at: i64, level: &str, event: &str) -> crate::logs::LogLine {
+        crate::logs::LogLine {
+            at,
+            level: level.into(),
+            proc: "hasted".into(),
+            component: "connector".into(),
+            event: event.into(),
+            fields: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_logs_screen_follows_the_end_unless_the_cursor_is_higher_up() {
+        let mut app = App::new();
+        press(&mut app, "8");
+        assert_eq!(app.view, View::Logs);
+        app.set_logs(vec![log(1, "info", "a"), log(2, "warn", "b")]);
+        assert_eq!(app.logs_selected, 1, "on the last line");
+        // new lines arrive: the cursor follows them
+        app.set_logs(vec![
+            log(1, "info", "a"),
+            log(2, "warn", "b"),
+            log(3, "info", "c"),
+        ]);
+        assert_eq!(app.logs_selected, 2);
+        // up one line: it stays where it is when more arrive
+        press(&mut app, "k");
+        app.set_logs(vec![
+            log(1, "info", "a"),
+            log(2, "warn", "b"),
+            log(3, "info", "c"),
+            log(4, "info", "d"),
+        ]);
+        assert_eq!(app.logs_selected, 1);
+        // G goes back to the end; w shows only warnings and errors
+        press(&mut app, "G");
+        assert_eq!(app.logs_selected, 3);
+        press(&mut app, "w");
+        assert!(app.logs_problems);
+        assert_eq!(app.shown_logs().len(), 1);
+        assert_eq!(app.logs_selected, 0);
+        press(&mut app, "w");
+        assert_eq!(app.shown_logs().len(), 4);
     }
 
     #[test]

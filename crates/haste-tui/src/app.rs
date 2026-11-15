@@ -2377,7 +2377,7 @@ impl App {
             .ignore
             .patterns()
             .into_iter()
-            .filter(|p| IgnoreList::from_patterns(&[p.clone()]).is_muted(&subjects))
+            .filter(|p| IgnoreList::from_patterns(std::slice::from_ref(p)).is_muted(&subjects))
             .collect();
         let rule = IgnoreList::from_patterns(&lines);
         let threads = self

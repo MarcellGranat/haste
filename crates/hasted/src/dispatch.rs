@@ -1624,7 +1624,8 @@ fn muted_delete(state: &State, actor: &Principal, thread_id: &str) -> Response {
         .patterns()
         .into_iter()
         .filter(|p| {
-            haste_core::ignore::IgnoreList::from_patterns(&[p.clone()]).is_muted(&[sender.as_str()])
+            haste_core::ignore::IgnoreList::from_patterns(std::slice::from_ref(p))
+                .is_muted(&[sender.as_str()])
         })
         .collect();
     if lines.is_empty() {

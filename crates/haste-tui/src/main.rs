@@ -74,6 +74,9 @@ fn refresh(app: &mut App, client: &Client) {
         app.set_reminders(status);
     }
     load_rules(app, client);
+    if let Ok(Response::Tags { tags }) = client.call(RequestBody::TagList) {
+        app.known_labels = tags;
+    }
     if let Ok(Response::Filters { filters, error }) = client.call(RequestBody::FilterList) {
         app.set_filters(filters, error);
     }
@@ -119,37 +122,6 @@ fn complete_reminder(client: &Client, id: &str) -> Result<(), String> {
         }
     };
     // a retry returns the same proposal, which may already be approved: only the run counts
-    let _ = client.call(RequestBody::Approve {
-        proposal_id: proposal.id.clone(),
-        acknowledge_stale: false,
-    });
-    describe(client.call(RequestBody::Execute {
-        proposal_id: proposal.id,
-        acknowledge_stale: false,
-    }))
-}
-
-/// Run a reminder proposal the human made themselves: propose, approve and execute in one go.
-/// The approval step exists for agents; nothing a human does in the TUI waits for it.
-fn run_as_human(
-    client: &Client,
-    payload: haste_core::proposal::Payload,
-    thread_id: Option<String>,
-    key: String,
-) -> Result<(), String> {
-    let proposal = match client.call(RequestBody::Propose {
-        payload,
-        thread_id,
-        idempotency_key: key,
-        hints: None,
-    }) {
-        Ok(Response::Proposal { proposal }) => proposal,
-        other => {
-            return Err(describe(other)
-                .err()
-                .unwrap_or_else(|| "no proposal".into()))
-        }
-    };
     let _ = client.call(RequestBody::Approve {
         proposal_id: proposal.id.clone(),
         acknowledge_stale: false,
@@ -294,6 +266,9 @@ fn save_todo(
                 title,
                 due,
                 notes: extra,
+                repeat: None,
+                tags: Vec::new(),
+                thread_id: None,
             },
             "TODO created",
         ),
@@ -688,26 +663,37 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 Err(e) => e,
             };
         }
-        Effect::ToReminder {
-            thread_id,
-            title,
-            due,
-        } => {
-            let key = format!("to-reminder-{thread_id}-{}", haste_core::time::now_secs());
-            app.status = match run_as_human(
-                client,
-                haste_core::proposal::Payload::ReminderCreate {
-                    title,
-                    due,
-                    list: None,
-                    project: None,
-                    thread_id: Some(thread_id.clone()),
-                },
-                Some(thread_id),
-                key,
-            ) {
+        Effect::CreateReminder(task) => {
+            let task = *task;
+            let lines = match keep_attachments(&task.attachments) {
+                Ok(l) => l,
+                Err(e) => {
+                    app.status = format!("reminder not created, {e}");
+                    return false;
+                }
+            };
+            // the notes: what was typed, the attached files, and the mark that links the
+            // reminder to its thread
+            let mut notes = task.notes.clone();
+            for line in lines
+                .into_iter()
+                .chain([format!("haste:thread/{}", task.thread_id)])
+            {
+                if !notes.is_empty() {
+                    notes.push('\n');
+                }
+                notes.push_str(&line);
+            }
+            app.status = match describe(client.call(RequestBody::ReminderNew {
+                title: task.title,
+                due: task.due,
+                notes: Some(notes),
+                repeat: task.repeat,
+                tags: task.tags,
+                thread_id: Some(task.thread_id),
+            })) {
                 Ok(()) => "reminder created".into(),
-                Err(e) => e,
+                Err(e) => format!("reminder not created: {e}"),
             };
         }
         Effect::Triage { thread_id, change } => {

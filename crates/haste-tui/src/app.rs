@@ -215,12 +215,8 @@ pub enum Effect {
         id: String,
         acknowledge_stale: bool,
     },
-    /// Propose a reminder about a thread (the human approves it in Approvals).
-    ToReminder {
-        thread_id: String,
-        title: String,
-        due: Option<i64>,
-    },
+    /// Create a reminder from the popup (the human typed it: no approval step).
+    CreateReminder(Box<crate::remind::Task>),
     /// Change a thread's triage state (local to haste; no mailbox or chat network is touched).
     Triage {
         thread_id: String,
@@ -391,13 +387,8 @@ pub enum Mode {
         thread_id: String,
         input: String,
     },
-    /// Choosing when to be reminded about a thread: one key for a quick pick, or `c` to type a
-    /// date (`custom` holds the text being typed).
-    Remind {
-        thread_id: String,
-        title: String,
-        custom: Option<String>,
-    },
+    /// The reminder popup (`app.remind` holds it).
+    RemindForm,
     /// A mail thread with several people: reply to the sender or to everyone.
     ReplyChoice {
         thread_id: String,
@@ -442,6 +433,10 @@ pub struct App {
     pub reader: Option<Reader>,
     /// The open note or TODO form.
     pub compose: Option<Box<Compose>>,
+    /// The reminder popup, while `Mode::RemindForm`.
+    pub remind: Option<Box<crate::remind::RemindForm>>,
+    /// Every known project label, offered in the reminder popup.
+    pub known_labels: Vec<String>,
     /// The open label picker.
     pub labeler: Option<LabelPicker>,
     /// The attachment menu of the message under the reader's cursor.
@@ -592,6 +587,8 @@ impl App {
             today_selected: 0,
             reader: None,
             compose: None,
+            remind: None,
+            known_labels: Vec::new(),
             labeler: None,
             attach: None,
             preview: None,
@@ -1176,11 +1173,7 @@ impl App {
             Mode::Attachments => self.key_attachments(key),
             Mode::Preview => self.key_preview(key),
             Mode::Snooze { thread_id, input } => self.key_snooze(key, thread_id, input),
-            Mode::Remind {
-                thread_id,
-                title,
-                custom,
-            } => self.key_remind(key, thread_id, title, custom),
+            Mode::RemindForm => self.key_remind_form(key),
             Mode::ReplyChoice { thread_id } => self.key_reply_choice(key, thread_id),
             Mode::Detail(_) => {
                 if matches!(key, Key::Esc | Key::Char('q') | Key::Enter) {
@@ -2350,19 +2343,54 @@ impl App {
         }
     }
 
+    /// `t`: the reminder popup for the thread under the cursor. The suggested title is its
+    /// subject (or its sender when it has none); its project labels come along.
     fn start_remind(&mut self) {
-        if let Some((thread_id, title)) = self.thread_under_cursor() {
-            self.mode = Mode::Remind {
-                thread_id,
-                title,
-                custom: None,
-            };
+        let Some(t) = self.selected_thread() else {
+            self.status = "put the cursor on a thread first".into();
+            return;
+        };
+        let clean = |s: &str| inbox::sanitize(s).replace('\n', " ").trim().to_owned();
+        let mut suggestion = clean(&t.thread.subject);
+        if suggestion.is_empty() {
+            suggestion = t
+                .last
+                .as_ref()
+                .and_then(|l| l.sender.as_deref())
+                .map(|s| clean(&inbox::short_sender(s)))
+                .unwrap_or_default();
         }
+        self.remind = Some(Box::new(crate::remind::RemindForm::new(
+            &t.thread.id,
+            &suggestion,
+            &self.known_labels,
+            &t.tags,
+            haste_core::time::now_secs(),
+            self.tz_offset,
+        )));
+        self.mode = Mode::RemindForm;
     }
 
-    /// The due time `Enter` accepts in the reminder prompt, from the thread's subject.
-    fn suggested_due(&self, title: &str) -> i64 {
-        inbox::suggest_due(title, haste_core::time::now_secs(), self.tz_offset)
+    fn key_remind_form(&mut self, key: Key) -> Option<Effect> {
+        let form = self.remind.as_mut()?;
+        if key == Key::Ctrl('f') {
+            form.open_picker(editor::scan_files(&attach_roots()));
+            return None;
+        }
+        match form.handle(key) {
+            crate::remind::Outcome::Continue => None,
+            crate::remind::Outcome::Cancel => {
+                self.remind = None;
+                self.mode = Mode::Normal;
+                self.status = "cancelled".into();
+                None
+            }
+            crate::remind::Outcome::Save(task) => {
+                self.remind = None;
+                self.mode = Mode::Normal;
+                Some(Effect::CreateReminder(task))
+            }
+        }
     }
 
     /// `r`: reply. A mail thread with several people asks first whether to reply to the sender
@@ -2409,78 +2437,6 @@ impl App {
         None
     }
 
-    fn key_remind(
-        &mut self,
-        key: Key,
-        thread_id: String,
-        title: String,
-        custom: Option<String>,
-    ) -> Option<Effect> {
-        let now = haste_core::time::now_secs();
-        let off = self.tz_offset;
-        let done = |me: &mut Self, due: Option<i64>| {
-            me.mode = Mode::Normal;
-            Some(Effect::ToReminder {
-                thread_id: thread_id.clone(),
-                title: title.clone(),
-                due,
-            })
-        };
-        match (key, custom) {
-            (Key::Esc, _) => self.mode = Mode::Normal,
-            // quick picks
-            (Key::Enter, None) => return done(self, Some(self.suggested_due(&title))),
-            (Key::Char('m'), None) => return done(self, Some(inbox::tomorrow_morning(now, off))),
-            (Key::Char('w'), None) => return done(self, Some(inbox::next_week(now, off))),
-            (Key::Char('l'), None) => return done(self, Some(inbox::later(now))),
-            (Key::Char('n'), None) => return done(self, None),
-            (Key::Char('c'), None) => {
-                let text = inbox::stamp(self.suggested_due(&title), off);
-                self.mode = Mode::Remind {
-                    thread_id,
-                    title,
-                    custom: Some(text),
-                };
-            }
-            // typing a date
-            (Key::Enter, Some(input)) => match inbox::parse_due(&input, now, off) {
-                Ok(due) => return done(self, due),
-                Err(e) => {
-                    self.status = e;
-                    self.mode = Mode::Remind {
-                        thread_id,
-                        title,
-                        custom: Some(input),
-                    };
-                }
-            },
-            (Key::Backspace, Some(mut input)) => {
-                input.pop();
-                self.mode = Mode::Remind {
-                    thread_id,
-                    title,
-                    custom: Some(input),
-                };
-            }
-            (Key::Char(c), Some(mut input)) => {
-                input.push(c);
-                self.mode = Mode::Remind {
-                    thread_id,
-                    title,
-                    custom: Some(input),
-                };
-            }
-            (_, custom) => {
-                self.mode = Mode::Remind {
-                    thread_id,
-                    title,
-                    custom,
-                };
-            }
-        }
-        None
-    }
-
     fn key_reply_choice(&mut self, key: Key, thread_id: String) -> Option<Effect> {
         match key {
             Key::Char('r') | Key::Enter => {
@@ -2511,20 +2467,6 @@ impl App {
             Mode::ConfirmBatch(ids) => Some(format!("Approve {} proposal(s)? [y/N]", ids.len())),
             Mode::Snooze { input, .. } => Some(format!(
                 "Snooze for (whole hours or days, e.g. 3h or 2d; Enter to set, Esc to cancel): {input}"
-            )),
-            Mode::Remind {
-                title,
-                custom: None,
-                ..
-            } => Some(format!(
-                "Remind me: Enter {} · m tomorrow morning · w next week · l later (+3h) · n no date · c type a date · Esc",
-                inbox::describe(self.suggested_due(title), self.tz_offset)
-            )),
-            Mode::Remind {
-                custom: Some(input),
-                ..
-            } => Some(format!(
-                "Reminder due (local time; Enter sets, empty = no date, Esc cancels): {input}"
             )),
             Mode::ReplyChoice { .. } => {
                 Some("Several people on this thread: r reply to sender · a reply to all · Esc".into())
@@ -2816,58 +2758,31 @@ mod tests {
         assert_eq!(app.mode, Mode::Normal);
     }
 
-    fn remind_effect(app: &mut App, keys: &[Key]) -> Vec<Effect> {
-        keys.iter().filter_map(|k| app.handle_key(*k)).collect()
-    }
-
     #[test]
-    fn t_offers_quick_picks_and_the_suggestion_is_the_default() {
-        let now = haste_core::time::now_secs();
-        let mut app = inbox_app(); // cursor on t2, "Team lunch": no date in the subject
+    fn t_opens_the_reminder_popup_with_the_subject_as_the_dim_suggestion() {
+        let mut app = inbox_app(); // cursor on t2, "Team lunch"
+        app.known_labels = vec!["haste".into()];
         press(&mut app, "t");
-        assert!(matches!(app.mode, Mode::Remind { custom: None, .. }));
-        let prompt = app.confirm_prompt().unwrap();
-        for hint in [
-            "Enter",
-            "m tomorrow",
-            "w next week",
-            "l later",
-            "n no date",
-            "c type",
-        ] {
-            assert!(prompt.contains(hint), "{hint}: {prompt}");
-        }
-        let Some(Effect::ToReminder { due: Some(due), .. }) = app.handle_key(Key::Enter) else {
-            panic!("Enter accepts the suggestion")
+        assert_eq!(app.mode, Mode::RemindForm);
+        let form = app.remind.as_ref().unwrap();
+        assert_eq!(
+            (form.suggestion.as_str(), form.title.as_str()),
+            ("Team lunch", "")
+        );
+        // Enter takes the suggestion and the default date (tomorrow morning)
+        let Some(Effect::CreateReminder(task)) = app.handle_key(Key::Enter) else {
+            panic!("Enter creates it")
         };
-        let tomorrow = inbox::tomorrow_morning(now, app.tz_offset);
-        assert!((due - tomorrow).abs() <= 1, "default is tomorrow morning");
+        assert_eq!(task.title, "Team lunch");
+        assert_eq!(task.thread_id, "t2");
+        let tomorrow = inbox::tomorrow_morning(haste_core::time::now_secs(), app.tz_offset);
+        assert!((task.due.unwrap() - tomorrow).abs() <= 1);
         assert_eq!(app.mode, Mode::Normal);
+        assert!(app.remind.is_none());
     }
 
     #[test]
-    fn each_quick_pick_key_sets_its_time() {
-        let now = haste_core::time::now_secs();
-        let pick = |key: char| {
-            let mut app = inbox_app();
-            press(&mut app, "t");
-            let effects = remind_effect(&mut app, &[Key::Char(key)]);
-            let Some(Effect::ToReminder { due, .. }) = effects.into_iter().next() else {
-                panic!("{key}")
-            };
-            due
-        };
-        let morning = pick('m').unwrap();
-        assert!((morning - inbox::tomorrow_morning(now, 0)).abs() <= 1);
-        let week = pick('w').unwrap();
-        assert!((week - inbox::next_week(now, 0)).abs() <= 1);
-        let later = pick('l').unwrap();
-        assert!((later - (now + 3 * 3600)).abs() <= 1);
-        assert_eq!(pick('n'), None, "no date");
-    }
-
-    #[test]
-    fn the_suggestion_uses_a_date_from_the_subject() {
+    fn the_popup_reads_a_date_from_the_subject_and_escape_cancels() {
         let mut app = App::new();
         app.set_threads(vec![mail_thread(
             "t9",
@@ -2876,44 +2791,17 @@ mod tests {
             1,
         )]);
         press(&mut app, "t");
-        let Some(Effect::ToReminder { due: Some(due), .. }) = app.handle_key(Key::Enter) else {
+        let Some(Effect::CreateReminder(task)) = app.handle_key(Key::Enter) else {
             panic!()
         };
-        assert_eq!(due, haste_core::time::from_civil(2099, 3, 4, 9, 0));
-    }
-
-    #[test]
-    fn c_types_a_custom_date_and_empty_means_undated() {
-        let mut app = inbox_app();
-        press(&mut app, "tc");
-        let Mode::Remind {
-            custom: Some(text), ..
-        } = app.mode.clone()
-        else {
-            panic!("{:?}", app.mode)
-        };
-        for _ in 0..text.len() {
-            app.handle_key(Key::Backspace);
-        }
-        let effects = remind_effect(&mut app, &[Key::Enter]);
         assert_eq!(
-            effects,
-            vec![Effect::ToReminder {
-                thread_id: "t2".into(),
-                title: "Team lunch".into(),
-                due: None
-            }]
+            task.due,
+            Some(haste_core::time::from_civil(2099, 3, 4, 9, 0))
         );
-        // a bad date keeps the prompt open
-        press(&mut app, "tc");
-        for _ in 0..40 {
-            app.handle_key(Key::Backspace);
-        }
-        press(&mut app, "soon");
-        assert!(remind_effect(&mut app, &[Key::Enter]).is_empty());
-        assert!(matches!(app.mode, Mode::Remind { .. }));
-        app.handle_key(Key::Esc);
+        press(&mut app, "t");
+        assert!(app.handle_key(Key::Esc).is_none());
         assert_eq!(app.mode, Mode::Normal);
+        assert!(app.remind.is_none());
     }
 
     #[test]
@@ -3131,6 +3019,7 @@ mod tests {
                 version: 1,
             },
             tags: vec![],
+            repeat: None,
         }
     }
 
@@ -3702,6 +3591,7 @@ mod tests {
                 version: 1,
             },
             tags: vec![],
+            repeat: None,
         };
         app.set_reminder_list(vec![
             r("undated", None, false),

@@ -61,6 +61,8 @@ pub struct Batch {
     pub next_cursor: Option<Cursor>,
     /// Mail: `(thread external id, unread)` as the provider reports it.
     pub unread: Vec<(String, bool)>,
+    /// Reminders: `(external id, repeat rule)` as the Reminders app reports it.
+    pub repeats: Vec<(String, Option<crate::model::RepeatRule>)>,
 }
 
 /// What an upstream read or unread mark acts on: the provider's thread id and the provider ids
@@ -193,6 +195,7 @@ pub struct NewReminder {
     pub due: Option<i64>,
     pub list: Option<String>,
     pub notes: Option<String>,
+    pub repeat: Option<crate::model::RepeatRule>,
 }
 
 /// A human's change to a reminder: the title and due date are set, text is only ever appended to
@@ -1038,6 +1041,7 @@ mod tests {
             due: None,
             list: None,
             notes: None,
+            repeat: None,
         };
         assert_eq!(
             block_on(g.create_reminder(&new)),

@@ -444,6 +444,140 @@ impl Store {
         })
     }
 
+    /// Remember how reminders repeat (`None` forgets it).
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn set_reminder_repeats(
+        &self,
+        repeats: &[(String, Option<haste_core::model::RepeatRule>)],
+    ) -> StoreResult<()> {
+        let repeats = repeats.to_vec();
+        self.write(move |conn| {
+            let tx = conn.transaction()?;
+            for (external, rule) in &repeats {
+                match rule {
+                    Some(r) => tx.execute(
+                        "INSERT INTO reminder_repeats (external_id, freq, every) VALUES (?1, ?2, ?3) \
+                         ON CONFLICT(external_id) DO UPDATE SET freq = ?2, every = ?3",
+                        params![external, r.freq.as_str(), r.every],
+                    )?,
+                    None => tx.execute(
+                        "DELETE FROM reminder_repeats WHERE external_id = ?1",
+                        [external],
+                    )?,
+                };
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// Repeat rules by the Reminders item's external id.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn reminder_repeats(
+        &self,
+    ) -> StoreResult<std::collections::HashMap<String, haste_core::model::RepeatRule>> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare("SELECT external_id, freq, every FROM reminder_repeats")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, u32>(2)?,
+                ))
+            })?;
+            let mut out = std::collections::HashMap::new();
+            for row in rows {
+                let (external, freq, every) = row?;
+                if let Some(freq) = haste_core::model::RepeatFreq::parse(&freq) {
+                    out.insert(external, haste_core::model::RepeatRule { freq, every });
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    /// Store a reminder the human just created, with its project tags, the thread it is about
+    /// and how it repeats, so it shows at once; the next sync fills in the rest. Returns its id.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn record_created_reminder(
+        &self,
+        created: &Reminder,
+        tags: &[String],
+        thread_id: Option<&str>,
+        repeat: Option<haste_core::model::RepeatRule>,
+    ) -> StoreResult<String> {
+        let created = created.clone();
+        let tags = tags.to_vec();
+        let thread_id = thread_id.map(str::to_owned);
+        self.write(move |conn| {
+            let tx = conn.transaction()?;
+            let reminder_id = tx
+                .query_row(
+                    "SELECT id FROM reminders WHERE external_id = ?1",
+                    [&created.external_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?
+                .unwrap_or_else(new_id);
+            tx.execute(
+                "INSERT INTO reminders (id, external_id, title, notes_snippet, due_at, completed, \
+                 list_name, remote_modified_at, missing_since, version, sweep_id) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,NULL,1,NULL) \
+                 ON CONFLICT(external_id) DO NOTHING",
+                params![
+                    reminder_id,
+                    created.external_id,
+                    created.title,
+                    created.notes_snippet,
+                    created.due_at,
+                    i64::from(created.completed),
+                    created.list_name,
+                    created.remote_modified_at
+                ],
+            )?;
+            let known = known_tags(&tx)?;
+            for tag in tags.iter().filter(|t| known.contains(*t)) {
+                tx.execute(
+                    "INSERT OR IGNORE INTO reminder_scope_tags (external_id, tag) VALUES (?1, ?2)",
+                    params![created.external_id, tag],
+                )?;
+            }
+            if let Some(thread) = &thread_id {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM threads WHERE id = ?1)",
+                    [thread],
+                    |r| r.get(0),
+                )?;
+                if exists {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO links (from_kind, from_id, to_kind, to_id, link_type) \
+                         VALUES (?1,?2,?3,?4,'about')",
+                        params![
+                            ObjectKind::Reminder.as_str(),
+                            reminder_id,
+                            ObjectKind::Thread.as_str(),
+                            thread
+                        ],
+                    )?;
+                }
+            }
+            if let Some(r) = repeat {
+                tx.execute(
+                    "INSERT OR REPLACE INTO reminder_repeats (external_id, freq, every) VALUES (?1,?2,?3)",
+                    params![created.external_id, r.freq.as_str(), r.every],
+                )?;
+            }
+            tx.commit()?;
+            Ok(reminder_id)
+        })
+    }
+
     /// The complete succeeded: mark the mirrored row done (version moves) and the proposal sent.
     ///
     /// # Errors

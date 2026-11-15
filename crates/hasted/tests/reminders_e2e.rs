@@ -43,6 +43,7 @@ fn wire(id: &str, title: &str) -> WireReminder {
         completed: false,
         list: "SECRET LIST".into(),
         modified: 10,
+        repeat: None,
     }
 }
 
@@ -532,6 +533,67 @@ async fn a_restart_leaves_an_executing_proposal_untouched_and_reports_it() {
 }
 
 #[tokio::test]
+async fn a_new_reminder_carries_its_repeat_rule_thread_link_and_shows_at_once() {
+    use haste_core::model::{RepeatFreq, RepeatRule};
+    let rig = boot().await;
+    release_and_sync(&rig).await;
+    let thread = rig
+        .daemon
+        .state
+        .store
+        .upsert_thread(
+            &haste_core::model::Source::Gmail,
+            "g-r1",
+            "Rent",
+            &["landlord@x.org".into()],
+            5,
+        )
+        .unwrap();
+    let rule = RepeatRule {
+        freq: RepeatFreq::Month,
+        every: 2,
+    };
+    assert!(matches!(
+        human(
+            &rig,
+            RequestBody::ReminderNew {
+                title: "Pay rent".into(),
+                due: Some(1_800_000_000),
+                notes: Some("haste:thread/x".into()),
+                repeat: Some(rule),
+                tags: vec![],
+                thread_id: Some(thread.id.clone()),
+            }
+        )
+        .await,
+        Response::Done
+    ));
+    // the helper was asked to repeat it
+    assert!(rig.helper.calls.lock().unwrap().iter().any(|c| matches!(
+        c,
+        RemindersRequest::CreateReminder { repeat: Some(r), .. } if *r == rule
+    )));
+    // and the list shows it with its rule, before the next sync
+    let Response::Reminders { reminders } = human(
+        &rig,
+        RequestBody::RemindersList {
+            include_completed: false,
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    let made = reminders
+        .iter()
+        .find(|r| r.reminder.title == "Pay rent")
+        .expect("listed at once");
+    assert_eq!(made.repeat, Some(rule));
+    assert_eq!(made.reminder.due_at, Some(1_800_000_000));
+    rig.daemon.shutdown().await;
+}
+
+#[tokio::test]
 async fn the_human_creates_and_edits_reminders_directly_and_an_agent_cannot() {
     let rig = boot().await;
     release_and_sync(&rig).await;
@@ -562,6 +624,9 @@ async fn the_human_creates_and_edits_reminders_directly_and_an_agent_cannot() {
                 title: "fresh".into(),
                 due: None,
                 notes: Some("n".into()),
+                repeat: None,
+                tags: vec![],
+                thread_id: None,
             }
         )
         .await,
@@ -585,7 +650,10 @@ async fn the_human_creates_and_edits_reminders_directly_and_an_agent_cannot() {
                 RequestBody::ReminderNew {
                     title: "  ".into(),
                     due: None,
-                    notes: None
+                    notes: None,
+                    repeat: None,
+                    tags: vec![],
+                    thread_id: None,
                 }
             )
             .await

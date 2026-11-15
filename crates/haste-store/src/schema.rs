@@ -177,6 +177,14 @@ const MIGRATIONS: &[&str] = &[
     // 9: senders the human has engaged with (mail read or answered). Marking a thread unread
     // again must not make its sender a stranger.
     "CREATE TABLE known_senders (address TEXT PRIMARY KEY);",
+    // 10: how reminders repeat, keyed by the Reminders item (it survives a re-sync).
+    "
+    CREATE TABLE reminder_repeats (
+        external_id TEXT PRIMARY KEY,
+        freq TEXT NOT NULL,
+        every INTEGER NOT NULL
+    );
+    ",
 ];
 
 /// Highest schema version this binary understands.

@@ -206,7 +206,12 @@ fn run_cycle(
             }
         ),
     );
+    let repeats = reminders
+        .iter()
+        .map(|w| (w.external_id.clone(), w.repeat))
+        .collect();
     Ok(Batch {
+        repeats,
         reminders: reminders
             .into_iter()
             .map(crate::protocol::WireReminder::into_reminder)
@@ -274,6 +279,7 @@ impl Connector for RemindersConnector {
                 due: reminder.due,
                 list: reminder.list.clone(),
                 notes: reminder.notes.clone(),
+                repeat: reminder.repeat,
             };
             let reply = tokio::task::spawn_blocking(move || helper.call(&request))
                 .await
@@ -378,6 +384,7 @@ mod tests {
             completed: false,
             list: "SECRET LIST".into(),
             modified,
+            repeat: None,
         }
     }
 
@@ -532,6 +539,7 @@ mod tests {
                 due: Some(5),
                 list: None,
                 notes: Some("haste:thread/x".into()),
+                repeat: None,
             })
             .await
             .unwrap();

@@ -212,6 +212,15 @@ pub enum RequestBody {
         due: Option<i64>,
         #[serde(default)]
         notes: Option<String>,
+        /// Repeats every so often.
+        #[serde(default)]
+        repeat: Option<haste_core::model::RepeatRule>,
+        /// Project tags (known workspace labels) the reminder gets.
+        #[serde(default)]
+        tags: Vec<String>,
+        /// The mail or chat thread it is about (stored as an `about` link).
+        #[serde(default)]
+        thread_id: Option<String>,
     },
     /// Human-only: set a reminder's title and due date and append to its notes.
     ReminderEdit {
@@ -437,6 +446,9 @@ pub struct ReminderView {
     pub reminder: Reminder,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// How it repeats, when it does.
+    #[serde(default)]
+    pub repeat: Option<haste_core::model::RepeatRule>,
 }
 
 /// A file attached to a send, as the confirmation shows it.

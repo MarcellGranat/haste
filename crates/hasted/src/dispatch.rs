@@ -669,9 +669,25 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             },
             Err(e) => map_store(&e),
         },
-        RequestBody::ReminderNew { title, due, notes } => {
-            reminder_write(state, principal, ReminderWrite::New { title, due, notes })
-        }
+        RequestBody::ReminderNew {
+            title,
+            due,
+            notes,
+            repeat,
+            tags,
+            thread_id,
+        } => reminder_write(
+            state,
+            principal,
+            ReminderWrite::New {
+                title,
+                due,
+                notes,
+                repeat,
+                tags,
+                thread_id,
+            },
+        ),
         RequestBody::ReminderEdit {
             reminder_id,
             title,
@@ -789,6 +805,7 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
 /// Reminder reads pass through the same scope filter as thread reads.
 fn reminders_list(state: &State, principal: &Principal, include_completed: bool) -> Response {
     let tags = state.store.all_reminder_tags().unwrap_or_default();
+    let repeats = state.store.reminder_repeats().unwrap_or_default();
     let machine_labels = machine_labels_for(state, principal);
     match state.store.list_reminders(include_completed) {
         Ok(rows) => Response::Reminders {
@@ -797,6 +814,7 @@ fn reminders_list(state: &State, principal: &Principal, include_completed: bool)
                 .filter_map(|reminder| {
                     let own = tags.get(&reminder.id).cloned().unwrap_or_default();
                     visible_to(principal, &own, machine_labels.as_ref()).then_some(ReminderView {
+                        repeat: repeats.get(&reminder.external_id).copied(),
                         reminder,
                         tags: own,
                     })
@@ -812,6 +830,9 @@ enum ReminderWrite {
         title: String,
         due: Option<i64>,
         notes: Option<String>,
+        repeat: Option<haste_core::model::RepeatRule>,
+        tags: Vec<String>,
+        thread_id: Option<String>,
     },
     Edit {
         reminder_id: String,
@@ -831,8 +852,10 @@ fn reminder_write(state: &State, actor: &Principal, write: ReminderWrite) -> Res
         ReminderWrite::Edit { reminder_id, .. } => ("reminder.edit", Some(reminder_id.clone())),
     };
     let valid = match &write {
-        ReminderWrite::New { title, notes, .. } => {
-            title_ok(title) && notes.as_ref().is_none_or(|n| n.len() <= 20_000)
+        ReminderWrite::New {
+            title, notes, tags, ..
+        } => {
+            title_ok(title) && notes.as_ref().is_none_or(|n| n.len() <= 20_000) && tags.len() <= 20
         }
         ReminderWrite::Edit {
             title,
@@ -852,14 +875,42 @@ fn reminder_write(state: &State, actor: &Principal, write: ReminderWrite) -> Res
     };
     let handle = tokio::runtime::Handle::current();
     let result = match write {
-        ReminderWrite::New { title, due, notes } => handle
+        ReminderWrite::New {
+            title,
+            due,
+            notes,
+            repeat,
+            tags,
+            thread_id,
+        } => handle
             .block_on(guard.create_reminder(&NewReminder {
-                title,
+                title: title.clone(),
                 due,
                 list: None,
-                notes,
+                notes: notes.clone(),
+                repeat,
             }))
-            .map(|_| ()),
+            .map(|receipt| {
+                // show it at once, with its tags, its thread and its repeat rule
+                let created = Reminder {
+                    id: String::new(),
+                    external_id: receipt.external_id,
+                    title,
+                    notes_snippet: notes_snippet(notes.as_deref().unwrap_or("")),
+                    due_at: due,
+                    completed: false,
+                    list_name: String::new(),
+                    remote_modified_at: now_secs(),
+                    missing_since: None,
+                    version: 0,
+                };
+                let _ = state.store.record_created_reminder(
+                    &created,
+                    &tags,
+                    thread_id.as_deref(),
+                    repeat,
+                );
+            }),
         ReminderWrite::Edit {
             reminder_id,
             title,
@@ -1146,6 +1197,7 @@ fn execute_reminder(
                 due: *due,
                 list: list.clone(),
                 notes: notes.clone(),
+                repeat: None,
             };
             match handle.block_on(guard.create_reminder(&new)) {
                 Ok(receipt) => {

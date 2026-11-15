@@ -313,6 +313,9 @@ fn store_batch(
             .collect();
         state.store.add_known_senders(&senders)?;
     }
+    if !batch.repeats.is_empty() {
+        state.store.set_reminder_repeats(&batch.repeats)?;
+    }
     if !batch.reminders.is_empty() || batch.sweep.is_some() {
         state
             .store

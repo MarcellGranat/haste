@@ -53,6 +53,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     if app.mode == Mode::Preview {
         draw_preview(frame, app, frame.area());
     }
+    if app.mode == Mode::RemindForm {
+        draw_remind(frame, app, frame.area());
+    }
     if app.mode == Mode::Compose {
         let replying = app
             .compose
@@ -863,6 +866,188 @@ fn draw_scrolling(
     );
 }
 
+/// The reminder popup: title (with the dim suggestion), date, repeat, notes, labels, files.
+fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    use crate::remind::{DatePart, Field};
+    let Some(form) = &app.remind else {
+        return;
+    };
+    let rect = centered(area, 76.min(area.width.saturating_sub(4)), 12);
+    frame.render_widget(Clear, rect);
+    let block = theme::panel(" New reminder · Tab next · Enter saves · Esc cancels ")
+        .border_style(pane_border(true));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let label = |name: &str, field: Field| {
+        let on = form.field == field;
+        Span::styled(
+            format!("{} {name:<8}", if on { "▌" } else { " " }),
+            if on {
+                Style::new().fg(theme::MAUVE).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(theme::SUBTEXT0)
+            },
+        )
+    };
+    let text = Style::new().fg(theme::TEXT);
+    let dim = Style::new().fg(theme::OVERLAY0);
+    let picked = Style::new()
+        .fg(theme::BASE)
+        .bg(theme::MAUVE)
+        .add_modifier(Modifier::BOLD);
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    // title: what was typed, or the suggestion dimmed (Right takes it as text)
+    let mut title = vec![label("Title", Field::Title)];
+    if form.title.is_empty() {
+        title.push(Span::styled(
+            inbox::sanitize(&form.suggestion).replace('\n', " "),
+            dim,
+        ));
+        title.push(Span::styled("   → edit  Tab/Enter use", dim));
+    } else {
+        title.push(Span::styled(
+            inbox::sanitize(&form.title).replace('\n', " "),
+            text,
+        ));
+    }
+    lines.push(Line::from(title));
+    // date: day │ hour │ minute
+    let mut when = vec![label("When", Field::Date)];
+    match form.date_parts() {
+        Some((day, hour, minute)) => {
+            let part = |s: String, p: DatePart| {
+                let on = form.field == Field::Date && form.part == p;
+                Span::styled(format!(" {s} "), if on { picked } else { text })
+            };
+            when.push(part(day, DatePart::Day));
+            when.push(Span::styled("│", dim));
+            when.push(part(hour, DatePart::Hour));
+            when.push(Span::styled(":", dim));
+            when.push(part(minute, DatePart::Minute));
+            if form.field == Field::Date {
+                when.push(Span::styled("  ←→ part  ↑↓ change  ⌫ no date", dim));
+            }
+        }
+        None => when.push(Span::styled(
+            "no date  (↑ or ↓ sets one)",
+            if form.field == Field::Date { text } else { dim },
+        )),
+    }
+    lines.push(Line::from(when));
+    let mut repeat = vec![label("Repeat", Field::Repeat)];
+    repeat.push(match form.repeat {
+        Some(r) => Span::styled(
+            format!(
+                "every {} {}{}",
+                r.every,
+                r.freq.as_str(),
+                if r.every == 1 { "" } else { "s" }
+            ),
+            text,
+        ),
+        None => Span::styled("does not repeat", dim),
+    });
+    if form.field == Field::Repeat {
+        repeat.push(Span::styled("  ←→ unit  ↑↓ every", dim));
+    }
+    lines.push(Line::from(repeat));
+    let mut notes = vec![label("Notes", Field::Notes)];
+    notes.push(if form.notes.is_empty() {
+        Span::styled("(type to add)", dim)
+    } else {
+        Span::styled(inbox::sanitize(&form.notes).replace('\n', " "), text)
+    });
+    lines.push(Line::from(notes));
+    let mut labels = vec![label("Labels", Field::Labels)];
+    if form.labels.is_empty() {
+        labels.push(Span::styled("(no project labels yet)", dim));
+    }
+    for (i, (name, on)) in form.labels.iter().enumerate() {
+        let here = form.field == Field::Labels && form.label_cursor == i;
+        labels.push(Span::styled(
+            format!(" [{}] {name} ", if *on { "x" } else { " " }),
+            if here {
+                picked
+            } else if *on {
+                text
+            } else {
+                dim
+            },
+        ));
+    }
+    if form.field == Field::Labels {
+        labels.push(Span::styled(" ←→ move  Space toggles", dim));
+    }
+    lines.push(Line::from(labels));
+    let mut files = vec![label("Files", Field::Files)];
+    if form.attachments.is_empty() {
+        files.push(Span::styled("none  (Ctrl-f adds a file)", dim));
+    } else {
+        let names: Vec<String> = form
+            .attachments
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+            })
+            .collect();
+        files.push(Span::styled(inbox::sanitize(&names.join(", ")), text));
+        if form.field == Field::Files {
+            files.push(Span::styled("  ⌫ removes the last", dim));
+        }
+    }
+    lines.push(Line::from(files));
+    frame.render_widget(Paragraph::new(lines), inner);
+    // the cursor sits at the end of the typed title or notes
+    let (row, typed) = match form.field {
+        Field::Title => (0, Some(form.title.chars().count())),
+        Field::Notes => (3, Some(form.notes.chars().count())),
+        _ => (0, None),
+    };
+    if let Some(n) = typed {
+        frame.set_cursor_position((inner.x + 11 + u16::try_from(n).unwrap_or(0), inner.y + row));
+    }
+    if let Some(picker) = &form.picker {
+        let prect = centered(area, 80, area.height.saturating_sub(8).max(8));
+        frame.render_widget(Clear, prect);
+        let matches = picker.matches();
+        let ptitle = format!(
+            " Attach a file · {} found · Enter takes it, Esc closes ",
+            matches.len()
+        );
+        let block = theme::panel(&ptitle).border_style(pane_border(true));
+        let pinner = block.inner(prect);
+        frame.render_widget(block, prect);
+        let [q, list] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(pinner);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("> ", Style::new().fg(theme::MAUVE)),
+                Span::styled(picker.query.clone(), text),
+            ])),
+            q,
+        );
+        let home = std::env::var("HOME").unwrap_or_default();
+        let items: Vec<ListItem<'_>> = matches
+            .iter()
+            .map(|p| {
+                ListItem::new(Span::styled(
+                    inbox::sanitize(&p.to_string_lossy().replacen(&home, "~", 1)),
+                    text,
+                ))
+            })
+            .collect();
+        let mut st =
+            ListState::default().with_selected((!items.is_empty()).then_some(picker.selected));
+        frame.render_stateful_widget(
+            List::new(items)
+                .highlight_style(theme::selected())
+                .highlight_symbol("▌ "),
+            list,
+            &mut st,
+        );
+    }
+}
+
 /// The Later tab: set-aside and snoozed threads, each with why it is here.
 fn draw_later(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let now = haste_core::time::now_secs();
@@ -1597,6 +1782,48 @@ mod tests {
             app.handle_key(Key::Ctrl('u'));
         }
         assert_eq!(app.today_selected, 0, "stops at the top");
+    }
+
+    #[test]
+    fn the_reminder_popup_shows_the_dim_suggestion_and_every_field() {
+        let mut app = App::new();
+        app.known_labels = vec!["haste".into()];
+        app.set_threads(vec![haste_proto::ThreadView {
+            thread: haste_core::model::Thread {
+                id: "t1".into(),
+                source: haste_core::model::Source::Gmail,
+                external_id: "g1".into(),
+                subject: "Quarterly plan".into(),
+                participants: vec![],
+                last_activity_at: 1,
+                version: 1,
+            },
+            triage: haste_core::model::Triage::new("t1", haste_core::model::ObjectKind::Thread),
+            tags: vec!["haste".into()],
+            last: None,
+            unread: false,
+            replied: false,
+            sender_known: true,
+            sender: None,
+        }]);
+        app.handle_key(Key::Char('t'));
+        let text = render(&app);
+        for needle in [
+            "New reminder",
+            "Quarterly plan",
+            "When",
+            "Repeat",
+            "Notes",
+            "[x] haste",
+            "Files",
+        ] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
+        // a date typed in the title shows in the date row
+        for c in "x every week".chars() {
+            app.handle_key(Key::Char(c));
+        }
+        assert!(render(&app).contains("every 1 week"));
     }
 
     #[test]

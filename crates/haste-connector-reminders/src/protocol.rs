@@ -30,6 +30,8 @@ pub enum RemindersRequest {
         due: Option<i64>,
         list: Option<String>,
         notes: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repeat: Option<haste_core::model::RepeatRule>,
     },
     /// Fails when the target is missing or already completed.
     CompleteReminder { external_id: String },
@@ -79,6 +81,9 @@ pub struct WireReminder {
     pub list: String,
     #[serde(default)]
     pub modified: i64,
+    /// How it repeats, when it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat: Option<haste_core::model::RepeatRule>,
 }
 
 impl WireReminder {
@@ -187,6 +192,7 @@ mod tests {
             completed: false,
             list: "L".into(),
             modified: 7,
+            repeat: None,
         };
         let r = wire.into_reminder();
         assert!(r.notes_snippet.chars().count() <= haste_core::model::NOTES_SNIPPET_MAX);

@@ -42,6 +42,17 @@ func wire(_ r: EKReminder) -> [String: Any] {
     if let comps = r.dueDateComponents, let date = Calendar.current.date(from: comps) {
         out["due"] = Int(date.timeIntervalSince1970)
     }
+    if let rule = r.recurrenceRules?.first {
+        let freq: String?
+        switch rule.frequency {
+        case .daily: freq = "day"
+        case .weekly: freq = "week"
+        case .monthly: freq = "month"
+        case .yearly: freq = "year"
+        @unknown default: freq = nil
+        }
+        if let freq = freq { out["repeat"] = ["freq": freq, "every": max(rule.interval, 1)] }
+    }
     return out
 }
 
@@ -133,6 +144,20 @@ case "create_reminder":
     if let due = request["due"] as? Int {
         reminder.dueDateComponents = Calendar.current.dateComponents(
             [.year, .month, .day, .hour, .minute], from: Date(timeIntervalSince1970: TimeInterval(due)))
+    }
+    if let repeatRule = request["repeat"] as? [String: Any], let freqName = repeatRule["freq"] as? String {
+        let every = max((repeatRule["every"] as? Int) ?? 1, 1)
+        let freq: EKRecurrenceFrequency?
+        switch freqName {
+        case "day": freq = .daily
+        case "week": freq = .weekly
+        case "month": freq = .monthly
+        case "year": freq = .yearly
+        default: freq = nil
+        }
+        if let freq = freq {
+            reminder.addRecurrenceRule(EKRecurrenceRule(recurrenceWith: freq, interval: every, end: nil))
+        }
     }
     do { try store.save(reminder, commit: true) } catch { fail("failed", "save failed") }
     emit(["op": "create_reminder", "reminder": wire(reminder)])

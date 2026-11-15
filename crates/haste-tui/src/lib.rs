@@ -8,5 +8,7 @@ pub mod compose;
 pub mod editor;
 pub mod extract;
 pub mod inbox;
+pub mod remind;
+pub mod smartdate;
 pub mod theme;
 pub mod ui;

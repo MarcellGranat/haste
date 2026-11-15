@@ -1,0 +1,506 @@
+//! The reminder popup (`t` on a thread): a title with a dimmed suggestion, a date picker, a
+//! repeat rule, notes, project labels and attachments. Pure state: keys in, a [`Task`] out.
+
+use std::path::PathBuf;
+
+use haste_core::model::{RepeatFreq, RepeatRule};
+
+use crate::app::Key;
+use crate::editor::{FilePicker, PickerOutcome};
+use crate::{inbox, smartdate};
+
+const DAY: i64 = 86_400;
+const HOUR: i64 = 3_600;
+/// Minutes a press of Up or Down moves the minute field.
+const MINUTE_STEP: i64 = 5;
+/// Longest repeat interval the picker offers.
+const MAX_EVERY: u32 = 99;
+
+/// The form's fields, in the order Tab visits them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    Title,
+    Date,
+    Repeat,
+    Notes,
+    Labels,
+    Files,
+}
+
+impl Field {
+    const ORDER: [Self; 6] = [
+        Self::Title,
+        Self::Date,
+        Self::Repeat,
+        Self::Notes,
+        Self::Labels,
+        Self::Files,
+    ];
+
+    fn next(self) -> Self {
+        let i = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ORDER[(i + 1) % Self::ORDER.len()]
+    }
+}
+
+/// Which part of the date Left and Right are on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatePart {
+    Day,
+    Hour,
+    Minute,
+}
+
+/// What the form is ready to create.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Task {
+    pub thread_id: String,
+    pub title: String,
+    pub due: Option<i64>,
+    pub repeat: Option<RepeatRule>,
+    pub notes: String,
+    pub tags: Vec<String>,
+    pub attachments: Vec<PathBuf>,
+}
+
+/// What a key did to the form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    Continue,
+    Cancel,
+    Save(Box<Task>),
+}
+
+#[derive(Debug, Clone)]
+pub struct RemindForm {
+    pub thread_id: String,
+    /// Shown dimmed while the title is empty.
+    pub suggestion: String,
+    pub title: String,
+    pub field: Field,
+    pub part: DatePart,
+    pub due: Option<i64>,
+    pub repeat: Option<RepeatRule>,
+    pub notes: String,
+    /// Known project labels, and whether each is on.
+    pub labels: Vec<(String, bool)>,
+    pub label_cursor: usize,
+    pub attachments: Vec<PathBuf>,
+    pub picker: Option<FilePicker>,
+    /// The date or the repeat was set by hand: the words of the title no longer change them.
+    date_touched: bool,
+    repeat_touched: bool,
+    /// What the thread's subject says about a date (used when the title says nothing).
+    subject_due: Option<i64>,
+    now: i64,
+    off: i64,
+}
+
+impl RemindForm {
+    /// A form for a thread. `labels` are all known project labels, `on` those the thread has.
+    #[must_use]
+    pub fn new(
+        thread_id: &str,
+        suggestion: &str,
+        labels: &[String],
+        on: &[String],
+        now: i64,
+        off: i64,
+    ) -> Self {
+        let when = smartdate::parse(suggestion, now, off);
+        let mut form = Self {
+            thread_id: thread_id.to_owned(),
+            suggestion: suggestion.to_owned(),
+            title: String::new(),
+            field: Field::Title,
+            part: DatePart::Day,
+            due: None,
+            repeat: None,
+            notes: String::new(),
+            labels: labels.iter().map(|l| (l.clone(), on.contains(l))).collect(),
+            label_cursor: 0,
+            attachments: Vec::new(),
+            picker: None,
+            date_touched: false,
+            repeat_touched: false,
+            subject_due: when.due,
+            now,
+            off,
+        };
+        form.reread();
+        form
+    }
+
+    /// The title that would be used: what was typed, else the suggestion.
+    #[must_use]
+    pub fn effective_title(&self) -> &str {
+        if self.title.trim().is_empty() {
+            &self.suggestion
+        } else {
+            &self.title
+        }
+    }
+
+    /// Read the date and the repeat out of the words, unless they were set by hand.
+    fn reread(&mut self) {
+        let when = smartdate::parse(&self.title, self.now, self.off);
+        if !self.date_touched {
+            self.due = when
+                .due
+                .or(self.subject_due)
+                .or_else(|| Some(inbox::tomorrow_morning(self.now, self.off)));
+        }
+        if !self.repeat_touched {
+            self.repeat = when.repeat;
+        }
+    }
+
+    /// The date as three texts: day, hour, minute.
+    #[must_use]
+    pub fn date_parts(&self) -> Option<(String, String, String)> {
+        let due = self.due?;
+        let (_, _, _, h, m) = haste_core::time::to_civil(due + self.off);
+        let (_, month, day, _, _) = haste_core::time::to_civil(due + self.off);
+        let (year, ..) = haste_core::time::to_civil(due + self.off);
+        let label = inbox::day_label(due, self.off);
+        let weekday = label.split_whitespace().next().unwrap_or("");
+        let months = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        let month_name = months[usize::try_from(month - 1).unwrap_or(0)];
+        Some((
+            format!("{weekday} {day} {month_name} {year}"),
+            format!("{h:02}"),
+            format!("{m:02}"),
+        ))
+    }
+
+    fn task(&self) -> Task {
+        Task {
+            thread_id: self.thread_id.clone(),
+            title: self.effective_title().trim().to_owned(),
+            due: self.due,
+            repeat: self.repeat,
+            notes: self.notes.trim().to_owned(),
+            tags: self
+                .labels
+                .iter()
+                .filter(|(_, on)| *on)
+                .map(|(l, _)| l.clone())
+                .collect(),
+            attachments: self.attachments.clone(),
+        }
+    }
+
+    /// `Ctrl-f`: the caller lists files and opens the picker.
+    pub fn open_picker(&mut self, files: Vec<PathBuf>) {
+        self.picker = Some(FilePicker::new(files));
+    }
+
+    fn step_date(&mut self, up: bool) {
+        let sign = if up { 1 } else { -1 };
+        let base = self
+            .due
+            .unwrap_or_else(|| inbox::tomorrow_morning(self.now, self.off));
+        let by = match self.part {
+            DatePart::Day => DAY,
+            DatePart::Hour => HOUR,
+            DatePart::Minute => MINUTE_STEP * 60,
+        };
+        self.due = Some(base + sign * by);
+        self.date_touched = true;
+    }
+
+    fn step_repeat(&mut self, key: Key) {
+        const FREQS: [Option<RepeatFreq>; 5] = [
+            None,
+            Some(RepeatFreq::Day),
+            Some(RepeatFreq::Week),
+            Some(RepeatFreq::Month),
+            Some(RepeatFreq::Year),
+        ];
+        let at = FREQS
+            .iter()
+            .position(|f| *f == self.repeat.map(|r| r.freq))
+            .unwrap_or(0);
+        let every = self.repeat.map_or(1, |r| r.every);
+        self.repeat = match key {
+            Key::Left | Key::Right => {
+                let to = if key == Key::Right {
+                    (at + 1).min(FREQS.len() - 1)
+                } else {
+                    at.saturating_sub(1)
+                };
+                FREQS[to].map(|freq| RepeatRule { freq, every })
+            }
+            Key::Up => self.repeat.map(|r| RepeatRule {
+                every: (r.every + 1).min(MAX_EVERY),
+                ..r
+            }),
+            Key::Down => self.repeat.map(|r| RepeatRule {
+                every: r.every.saturating_sub(1).max(1),
+                ..r
+            }),
+            _ => self.repeat,
+        };
+        self.repeat_touched = true;
+    }
+
+    /// One key. Tab goes to the next field, Enter saves what is there, Esc cancels.
+    pub fn handle(&mut self, key: Key) -> Outcome {
+        if let Some(picker) = &mut self.picker {
+            match picker.handle(key) {
+                PickerOutcome::Open => {}
+                PickerOutcome::Closed => self.picker = None,
+                PickerOutcome::Chosen(path) => {
+                    if !self.attachments.contains(&path) {
+                        self.attachments.push(path);
+                    }
+                    self.picker = None;
+                }
+            }
+            return Outcome::Continue;
+        }
+        match key {
+            Key::Esc => return Outcome::Cancel,
+            Key::Enter => {
+                if self.effective_title().trim().is_empty() {
+                    return Outcome::Continue;
+                }
+                return Outcome::Save(Box::new(self.task()));
+            }
+            Key::Tab => {
+                // leaving the title with nothing typed takes the suggestion as the title
+                if self.field == Field::Title && self.title.trim().is_empty() {
+                    self.title = self.suggestion.clone();
+                    self.reread();
+                }
+                self.field = self.field.next();
+                return Outcome::Continue;
+            }
+            _ => {}
+        }
+        match (self.field, key) {
+            (Field::Title, Key::Right) if self.title.is_empty() => {
+                // accept the suggestion as text and go on editing it
+                self.title = self.suggestion.clone();
+                self.reread();
+            }
+            (Field::Title, Key::Char(c)) if !c.is_control() => {
+                self.title.push(c);
+                self.reread();
+            }
+            (Field::Title, Key::Backspace) => {
+                self.title.pop();
+                self.reread();
+            }
+            (Field::Date, Key::Left) => {
+                self.part = match self.part {
+                    DatePart::Minute => DatePart::Hour,
+                    _ => DatePart::Day,
+                };
+            }
+            (Field::Date, Key::Right) => {
+                self.part = match self.part {
+                    DatePart::Day => DatePart::Hour,
+                    _ => DatePart::Minute,
+                };
+            }
+            (Field::Date, Key::Up) => self.step_date(true),
+            (Field::Date, Key::Down) => self.step_date(false),
+            (Field::Date, Key::Backspace) => {
+                self.due = None;
+                self.date_touched = true;
+            }
+            (Field::Repeat, Key::Left | Key::Right | Key::Up | Key::Down) => self.step_repeat(key),
+            (Field::Repeat, Key::Backspace) => {
+                self.repeat = None;
+                self.repeat_touched = true;
+            }
+            (Field::Notes, Key::Char(c)) if !c.is_control() => self.notes.push(c),
+            (Field::Notes, Key::Backspace) => {
+                self.notes.pop();
+            }
+            (Field::Labels, Key::Left) => self.label_cursor = self.label_cursor.saturating_sub(1),
+            (Field::Labels, Key::Right) => {
+                self.label_cursor =
+                    (self.label_cursor + 1).min(self.labels.len().saturating_sub(1));
+            }
+            (Field::Labels, Key::Char(' ')) => {
+                if let Some((_, on)) = self.labels.get_mut(self.label_cursor) {
+                    *on = !*on;
+                }
+            }
+            (Field::Files, Key::Backspace) => {
+                self.attachments.pop();
+            }
+            (Field::Files, Key::Char(' ')) => return Outcome::Continue,
+            _ => {}
+        }
+        Outcome::Continue
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use haste_core::time::from_civil;
+
+    /// 2026-11-15 12:00 UTC, a Sunday, with a local offset of +1 hour.
+    const NOW: i64 = 1_794_744_000;
+    const OFF: i64 = 3_600;
+
+    fn at(d: i64, h: i64, m: i64) -> i64 {
+        from_civil(2026, 11, d, h, m) - OFF
+    }
+
+    fn form(suggestion: &str) -> RemindForm {
+        RemindForm::new(
+            "t1",
+            suggestion,
+            &["haste".to_owned(), "work".to_owned()],
+            &["work".to_owned()],
+            NOW,
+            OFF,
+        )
+    }
+
+    fn type_text(f: &mut RemindForm, text: &str) {
+        for c in text.chars() {
+            f.handle(Key::Char(c));
+        }
+    }
+
+    #[test]
+    fn the_suggestion_is_dim_until_right_takes_it_as_editable_text() {
+        let mut f = form("Quarterly plan");
+        assert!(f.title.is_empty());
+        assert_eq!(f.effective_title(), "Quarterly plan");
+        f.handle(Key::Right);
+        assert_eq!(f.title, "Quarterly plan");
+        type_text(&mut f, " v2");
+        assert_eq!(f.title, "Quarterly plan v2");
+        // Right does nothing once there is text
+        f.handle(Key::Right);
+        assert_eq!(f.title, "Quarterly plan v2");
+    }
+
+    #[test]
+    fn enter_saves_with_the_suggestion_when_nothing_was_typed() {
+        let mut f = form("Quarterly plan");
+        let Outcome::Save(task) = f.handle(Key::Enter) else {
+            panic!("expected a task")
+        };
+        assert_eq!(task.title, "Quarterly plan");
+        assert_eq!(
+            task.due,
+            Some(at(16, 9, 0)),
+            "tomorrow 09:00 without a date in the words"
+        );
+        assert_eq!(
+            task.tags,
+            vec!["work".to_owned()],
+            "the thread's label comes along"
+        );
+        assert_eq!(task.thread_id, "t1");
+    }
+
+    #[test]
+    fn tab_takes_the_suggestion_as_the_title_and_goes_to_the_date() {
+        let mut f = form("Pay rent kedd");
+        f.handle(Key::Tab);
+        assert_eq!(f.title, "Pay rent kedd");
+        assert_eq!(f.field, Field::Date);
+        assert_eq!(
+            f.due,
+            Some(at(17, 9, 0)),
+            "the date was read from the words"
+        );
+    }
+
+    #[test]
+    fn a_date_in_the_typed_title_sets_the_date_and_repeat() {
+        let mut f = form("Mail");
+        type_text(&mut f, "call Ana tomorrow 14:30 every week");
+        assert_eq!(f.due, Some(at(16, 14, 30)));
+        assert_eq!(
+            f.repeat,
+            Some(RepeatRule {
+                freq: RepeatFreq::Week,
+                every: 1
+            })
+        );
+    }
+
+    #[test]
+    fn the_date_moves_by_day_hour_and_minute_and_stays_once_set_by_hand() {
+        let mut f = form("Mail");
+        f.handle(Key::Tab);
+        f.handle(Key::Tab); // title -> date (title taken), still on Date after one Tab? no: back
+        f.field = Field::Date;
+        let start = f.due.unwrap();
+        f.handle(Key::Up);
+        assert_eq!(f.due, Some(start + DAY));
+        f.handle(Key::Right);
+        f.handle(Key::Down);
+        assert_eq!(f.due, Some(start + DAY - HOUR));
+        f.handle(Key::Right);
+        f.handle(Key::Up);
+        assert_eq!(f.due, Some(start + DAY - HOUR + 300));
+        f.handle(Key::Left);
+        assert_eq!(f.part, DatePart::Hour);
+        // typing in the title afterwards no longer overrides what was set by hand
+        f.field = Field::Title;
+        type_text(&mut f, " tomorrow");
+        assert_eq!(f.due, Some(start + DAY - HOUR + 300));
+        let (day, hour, minute) = f.date_parts().unwrap();
+        assert!(
+            day.contains("Nov") && hour.len() == 2 && minute.len() == 2,
+            "{day} {hour} {minute}"
+        );
+    }
+
+    #[test]
+    fn the_repeat_is_chosen_with_the_arrows_and_the_interval_with_up_and_down() {
+        let mut f = form("Mail");
+        f.field = Field::Repeat;
+        assert_eq!(f.repeat, None);
+        f.handle(Key::Right);
+        f.handle(Key::Right);
+        assert_eq!(f.repeat.map(|r| r.freq), Some(RepeatFreq::Week));
+        f.handle(Key::Up);
+        f.handle(Key::Up);
+        assert_eq!(f.repeat.map(|r| r.every), Some(3));
+        f.handle(Key::Left);
+        f.handle(Key::Left);
+        assert_eq!(f.repeat, None);
+    }
+
+    #[test]
+    fn labels_toggle_with_space_and_files_are_attached_with_the_picker() {
+        let mut f = form("Mail");
+        f.field = Field::Labels;
+        f.handle(Key::Char(' ')); // haste on
+        f.handle(Key::Right);
+        f.handle(Key::Char(' ')); // work off
+        f.field = Field::Notes;
+        type_text(&mut f, "bring the contract");
+        f.open_picker(vec!["/a/b.pdf".into()]);
+        f.handle(Key::Enter);
+        assert!(f.picker.is_none());
+        assert_eq!(f.attachments, vec![PathBuf::from("/a/b.pdf")]);
+        let Outcome::Save(task) = f.handle(Key::Enter) else {
+            panic!("expected a task")
+        };
+        assert_eq!(task.tags, vec!["haste".to_owned()]);
+        assert_eq!(task.notes, "bring the contract");
+        assert_eq!(task.attachments.len(), 1);
+    }
+
+    #[test]
+    fn escape_cancels_and_an_empty_title_is_not_saved() {
+        let mut f = form("");
+        assert_eq!(f.handle(Key::Enter), Outcome::Continue, "no title at all");
+        assert_eq!(f.handle(Key::Esc), Outcome::Cancel);
+    }
+}

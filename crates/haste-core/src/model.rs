@@ -192,6 +192,46 @@ pub struct Reminder {
     pub version: u64,
 }
 
+/// How often a reminder repeats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepeatFreq {
+    Day,
+    Week,
+    Month,
+    Year,
+}
+
+impl RepeatFreq {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Day => "day",
+            Self::Week => "week",
+            Self::Month => "month",
+            Self::Year => "year",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "day" => Some(Self::Day),
+            "week" => Some(Self::Week),
+            "month" => Some(Self::Month),
+            "year" => Some(Self::Year),
+            _ => None,
+        }
+    }
+}
+
+/// A repeat rule: every `every` days, weeks, months or years.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepeatRule {
+    pub freq: RepeatFreq,
+    pub every: u32,
+}
+
 /// Most characters of an event description kept locally.
 pub const DESCRIPTION_SNIPPET_MAX: usize = 280;
 

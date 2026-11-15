@@ -4,6 +4,7 @@
     {"op": "list_lists"},
     {"op": "fetch_changed", "since": 0, "offset": 200, "limit": 200, "include_completed": false},
     {"op": "create_reminder", "title": "Call", "due": 1700000000, "list": null, "notes": "haste:thread/abc"},
+    {"op": "create_reminder", "title": "Pay rent", "due": 1700000000, "list": null, "notes": null, "repeat": {"freq": "month", "every": 1}},
     {"op": "complete_reminder", "external_id": "x-apple-reminder://1"},
     {"op": "update_reminder", "external_id": "x-apple-reminder://1", "title": "Call Ana", "due": null, "append_notes": "see file"}
   ],

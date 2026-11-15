@@ -53,6 +53,23 @@ impl BeeperSource {
     }
 }
 
+/// Does this text hold markup tags (a link, a line break, bold) and not just a stray `<`?
+fn looks_like_html(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "</a>",
+        "<br",
+        "</b>",
+        "</i>",
+        "</p>",
+        "</code>",
+        "</strong>",
+        "</em>",
+    ]
+    .iter()
+    .any(|t| lower.contains(t))
+}
+
 /// A plain web address: `http(s)` with no whitespace or control characters.
 fn web_url(url: &str) -> Option<&str> {
     let url = url.trim();
@@ -122,7 +139,21 @@ pub fn map_message(chat_id: &str, source: &Source, wire: &WireMessage) -> Option
         .kind
         .as_deref()
         .is_none_or(|k| k.eq_ignore_ascii_case("text") || k.is_empty());
-    let text = wire.text.as_deref().filter(|t| !t.trim().is_empty());
+    // Beeper's rich text can carry markup (`<a href=…>https://…</a>`): reduce it to plain text,
+    // so a link stays a simple link
+    let plain: Option<String> = wire
+        .text
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| {
+            if looks_like_html(t) {
+                // a bare `<` ("a < b") is text, not the start of a tag
+                haste_core::html::to_text(&t.replace("< ", "&lt; "))
+            } else {
+                t.to_owned()
+            }
+        });
+    let text = plain.as_deref().filter(|t| !t.trim().is_empty());
     // a message that holds a link comes with a preview card (an image of the page): the link is
     // what was sent, so the card's image is not shown as a file
     let links: Vec<&crate::wire::WireLink> = wire
@@ -324,6 +355,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(empty.message.body_text, ATTACHMENT_LABEL);
+    }
+
+    #[test]
+    fn markup_in_rich_text_is_reduced_to_a_simple_link() {
+        let wire: WireMessage = serde_json::from_str(
+            r#"{"id":"m","type":"TEXT","timestamp":"2026-11-09T10:00:00Z","sortKey":"1",
+                "text":"<a href=\"https://www.instagram.com/reel/Dft9ZslCdzp/\" rel=\"noopener noreferrer\" target=\"_blank\">https://www.instagram.com/reel/Dft9ZslCdzp/</a>"}"#,
+        )
+        .unwrap();
+        let body = map_message("c", &Source::Whatsapp, &wire)
+            .unwrap()
+            .message
+            .body_text;
+        assert_eq!(body, "https://www.instagram.com/reel/Dft9ZslCdzp/");
+        // text with a named link keeps the address beside it; plain text with `<` is untouched
+        let named: WireMessage = serde_json::from_str(
+            r#"{"id":"m","type":"TEXT","timestamp":"2026-11-09T10:00:00Z","sortKey":"1",
+                "text":"see <a href=\"https://x.org/a\">this</a><br>and a < b"}"#,
+        )
+        .unwrap();
+        let body = map_message("c", &Source::Whatsapp, &named)
+            .unwrap()
+            .message
+            .body_text;
+        assert!(
+            body.contains("this (https://x.org/a)") && body.contains("and a < b"),
+            "{body}"
+        );
+        let plain: WireMessage = serde_json::from_str(
+            r#"{"id":"m","type":"TEXT","timestamp":"2026-11-09T10:00:00Z","sortKey":"1","text":"1 < 2 && 3 > 2"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            map_message("c", &Source::Whatsapp, &plain)
+                .unwrap()
+                .message
+                .body_text,
+            "1 < 2 && 3 > 2"
+        );
     }
 
     #[test]

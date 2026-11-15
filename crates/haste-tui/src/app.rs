@@ -70,6 +70,31 @@ pub enum TriageChange {
     SnoozeUntil(i64),
 }
 
+/// Most turns of one repeating task looked at when filling the agenda.
+const MAX_OCCURRENCES: i64 = 400;
+
+/// One row of the Calendar tab.
+#[derive(Debug, Clone, Copy)]
+pub enum AgendaItem<'a> {
+    Event(&'a EventView),
+    /// An open TODO item with a date, at the moment of this turn of it.
+    Task {
+        reminder: &'a ReminderView,
+        at: i64,
+    },
+}
+
+impl AgendaItem<'_> {
+    /// When it starts (unix seconds).
+    #[must_use]
+    pub fn at(&self) -> i64 {
+        match self {
+            Self::Event(e) => e.event.start_at,
+            Self::Task { at, .. } => *at,
+        }
+    }
+}
+
 /// How long a task marked done stays in the list (struck through, undoable) before it is
 /// completed in Reminders and removed.
 pub const DONE_GRACE: Duration = Duration::from_secs(30);
@@ -1010,19 +1035,49 @@ impl App {
         }
     }
 
-    /// Calendar rows for the next [`inbox::AGENDA_DAYS`] days, soonest first.
+    /// Calendar rows for the next [`inbox::AGENDA_DAYS`] days, soonest first: events, and open
+    /// TODO items with a date (a repeating one at each of its turns in the window).
     #[must_use]
-    pub fn agenda(&self) -> Vec<&EventView> {
+    pub fn agenda(&self) -> Vec<AgendaItem<'_>> {
         let now = haste_core::time::now_secs();
-        let until = inbox::day_start(now, self.tz_offset) + inbox::AGENDA_DAYS * 86_400;
-        let mut out: Vec<&EventView> = self
+        let from = inbox::day_start(now, self.tz_offset);
+        let until = from + inbox::AGENDA_DAYS * 86_400;
+        let mut out: Vec<AgendaItem<'_>> = self
             .events
             .iter()
             .filter(|e| {
                 e.event.status != "cancelled" && e.event.end_at >= now && e.event.start_at < until
             })
+            .map(AgendaItem::Event)
             .collect();
-        out.sort_by_key(|e| e.event.start_at);
+        for r in &self.reminder_list {
+            let Some(first) = r.reminder.due_at.filter(|_| !r.reminder.completed) else {
+                continue;
+            };
+            match r.repeat {
+                None => {
+                    // today's tasks stay listed through the day; nothing older than today
+                    if first >= from && first < until {
+                        out.push(AgendaItem::Task {
+                            reminder: r,
+                            at: first,
+                        });
+                    }
+                }
+                Some(rule) => {
+                    for n in 0..MAX_OCCURRENCES {
+                        let at = inbox::step_repeat(first, rule, n, self.tz_offset);
+                        if at >= until {
+                            break;
+                        }
+                        if at >= from {
+                            out.push(AgendaItem::Task { reminder: r, at });
+                        }
+                    }
+                }
+            }
+        }
+        out.sort_by_key(AgendaItem::at);
         out
     }
 
@@ -2805,6 +2860,49 @@ mod tests {
     }
 
     #[test]
+    fn dated_tasks_show_on_the_calendar_and_repeating_ones_at_each_turn() {
+        use haste_core::model::{RepeatFreq, RepeatRule};
+        let mut app = App::new();
+        let now = haste_core::time::now_secs();
+        let mut daily = reminder_view("daily", Some(now + 3_600));
+        daily.repeat = Some(RepeatRule {
+            freq: RepeatFreq::Day,
+            every: 1,
+        });
+        let mut done = reminder_view("done", Some(now + 3_600));
+        done.reminder.completed = true;
+        app.set_reminder_list(vec![
+            daily,
+            reminder_view("once", Some(now + 2 * 86_400)),
+            reminder_view("old", Some(now - 5 * 86_400)),
+            reminder_view("undated", None),
+            reminder_view("far", Some(now + 30 * 86_400)),
+            done,
+        ]);
+        let tasks: Vec<(&str, i64)> = app
+            .agenda()
+            .into_iter()
+            .filter_map(|x| match x {
+                AgendaItem::Task { reminder, at } => Some((reminder.reminder.id.as_str(), at)),
+                AgendaItem::Event(_) => None,
+            })
+            .collect();
+        let daily_at: Vec<i64> = tasks
+            .iter()
+            .filter(|(id, _)| *id == "daily")
+            .map(|(_, at)| *at)
+            .collect();
+        assert!(daily_at.len() >= 6, "a turn each day: {daily_at:?}");
+        assert!(daily_at.windows(2).all(|w| w[1] - w[0] == 86_400));
+        let once: Vec<_> = tasks.iter().filter(|(id, _)| *id == "once").collect();
+        assert_eq!(once.len(), 1);
+        for left_out in ["old", "undated", "far", "done"] {
+            assert!(tasks.iter().all(|(id, _)| *id != left_out), "{left_out}");
+        }
+        assert!(tasks.windows(2).all(|w| w[0].1 <= w[1].1), "soonest first");
+    }
+
+    #[test]
     fn capital_j_and_k_move_between_the_incoming_and_todo_panes() {
         let mut app = inbox_app();
         assert_eq!(app.today_focus, TodayFocus::Inbox);
@@ -3689,7 +3787,14 @@ mod tests {
             e("far", now + 9 * 86_400, "confirmed"),
             e("gone", now + 7200, "cancelled"),
         ]);
-        let ids: Vec<&str> = app.agenda().iter().map(|x| x.event.id.as_str()).collect();
+        let ids: Vec<&str> = app
+            .agenda()
+            .iter()
+            .filter_map(|x| match x {
+                AgendaItem::Event(e) => Some(e.event.id.as_str()),
+                AgendaItem::Task { .. } => None,
+            })
+            .collect();
         assert_eq!(ids, ["soon"]);
     }
 

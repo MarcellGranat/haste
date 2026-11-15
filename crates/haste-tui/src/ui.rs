@@ -1242,19 +1242,21 @@ fn draw_channels(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    use crate::app::AgendaItem;
     let off = app.tz_offset;
-    let events = app.agenda();
+    let rows = app.agenda();
     let mut items: Vec<ListItem<'_>> = Vec::new();
     let mut position = None;
     let mut last_day = i64::MIN;
-    for (i, e) in events.iter().enumerate() {
+    for (i, row) in rows.iter().enumerate() {
         // all-day events are dates (midnight UTC), not moments: never shift them by the offset
-        let (day, label) = if e.event.all_day {
-            (e.event.start_at, inbox::day_label(e.event.start_at, 0))
+        let all_day = matches!(row, AgendaItem::Event(e) if e.event.all_day);
+        let (day, label) = if all_day {
+            (row.at(), inbox::day_label(row.at(), 0))
         } else {
             (
-                inbox::day_start(e.event.start_at, off),
-                inbox::day_label(e.event.start_at, off),
+                inbox::day_start(row.at(), off),
+                inbox::day_label(row.at(), off),
             )
         };
         if day != last_day {
@@ -1269,21 +1271,53 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         if i == app.calendar_selected {
             position = Some(items.len());
         }
-        let when = if e.event.all_day {
+        let when = if all_day {
             "all day".to_owned()
         } else {
-            inbox::stamp(e.event.start_at, off)[11..].to_owned()
+            inbox::stamp(row.at(), off)[11..].to_owned()
         };
-        let tags = if e.tags.is_empty() {
-            String::new()
-        } else {
-            format!("  #{}", e.tags.join(" #"))
-        };
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(format!("  {when:<8}"), Style::new().fg(theme::SAPPHIRE)),
-            Span::styled(e.event.title.clone(), Style::new().fg(theme::TEXT)),
-            Span::styled(tags, Style::new().fg(theme::MAUVE)),
-        ])));
+        items.push(ListItem::new(match row {
+            AgendaItem::Event(e) => {
+                let tags = if e.tags.is_empty() {
+                    String::new()
+                } else {
+                    format!("  #{}", e.tags.join(" #"))
+                };
+                Line::from(vec![
+                    Span::styled(format!("  {when:<8}"), Style::new().fg(theme::SAPPHIRE)),
+                    Span::styled(e.event.title.clone(), Style::new().fg(theme::TEXT)),
+                    Span::styled(tags, Style::new().fg(theme::MAUVE)),
+                ])
+            }
+            AgendaItem::Task { reminder, .. } => {
+                let tags = if reminder.tags.is_empty() {
+                    String::new()
+                } else {
+                    format!("  #{}", reminder.tags.join(" #"))
+                };
+                let repeat = reminder.repeat.map_or_else(String::new, |r| {
+                    format!(
+                        "  ↻ every {}{}",
+                        if r.every == 1 {
+                            String::new()
+                        } else {
+                            format!("{} ", r.every)
+                        },
+                        r.freq.as_str()
+                    )
+                });
+                Line::from(vec![
+                    Span::styled(format!("  {when:<8}"), Style::new().fg(theme::PEACH)),
+                    Span::styled("☐ ", Style::new().fg(theme::PEACH)),
+                    Span::styled(
+                        inbox::sanitize(&reminder.reminder.title).replace('\n', " "),
+                        Style::new().fg(theme::TEXT),
+                    ),
+                    Span::styled(repeat, Style::new().fg(theme::LAVENDER)),
+                    Span::styled(tags, Style::new().fg(theme::MAUVE)),
+                ])
+            }
+        }));
     }
     if items.is_empty() {
         items.push(ListItem::new(Span::styled(
@@ -1295,7 +1329,7 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_stateful_widget(
         List::new(items)
             .block(
-                theme::panel(" Calendar · next 7 days · local time · read-only ")
+                theme::panel(" Calendar · next 7 days · local time · events and dated TODOs ")
                     .border_style(Style::new().fg(theme::BORDER_ACTIVE)),
             )
             .highlight_style(theme::selected())

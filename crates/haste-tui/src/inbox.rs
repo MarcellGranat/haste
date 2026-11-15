@@ -153,6 +153,33 @@ pub fn matches(filter: &FilterView, t: &ThreadView) -> bool {
         && filter.min_priority.is_none_or(|m| t.triage.priority >= m)
 }
 
+/// `t` moved on by `n` steps of a repeat rule, in local time (a month or year keeps the day of
+/// the month, cut to the month's length).
+#[must_use]
+pub fn step_repeat(t: i64, rule: haste_core::model::RepeatRule, n: i64, off: i64) -> i64 {
+    use haste_core::model::RepeatFreq;
+    let every = i64::from(rule.every.max(1)) * n;
+    match rule.freq {
+        RepeatFreq::Day => t + every * DAY,
+        RepeatFreq::Week => t + every * 7 * DAY,
+        RepeatFreq::Month | RepeatFreq::Year => {
+            let months = if rule.freq == RepeatFreq::Month {
+                every
+            } else {
+                every * 12
+            };
+            let (y, m, d, h, mi) = to_civil(t + off);
+            let total = y * 12 + (m - 1) + months;
+            let (ny, nm) = (total.div_euclid(12), total.rem_euclid(12) + 1);
+            let last = (28..=31)
+                .rev()
+                .find(|day| to_civil(from_civil(ny, nm, *day, 0, 0)).1 == nm)
+                .unwrap_or(28);
+            from_civil(ny, nm, d.min(last), h, mi) - off
+        }
+    }
+}
+
 /// Seconds from a snooze prompt: whole hours or whole days (`3h`, `2d`).
 ///
 /// # Errors
@@ -600,6 +627,40 @@ mod tests {
         assert_eq!(
             short_sender_or_address("no-reply-ab-cd@mail.claude.com"),
             "claude"
+        );
+    }
+
+    #[test]
+    fn repeat_steps_keep_the_day_and_cut_it_to_the_month() {
+        use haste_core::model::{RepeatFreq, RepeatRule};
+        let rule = |freq, every| RepeatRule { freq, every };
+        let jan31 = from_civil(2027, 1, 31, 9, 0);
+        assert_eq!(
+            step_repeat(jan31, rule(RepeatFreq::Month, 1), 1, 0),
+            from_civil(2027, 2, 28, 9, 0)
+        );
+        assert_eq!(
+            step_repeat(jan31, rule(RepeatFreq::Month, 2), 1, 0),
+            from_civil(2027, 3, 31, 9, 0)
+        );
+        assert_eq!(
+            step_repeat(jan31, rule(RepeatFreq::Week, 2), 3, 0),
+            jan31 + 6 * 7 * DAY
+        );
+        assert_eq!(
+            step_repeat(
+                from_civil(2028, 2, 29, 9, 0),
+                rule(RepeatFreq::Year, 1),
+                1,
+                0
+            ),
+            from_civil(2029, 2, 28, 9, 0)
+        );
+        // the local time of day survives a change of offset
+        let local = from_civil(2027, 1, 15, 9, 0) - 3_600;
+        assert_eq!(
+            step_repeat(local, rule(RepeatFreq::Month, 1), 1, 3_600),
+            from_civil(2027, 2, 15, 9, 0) - 3_600
         );
     }
 

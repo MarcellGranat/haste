@@ -1296,6 +1296,75 @@ async fn triage_writes_are_human_only_local_and_leave_content_alone() {
 }
 
 #[tokio::test]
+async fn a_sender_stays_known_after_the_thread_is_marked_unread_again() {
+    let rig = boot("working").await;
+    let store = &rig.daemon.state.store;
+    let t = store
+        .upsert_thread(
+            &haste_core::model::Source::Gmail,
+            "g-1",
+            "Offer",
+            &["shop@y.org".into()],
+            10,
+        )
+        .unwrap();
+    store
+        .upsert_message(&haste_core::model::Message {
+            id: String::new(),
+            thread_id: t.id.clone(),
+            source: haste_core::model::Source::Gmail,
+            external_id: "m-1".into(),
+            sender_person_id: None,
+            sender_identifier: Some("Shop <shop@y.org>".into()),
+            body_text: "hi".into(),
+            sent_at: 10,
+            is_own: false,
+        })
+        .unwrap();
+    store.set_unread(&[(t.id.clone(), true)], 1).unwrap();
+    let listed = |resp: Response| -> (bool, bool) {
+        let Response::Threads { threads } = resp else {
+            panic!()
+        };
+        let v = threads.iter().find(|v| v.thread.id == t.id).unwrap();
+        (v.unread, v.sender_known)
+    };
+    let list = || RequestBody::ThreadList {
+        sources: vec![],
+        include_archived: false,
+        include_snoozed: true,
+    };
+    assert_eq!(
+        listed(human(&rig, list()).await),
+        (true, false),
+        "a stranger"
+    );
+    human(
+        &rig,
+        RequestBody::ReadSet {
+            thread_id: t.id.clone(),
+            read: true,
+        },
+    )
+    .await;
+    assert_eq!(listed(human(&rig, list()).await), (false, true));
+    human(
+        &rig,
+        RequestBody::ReadSet {
+            thread_id: t.id.clone(),
+            read: false,
+        },
+    )
+    .await;
+    assert_eq!(
+        listed(human(&rig, list()).await),
+        (true, true),
+        "unread again, but not a stranger"
+    );
+    rig.daemon.shutdown().await;
+}
+
+#[tokio::test]
 async fn sender_rules_are_local_files_changed_only_by_the_human() {
     use haste_proto::RuleKind;
     let rig = boot("working").await;

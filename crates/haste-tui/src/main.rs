@@ -90,7 +90,7 @@ fn refresh(app: &mut App, client: &Client) {
     match client.call(RequestBody::ThreadList {
         sources: vec![],
         include_archived: false,
-        include_snoozed: false,
+        include_snoozed: true,
     }) {
         Ok(Response::Threads { threads }) => app.set_threads(threads),
         Ok(_) => {}
@@ -731,6 +731,9 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                     },
                 ),
                 TriageChange::SnoozeUntil(t) => (None, None, Some(Some(t)), None, "snoozed"),
+                TriageChange::BringBack => {
+                    (None, Some(false), Some(None), None, "back in the inbox")
+                }
             };
             app.status = match describe(client.call(RequestBody::TriageSet {
                 thread_id,
@@ -926,7 +929,7 @@ fn save_reply(
     };
     let key = format!("tui-reply-{thread_id}-{}", haste_core::time::now_secs());
     app.status = match run_draft(client, thread_id, body, names, key) {
-        Ok(()) => "reply drafted and approved: 4 Approvals, then s to send".into(),
+        Ok(()) => "reply drafted and approved: 5 Approvals, then s to send".into(),
         Err(e) => e,
     };
 }

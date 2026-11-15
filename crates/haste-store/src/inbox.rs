@@ -352,6 +352,37 @@ impl Store {
         })
     }
 
+    /// Remember senders (bare lowercase addresses) whose mail the human engaged with.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn add_known_senders(&self, addresses: &[String]) -> StoreResult<()> {
+        let addresses = addresses.to_vec();
+        self.write(move |conn| {
+            let tx = conn.transaction()?;
+            for a in &addresses {
+                tx.execute(
+                    "INSERT OR IGNORE INTO known_senders (address) VALUES (?1)",
+                    [a],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// The remembered senders.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn known_sender_addresses(&self) -> StoreResult<std::collections::HashSet<String>> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare("SELECT address FROM known_senders")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            Ok(rows.collect::<Result<std::collections::HashSet<_>, _>>()?)
+        })
+    }
+
     /// Ids of the unread threads.
     ///
     /// # Errors

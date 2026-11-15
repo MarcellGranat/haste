@@ -50,7 +50,7 @@ pub const UNREAD_BG: Color = Color::Rgb(0x28, 0x29, 0x3d);
 /// A thread the human answered: blue.
 pub const REPLIED_BG: Color = Color::Rgb(0x1c, 0x2d, 0x4d);
 /// A priority thread: orange.
-pub const PRIORITY_BG: Color = Color::Rgb(0x3d, 0x2b, 0x1e);
+pub const PRIORITY_BG: Color = Color::Rgb(0x8a, 0x48, 0x0b);
 /// A blocked sender's thread: red.
 pub const BLOCKED_BG: Color = Color::Rgb(0x3a, 0x1f, 0x2a);
 

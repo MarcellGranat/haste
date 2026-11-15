@@ -30,6 +30,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         View::Today => draw_today(frame, app, body),
         View::Channels => draw_channels(frame, app, body),
         View::Calendar => draw_calendar(frame, app, body),
+        View::Later => draw_later(frame, app, body),
         View::Approvals => draw_approvals(frame, app, body),
         View::Connectors => draw_connectors(frame, app, body),
         View::Agents => draw_agents(frame, app, body),
@@ -525,10 +526,14 @@ fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
         tab("1 Today", app.view == View::Today),
         tab("2 Channels", app.view == View::Channels),
         tab("3 Calendar", app.view == View::Calendar),
+        tab(
+            &format!("4 Later {}", app.later_threads().len()),
+            app.view == View::Later,
+        ),
         Span::styled(" │ ", theme::muted()),
     ];
     let pending = app.proposals.len();
-    let approvals = format!("4 Approvals {pending}");
+    let approvals = format!("5 Approvals {pending}");
     spans.push(if pending > 0 && app.view != View::Approvals {
         Span::styled(
             format!(" {approvals} "),
@@ -538,11 +543,11 @@ fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
         tab(&approvals, app.view == View::Approvals)
     });
     spans.push(tab(
-        &format!("5 Connectors {}", app.connectors.len()),
+        &format!("6 Connectors {}", app.connectors.len()),
         app.view == View::Connectors,
     ));
     spans.push(tab(
-        &format!("6 Agents {}", app.blocked().len()),
+        &format!("7 Agents {}", app.blocked().len()),
         app.view == View::Agents,
     ));
     frame.render_widget(Paragraph::new(Line::from(spans)).style(theme::text()), area);
@@ -599,6 +604,15 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         }
         View::Channels => vec![("Enter", "open"), ("j/k", "move")],
         View::Calendar => vec![("j/k", "move"), ("Tab", "next tab")],
+        View::Later => vec![
+            ("Enter", "open"),
+            ("g", "back to inbox"),
+            ("s", "snooze again"),
+            ("e", "archive"),
+            ("u", "read/unread"),
+            ("j/k", "move"),
+            ("Tab", "next tab"),
+        ],
         View::Approvals => vec![
             ("a", "approve"),
             ("s", "send"),
@@ -694,7 +708,13 @@ pub fn source_icon(source: &str) -> &'static str {
     }
 }
 
-fn thread_line(t: &ThreadView, now: i64, priority: bool, blocked: bool) -> ListItem<'static> {
+fn thread_line(
+    t: &ThreadView,
+    now: i64,
+    priority: bool,
+    blocked: bool,
+    tag: Option<String>,
+) -> ListItem<'static> {
     let source = t.thread.source.as_name();
     let star = if priority { "★" } else { " " };
     let aside = if t.triage.set_aside { "◌ " } else { "" };
@@ -724,13 +744,17 @@ fn thread_line(t: &ThreadView, now: i64, priority: bool, blocked: bool) -> ListI
         ),
     ];
     if is_mail && !sender.is_empty() {
-        spans.push(Span::styled(
-            format!("{sender} "),
-            Style::new().fg(theme::SUBTEXT0),
-        ));
+        let style = if priority && !blocked {
+            Style::new().fg(theme::TEXT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(theme::SUBTEXT0)
+        };
+        spans.push(Span::styled(format!("{sender} "), style));
     }
     let subject_style = if blocked {
         Style::new().fg(theme::DANGER)
+    } else if priority {
+        Style::new().fg(theme::TEXT).add_modifier(Modifier::BOLD)
     } else if t.unread {
         Style::new().fg(theme::UNREAD).add_modifier(Modifier::BOLD)
     } else {
@@ -761,6 +785,12 @@ fn thread_line(t: &ThreadView, now: i64, priority: bool, blocked: bool) -> ListI
         spans.push(Span::styled(
             format!(" {aside}"),
             Style::new().fg(theme::MUTED),
+        ));
+    }
+    if let Some(tag) = tag {
+        spans.push(Span::styled(
+            format!("  {tag}"),
+            Style::new().fg(theme::LAVENDER),
         ));
     }
     spans.push(Span::styled(
@@ -825,6 +855,44 @@ fn draw_scrolling(
     );
 }
 
+/// The Later tab: set-aside and snoozed threads, each with why it is here.
+fn draw_later(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let now = haste_core::time::now_secs();
+    let threads = app.later_threads();
+    let items: Vec<ListItem<'_>> = threads
+        .iter()
+        .map(|t| {
+            let tag = match t.triage.snoozed_until {
+                Some(until) if until > now => {
+                    Some(format!("⏰ back {}", inbox::stamp(until, app.tz_offset)))
+                }
+                _ => Some("◌ set aside".to_owned()),
+            };
+            thread_line(t, now, app.is_priority(t), app.is_blocked(t), tag)
+        })
+        .collect();
+    let title = format!(" Later · {} set aside or snoozed ", threads.len());
+    if items.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "nothing is set aside or snoozed: g sets a thread aside, s snoozes it",
+                theme::muted(),
+            )))
+            .block(theme::panel(&title).border_style(pane_border(true))),
+            area,
+        );
+        return;
+    }
+    draw_scrolling(
+        frame,
+        area,
+        theme::panel(&title).border_style(pane_border(true)),
+        items,
+        Some(app.later_selected),
+        &app.later_offset,
+    );
+}
+
 fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let now = haste_core::time::now_secs();
     let off = app.tz_offset;
@@ -854,7 +922,7 @@ fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
     let items: Vec<ListItem<'_>> = threads
         .iter()
-        .map(|t| thread_line(t, now, app.is_priority(t), app.is_blocked(t)))
+        .map(|t| thread_line(t, now, app.is_priority(t), app.is_blocked(t), None))
         .collect();
     draw_scrolling(
         frame,
@@ -963,7 +1031,7 @@ fn draw_channels(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let threads = app.channel_threads(app.channels_selected);
     let items: Vec<ListItem<'_>> = threads
         .iter()
-        .map(|t| thread_line(t, now, app.is_priority(t), app.is_blocked(t)))
+        .map(|t| thread_line(t, now, app.is_priority(t), app.is_blocked(t), None))
         .collect();
     let title = CHANNELS.get(app.channels_selected).copied().unwrap_or("");
     draw_scrolling(

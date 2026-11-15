@@ -1626,6 +1626,25 @@ fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     std::fs::rename(tmp, path)
 }
 
+/// Remember the senders of a mail thread (not the human's own address) as known.
+fn remember_senders(state: &State, thread_id: &str, source: &Source) {
+    let own = state
+        .connector_for(source)
+        .and_then(|c| c.own_address())
+        .map(|a| haste_core::ignore::address_of(&a))
+        .unwrap_or_default();
+    let Ok(messages) = state.store.messages_for_thread(thread_id) else {
+        return;
+    };
+    let senders: Vec<String> = messages
+        .iter()
+        .filter_map(|m| m.sender_identifier.as_deref())
+        .map(haste_core::ignore::address_of)
+        .filter(|a| !a.is_empty() && *a != own)
+        .collect();
+    let _ = state.store.add_known_senders(&senders);
+}
+
 /// Mark a mail thread read or unread. The mark is stored here first; then the provider is
 /// asked once (Gmail). A provider that cannot or does not is reported, and the local mark stays.
 fn read_set(state: &State, actor: &Principal, thread_id: &str, read: bool) -> Response {
@@ -1636,6 +1655,15 @@ fn read_set(state: &State, actor: &Principal, thread_id: &str, read: bool) -> Re
     };
     if !matches!(thread.source, Source::Gmail | Source::Icloud) {
         return err(ErrorCode::Validation, "only mail has a read mark");
+    }
+    // Whoever wrote this thread is remembered as engaged with, so marking it unread again (or
+    // the provider doing so) never turns them into a stranger.
+    let was_unread = state
+        .store
+        .unread_threads()
+        .is_ok_and(|u| u.contains(thread_id));
+    if read || !was_unread {
+        remember_senders(state, thread_id, &thread.source);
     }
     if let Err(e) = state
         .store
@@ -1754,6 +1782,7 @@ impl MailFlags {
             .iter()
             .map(|s| haste_core::ignore::address_of(s))
             .collect();
+        known.extend(state.store.known_sender_addresses().unwrap_or_default());
         // whoever the human answered is known too
         for id in &replied {
             if let Some(s) = senders.get(id) {

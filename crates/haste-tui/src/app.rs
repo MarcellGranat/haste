@@ -40,15 +40,17 @@ pub enum View {
     Channels,
     /// Tab 3: the next days of the calendar.
     Calendar,
-    /// Secondary screens, opened with 4, 5 and 6.
+    /// Tab 4: threads set aside or snoozed.
+    Later,
+    /// Secondary screens, opened with 5, 6 and 7.
     Approvals,
     Connectors,
     Agents,
 }
 
 impl View {
-    /// The three main tabs, in order.
-    pub const TABS: [Self; 3] = [Self::Today, Self::Channels, Self::Calendar];
+    /// The four main tabs, in order.
+    pub const TABS: [Self; 4] = [Self::Today, Self::Channels, Self::Calendar, Self::Later];
 
     #[must_use]
     pub fn is_tab(self) -> bool {
@@ -61,6 +63,8 @@ impl View {
 pub enum TriageChange {
     Archive,
     SetAside(bool),
+    /// Back into the inbox: no longer set aside, no longer snoozed.
+    BringBack,
     Priority(i32),
     /// Snooze until this unix second.
     SnoozeUntil(i64),
@@ -463,6 +467,7 @@ pub struct App {
     pub inbox_offset: Cell<usize>,
     pub todo_offset: Cell<usize>,
     pub channel_offset: Cell<usize>,
+    pub later_offset: Cell<usize>,
     pub channels_selected: usize,
     /// Inside a channel's thread list (Channels tab).
     pub channel_inner: bool,
@@ -479,6 +484,7 @@ pub struct App {
     /// Upcoming calendar events, soonest first (read-only).
     pub events: Vec<EventView>,
     pub calendar_selected: usize,
+    pub later_selected: usize,
     /// Open reminders (read-only; add or change them through proposals).
     pub reminder_list: Vec<ReminderView>,
     pub group_by: GroupBy,
@@ -598,6 +604,7 @@ impl App {
             inbox_offset: Cell::new(0),
             todo_offset: Cell::new(0),
             channel_offset: Cell::new(0),
+            later_offset: Cell::new(0),
             channels_selected: 0,
             channel_inner: false,
             channel_thread_selected: 0,
@@ -610,6 +617,7 @@ impl App {
             agents_selected: 0,
             events: Vec::new(),
             calendar_selected: 0,
+            later_selected: 0,
             reminder_list: Vec::new(),
             group_by: GroupBy::Agent,
             blocked_collapsed: false,
@@ -895,7 +903,9 @@ impl App {
         let mut out: Vec<&ThreadView> = self
             .threads
             .iter()
-            .filter(|t| !t.triage.archived && (include_aside || !t.triage.set_aside))
+            .filter(|t| {
+                !t.triage.archived && (include_aside || !t.triage.set_aside) && !self.is_snoozed(t)
+            })
             .filter(|t| inbox::matches(filter, t))
             .collect();
         // blocked senders last; then priority; then the newest
@@ -944,10 +954,40 @@ impl App {
         let Some(name) = inbox::CHANNELS.get(i) else {
             return Vec::new();
         };
-        self.filtered_threads(true)
+        self.filtered_threads(false)
             .into_iter()
             .filter(|t| t.thread.source.as_name() == *name)
             .collect()
+    }
+
+    /// Is the thread snoozed right now (a wake-up time still ahead)?
+    #[must_use]
+    pub fn is_snoozed(&self, t: &ThreadView) -> bool {
+        t.triage
+            .snoozed_until
+            .is_some_and(|until| until > haste_core::time::now_secs())
+    }
+
+    /// The Later tab: threads set aside or snoozed, the ones waking soonest first, then the
+    /// rest by recent activity.
+    #[must_use]
+    pub fn later_threads(&self) -> Vec<&ThreadView> {
+        let mut out: Vec<&ThreadView> = self
+            .threads
+            .iter()
+            .filter(|t| !t.triage.archived && (t.triage.set_aside || self.is_snoozed(t)))
+            .collect();
+        out.sort_by_key(|t| {
+            (
+                t.triage
+                    .snoozed_until
+                    .filter(|_| self.is_snoozed(t))
+                    .is_none(),
+                t.triage.snoozed_until.unwrap_or(i64::MAX),
+                std::cmp::Reverse(t.thread.last_activity_at),
+            )
+        });
+        out
     }
 
     /// The thread the thread-keys act on, if the cursor is on one.
@@ -961,6 +1001,7 @@ impl App {
                 .channel_threads(self.channels_selected)
                 .get(self.channel_thread_selected)
                 .copied(),
+            View::Later => self.later_threads().get(self.later_selected).copied(),
             _ => None,
         }
     }
@@ -1003,6 +1044,9 @@ impl App {
         self.calendar_selected = self
             .calendar_selected
             .min(self.agenda().len().saturating_sub(1));
+        self.later_selected = self
+            .later_selected
+            .min(self.later_threads().len().saturating_sub(1));
     }
 
     fn selected_proposal(&self) -> Option<&Proposal> {
@@ -1021,6 +1065,7 @@ impl App {
             }
             View::Channels => inbox::CHANNELS.len(),
             View::Calendar => self.agenda().len(),
+            View::Later => self.later_threads().len(),
             View::Approvals => self.rows().len(),
             View::Connectors => self.connectors.len(),
             View::Agents => self.agent_rows().len(),
@@ -1034,6 +1079,7 @@ impl App {
             View::Channels if self.channel_inner => &mut self.channel_thread_selected,
             View::Channels => &mut self.channels_selected,
             View::Calendar => &mut self.calendar_selected,
+            View::Later => &mut self.later_selected,
             View::Approvals => &mut self.approvals_selected,
             View::Connectors => &mut self.connectors_selected,
             View::Agents => &mut self.agents_selected,
@@ -1206,7 +1252,8 @@ impl App {
 
     fn key_normal(&mut self, key: Key) -> Option<Effect> {
         let thread_view = (self.view == View::Today && self.today_focus == TodayFocus::Inbox)
-            || (self.view == View::Channels && self.channel_inner);
+            || (self.view == View::Channels && self.channel_inner)
+            || self.view == View::Later;
         match key {
             Key::Char('q') => return Some(Effect::Quit),
             Key::Tab if self.view == View::Today => {
@@ -1224,9 +1271,10 @@ impl App {
             Key::Char('1') => self.view = View::Today,
             Key::Char('2') => self.view = View::Channels,
             Key::Char('3') => self.view = View::Calendar,
-            Key::Char('4') => self.view = View::Approvals,
-            Key::Char('5') => self.view = View::Connectors,
-            Key::Char('6') => self.view = View::Agents,
+            Key::Char('4') => self.view = View::Later,
+            Key::Char('5') => self.view = View::Approvals,
+            Key::Char('6') => self.view = View::Connectors,
+            Key::Char('7') => self.view = View::Agents,
             Key::Esc | Key::Char('h') if self.view == View::Channels && self.channel_inner => {
                 self.channel_inner = false;
             }
@@ -1249,6 +1297,7 @@ impl App {
             Key::Char('x') if thread_view => return self.mute_selected(),
             Key::Char(' ') if self.on_todos() => self.toggle_todo_mark(),
             Key::Char('e') if self.on_todos() => self.mark_done(),
+            Key::Char('g') if self.view == View::Later => return self.bring_back(),
             Key::Char('g') if thread_view => return self.triage_aside(),
             Key::Char('p') if thread_view => return self.triage_priority(),
             Key::Char('P') if thread_view => return self.priority_sender(false),
@@ -2259,6 +2308,15 @@ impl App {
         })
     }
 
+    /// `g` on the Later tab: back into the inbox.
+    fn bring_back(&mut self) -> Option<Effect> {
+        let t = self.selected_thread()?;
+        Some(Effect::Triage {
+            thread_id: t.thread.id.clone(),
+            change: TriageChange::BringBack,
+        })
+    }
+
     fn triage_aside(&mut self) -> Option<Effect> {
         let t = self.selected_thread()?;
         Some(Effect::Triage {
@@ -2920,6 +2978,37 @@ mod tests {
     fn rules(app: &mut App, mute: &[&str], priority: &[&str], allowed: &[&str]) {
         let v = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         app.set_rules(&v(mute), &v(priority), &v(allowed), vec![]);
+    }
+
+    #[test]
+    fn aside_and_snoozed_threads_live_on_the_later_tab() {
+        let mut app = inbox_app();
+        let now = haste_core::time::now_secs();
+        app.threads[0].triage.set_aside = true; // t1
+        app.threads[1].triage.snoozed_until = Some(now + 3_600); // t2
+        assert!(app.today_threads().is_empty(), "neither is in the inbox");
+        press(&mut app, "2");
+        assert_eq!(app.channel_threads(0).len(), 0, "nor in the channels");
+        press(&mut app, "4");
+        assert_eq!(app.view, View::Later);
+        let ids: Vec<&str> = app
+            .later_threads()
+            .iter()
+            .map(|t| t.thread.id.as_str())
+            .collect();
+        assert_eq!(ids, ["t2", "t1"], "the snoozed one wakes first");
+        // g brings the one under the cursor back: aside off and snooze cleared
+        assert_eq!(
+            press(&mut app, "g"),
+            vec![Effect::Triage {
+                thread_id: "t2".into(),
+                change: TriageChange::BringBack
+            }]
+        );
+        // a snooze that has run out is back in the inbox
+        app.threads[1].triage.snoozed_until = Some(now - 5);
+        assert_eq!(app.today_threads().len(), 1);
+        assert_eq!(app.later_threads().len(), 1);
     }
 
     #[test]
@@ -4397,7 +4486,7 @@ mod tests {
             MachineState::Connected,
             vec![agent("local", "haste", "w1:p1", AgentStatus::Working, 1)],
         )]);
-        press(&mut app, "6");
+        press(&mut app, "7");
         assert_eq!(app.view, View::Agents);
         press(&mut app, "G");
         assert_eq!(app.agents_selected, 2);
@@ -4419,7 +4508,7 @@ mod tests {
         );
         // on the other tabs it cycles the tabs
         press(&mut app, "2");
-        for expected in [View::Calendar, View::Today] {
+        for expected in [View::Calendar, View::Later, View::Today] {
             app.handle_key(Key::Tab);
             assert_eq!(app.view, expected);
         }
@@ -4443,7 +4532,7 @@ mod tests {
     fn connectors_app() -> App {
         let mut app = approvals_app();
         app.set_connectors(connectors());
-        press(&mut app, "5");
+        press(&mut app, "6");
         assert_eq!(app.view, View::Connectors);
         app
     }

@@ -174,6 +174,9 @@ const MIGRATIONS: &[&str] = &[
         updated_at INTEGER NOT NULL
     );
     ",
+    // 9: senders the human has engaged with (mail read or answered). Marking a thread unread
+    // again must not make its sender a stranger.
+    "CREATE TABLE known_senders (address TEXT PRIMARY KEY);",
 ];
 
 /// Highest schema version this binary understands.

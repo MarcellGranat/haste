@@ -9,7 +9,7 @@ use haste_core::time::{from_civil, to_civil};
 const DAY: i64 = 86_400;
 const HOUR: i64 = 3_600;
 /// Hour of day used when only a date is given.
-const DEFAULT_HOUR: i64 = 9;
+const DEFAULT_HOUR: i64 = crate::inbox::DEFAULT_REMINDER_HOUR;
 
 /// What a text says about when, and how often.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -431,43 +431,43 @@ mod tests {
 
     #[test]
     fn plain_words_name_a_day() {
-        assert_eq!(due("call back tomorrow"), Some(at(2026, 11, 16, 9, 0)));
-        assert_eq!(due("holnap"), Some(at(2026, 11, 16, 9, 0)));
-        assert_eq!(due("today"), Some(at(2026, 11, 15, 9, 0)));
+        assert_eq!(due("call back tomorrow"), Some(at(2026, 11, 16, 10, 0)));
+        assert_eq!(due("holnap"), Some(at(2026, 11, 16, 10, 0)));
+        assert_eq!(due("today"), Some(at(2026, 11, 15, 10, 0)));
         assert_eq!(
             due("next week"),
-            Some(at(2026, 11, 16, 9, 0)),
+            Some(at(2026, 11, 16, 10, 0)),
             "the coming Monday"
         );
-        assert_eq!(due("jövő hét"), Some(at(2026, 11, 16, 9, 0)));
+        assert_eq!(due("jövő hét"), Some(at(2026, 11, 16, 10, 0)));
     }
 
     #[test]
     fn weekdays_are_the_next_one_in_both_languages() {
-        assert_eq!(due("Tue"), Some(at(2026, 11, 17, 9, 0)));
-        assert_eq!(due("kedd"), Some(at(2026, 11, 17, 9, 0)));
+        assert_eq!(due("Tue"), Some(at(2026, 11, 17, 10, 0)));
+        assert_eq!(due("kedd"), Some(at(2026, 11, 17, 10, 0)));
         assert_eq!(due("csütörtök 14:30"), Some(at(2026, 11, 19, 14, 30)));
         // today is a Sunday: "sunday" means the next one
-        assert_eq!(due("sunday"), Some(at(2026, 11, 22, 9, 0)));
+        assert_eq!(due("sunday"), Some(at(2026, 11, 22, 10, 0)));
     }
 
     #[test]
     fn day_and_month_work_in_either_order() {
         assert_eq!(
             due("2 Nov"),
-            Some(at(2027, 11, 2, 9, 0)),
+            Some(at(2027, 11, 2, 10, 0)),
             "already past this year"
         );
-        assert_eq!(due("Dec 24"), Some(at(2026, 12, 24, 9, 0)));
-        assert_eq!(due("dec. 24."), Some(at(2026, 12, 24, 9, 0)));
-        assert_eq!(due("3 szept"), Some(at(2027, 9, 3, 9, 0)));
-        assert_eq!(due("on 2026-11-20"), Some(at(2026, 11, 20, 9, 0)));
+        assert_eq!(due("Dec 24"), Some(at(2026, 12, 24, 10, 0)));
+        assert_eq!(due("dec. 24."), Some(at(2026, 12, 24, 10, 0)));
+        assert_eq!(due("3 szept"), Some(at(2027, 9, 3, 10, 0)));
+        assert_eq!(due("on 2026-11-20"), Some(at(2026, 11, 20, 10, 0)));
     }
 
     #[test]
     fn spans_count_from_now() {
-        assert_eq!(due("3d"), Some(at(2026, 11, 18, 9, 0)));
-        assert_eq!(due("1w"), Some(at(2026, 11, 22, 9, 0)));
+        assert_eq!(due("3d"), Some(at(2026, 11, 18, 10, 0)));
+        assert_eq!(due("1w"), Some(at(2026, 11, 22, 10, 0)));
         assert_eq!(due("2h"), Some(NOW + 2 * HOUR));
     }
 
@@ -496,26 +496,27 @@ mod tests {
         // "every Tuesday" is weekly and starts on the next Tuesday
         let w = parse("standup every tue", NOW, OFF);
         assert_eq!(w.repeat, rule(RepeatFreq::Week, 1));
-        assert_eq!(w.due, Some(at(2026, 11, 17, 9, 0)));
+        assert_eq!(w.due, Some(at(2026, 11, 17, 10, 0)));
     }
 
     #[test]
     fn counted_spans_ordinals_and_other_phrasings_are_understood() {
-        assert_eq!(due("in 3 days"), Some(at(2026, 11, 18, 9, 0)));
+        assert_eq!(due("in 3 days"), Some(at(2026, 11, 18, 10, 0)));
         assert_eq!(due("in 2 hours"), Some(NOW + 2 * HOUR));
         assert_eq!(due("30 minutes"), Some(NOW + 30 * 60));
-        assert_eq!(due("2 weeks"), Some(at(2026, 11, 29, 9, 0)));
-        assert_eq!(due("3 nap múlva"), Some(at(2026, 11, 18, 9, 0)));
-        assert_eq!(due("2 hét múlva"), Some(at(2026, 11, 29, 9, 0)));
-        assert_eq!(due("2nd nov"), Some(at(2027, 11, 2, 9, 0)));
-        assert_eq!(due("nov 21st"), Some(at(2026, 11, 21, 9, 0)));
-        assert_eq!(due("the 2nd of december"), Some(at(2026, 12, 2, 9, 0)));
-        assert_eq!(due("next month"), Some(at(2026, 12, 15, 9, 0)));
-        assert_eq!(due("tmrw"), Some(at(2026, 11, 16, 9, 0)));
+        assert_eq!(due("2 weeks"), Some(at(2026, 11, 29, 10, 0)));
+        assert_eq!(due("3 nap múlva"), Some(at(2026, 11, 18, 10, 0)));
+        assert_eq!(due("2 hét múlva"), Some(at(2026, 11, 29, 10, 0)));
+        assert_eq!(due("2nd nov"), Some(at(2027, 11, 2, 10, 0)));
+        assert_eq!(due("nov 21st"), Some(at(2026, 11, 21, 10, 0)));
+        assert_eq!(due("the 2nd of december"), Some(at(2026, 12, 2, 10, 0)));
+        assert_eq!(due("next month"), Some(at(2026, 12, 15, 10, 0)));
+        assert_eq!(due("tmrw"), Some(at(2026, 11, 16, 10, 0)));
         assert_eq!(due("tonight"), Some(at(2026, 11, 15, 18, 0)));
+        // the word morning means 9:00, the default without a time is 10:00
         assert_eq!(due("friday morning"), Some(at(2026, 11, 20, 9, 0)));
         assert_eq!(due("tomorrow evening"), Some(at(2026, 11, 16, 18, 0)));
-        assert_eq!(due("hétfőn"), Some(at(2026, 11, 16, 9, 0)));
+        assert_eq!(due("hétfőn"), Some(at(2026, 11, 16, 10, 0)));
         assert_eq!(due("pénteken 10:00"), Some(at(2026, 11, 20, 10, 0)));
         let rule = |t: &str| parse(t, NOW, OFF).repeat;
         assert_eq!(
@@ -561,7 +562,7 @@ mod tests {
         assert_eq!(due("tomorrow 9"), Some(at(2026, 11, 16, 9, 0)));
         assert_eq!(due("meet at 17"), Some(at(2026, 11, 15, 17, 0)));
         // a day and a month still win over an hour
-        assert_eq!(due("Tue 10 nov"), Some(at(2027, 11, 10, 9, 0)));
+        assert_eq!(due("Tue 10 nov"), Some(at(2027, 11, 10, 10, 0)));
         // no day word: a number is just a number
         assert_eq!(due("room 10"), None);
     }

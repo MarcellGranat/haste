@@ -2902,7 +2902,7 @@ mod tests {
         };
         assert_eq!(
             task.due,
-            Some(haste_core::time::from_civil(2099, 3, 4, 9, 0))
+            Some(haste_core::time::from_civil(2099, 3, 4, 10, 0))
         );
         press(&mut app, "t");
         assert!(app.handle_key(Key::Esc).is_none());

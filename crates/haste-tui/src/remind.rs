@@ -512,7 +512,7 @@ mod tests {
         assert_eq!(task.title, "Quarterly plan");
         assert_eq!(
             task.due,
-            Some(at(16, 9, 0)),
+            Some(at(16, 10, 0)),
             "tomorrow 09:00 without a date in the words"
         );
         assert_eq!(
@@ -531,7 +531,7 @@ mod tests {
         assert_eq!(f.field, Field::Date);
         assert_eq!(
             f.due,
-            Some(at(17, 9, 0)),
+            Some(at(17, 10, 0)),
             "the date was read from the words"
         );
     }
@@ -557,7 +557,7 @@ mod tests {
         assert!(f.due_from_title);
         let shown: Vec<&str> = f.marks.iter().map(|(s, e)| &f.title[*s..*e]).collect();
         assert_eq!(shown, ["3 days"]);
-        assert_eq!(f.due, Some(at(18, 9, 0)));
+        assert_eq!(f.due, Some(at(18, 10, 0)));
         // a half-typed phrase says nothing yet, and what the words gave goes when they do
         type_text(&mut f, " every");
         assert_eq!(f.repeat, None);
@@ -725,7 +725,7 @@ mod tests {
         assert_eq!(task.reminder_id.as_deref(), Some("r1"));
         assert_eq!(task.tags_before, vec!["work".to_owned()]);
         assert_eq!(task.title, "Pay rent tomorrow");
-        assert_eq!(task.due, Some(at(16, 9, 0)));
+        assert_eq!(task.due, Some(at(16, 10, 0)));
         assert_eq!(task.notes, "bring ID");
         assert!(task.thread_id.is_none());
     }

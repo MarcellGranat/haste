@@ -10,7 +10,7 @@ pub const AGENDA_DAYS: i64 = 7;
 /// Longest snooze accepted.
 pub const MAX_SNOOZE_DAYS: i64 = 365;
 /// Hour of day (local time) used for "morning" and for a reminder given only a date.
-pub const DEFAULT_REMINDER_HOUR: i64 = 9;
+pub const DEFAULT_REMINDER_HOUR: i64 = 10;
 /// Rows of the inbox pane on the Today tab; longer lists scroll.
 pub const INBOX_ROWS: usize = 25;
 /// How far ahead "later" is.
@@ -208,13 +208,13 @@ pub fn day_start(now: i64, off: i64) -> i64 {
     local - local.rem_euclid(DAY) - off
 }
 
-/// Tomorrow at 09:00 local.
+/// Tomorrow at the default reminder hour (10:00) local.
 #[must_use]
 pub fn tomorrow_morning(now: i64, off: i64) -> i64 {
     day_start(now, off) + DAY + DEFAULT_REMINDER_HOUR * HOUR
 }
 
-/// The coming Monday at 09:00 local (a Monday itself gives the next one).
+/// The coming Monday at the default reminder hour local (a Monday itself gives the next one).
 #[must_use]
 pub fn next_week(now: i64, off: i64) -> i64 {
     // 1970-01-01 was a Thursday, so Monday is 3 days later: (days + 3) % 7 == 0.
@@ -505,10 +505,10 @@ mod tests {
         let off = 3600; // CET
         let now = from_civil(2026, 11, 12, 14, 0); // 15:00 local
         assert_eq!(parse_due("", now, off), Ok(None));
-        // tomorrow 09:00 local is 08:00 UTC
+        // tomorrow 10:00 local is 09:00 UTC
         assert_eq!(
             parse_due("tomorrow", now, off),
-            Ok(Some(from_civil(2026, 11, 13, 8, 0)))
+            Ok(Some(from_civil(2026, 11, 13, 9, 0)))
         );
         assert_eq!(
             parse_due("today 17:30", now, off),
@@ -534,15 +534,15 @@ mod tests {
         let off = 3600;
         // Thursday 12 Nov 2026, 23:30 local (22:30 UTC): "tomorrow" is Friday the 13th
         let now = from_civil(2026, 11, 12, 22, 30);
-        assert_eq!(tomorrow_morning(now, off), from_civil(2026, 11, 13, 8, 0));
-        // next week = Monday 16 Nov 09:00 local
-        assert_eq!(next_week(now, off), from_civil(2026, 11, 16, 8, 0));
+        assert_eq!(tomorrow_morning(now, off), from_civil(2026, 11, 13, 9, 0));
+        // next week = Monday 16 Nov 10:00 local
+        assert_eq!(next_week(now, off), from_civil(2026, 11, 16, 9, 0));
         // on a Monday it is the Monday after
         let monday = from_civil(2026, 11, 16, 10, 0);
-        assert_eq!(next_week(monday, off), from_civil(2026, 11, 23, 8, 0));
+        assert_eq!(next_week(monday, off), from_civil(2026, 11, 23, 9, 0));
         // on a Sunday it is the next day
         let sunday = from_civil(2026, 11, 15, 10, 0);
-        assert_eq!(next_week(sunday, off), from_civil(2026, 11, 16, 8, 0));
+        assert_eq!(next_week(sunday, off), from_civil(2026, 11, 16, 9, 0));
         assert_eq!(later(now), now + 3 * 3600);
     }
 
@@ -553,7 +553,7 @@ mod tests {
         assert_eq!(suggest_due("Lunch", now, off), tomorrow_morning(now, off));
         assert_eq!(
             suggest_due("Report due 2026-11-20 please", now, off),
-            from_civil(2026, 11, 20, 9, 0)
+            from_civil(2026, 11, 20, 10, 0)
         );
         assert_eq!(
             suggest_due("Old 2026-01-01", now, off),
@@ -576,7 +576,7 @@ mod tests {
         }
         assert_eq!(
             suggest_due("Találkozó 2099-03-04", now, off),
-            from_civil(2099, 3, 4, 9, 0)
+            from_civil(2099, 3, 4, 10, 0)
         );
     }
 

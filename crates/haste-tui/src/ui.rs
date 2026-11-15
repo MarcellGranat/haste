@@ -1202,6 +1202,12 @@ fn todo_items<'a>(app: &App, todos: &[&haste_proto::ReminderView], now: i64) -> 
                     Style::new().fg(theme::TEXT),
                 ),
             ];
+            if !r.tags.is_empty() {
+                spans.push(Span::styled(
+                    format!("  #{}", r.tags.join(" #")),
+                    Style::new().fg(theme::MAUVE),
+                ));
+            }
             if app.is_tomorrow(r) {
                 spans.push(Span::styled(
                     "  tomorrow",
@@ -1952,12 +1958,18 @@ mod tests {
         };
         let now = haste_core::time::now_secs();
         let mut app = App::new();
+        let mut soon = todo("soon", now + 60);
+        soon.tags = vec!["work".into(), "haste".into()];
         app.set_reminder_list(vec![
-            todo("soon", now + 60),
+            soon,
             todo("next", now + 86_400),
             todo("far", now + 5 * 86_400),
         ]);
         let text = render(&app);
+        assert!(
+            text.contains("#work #haste"),
+            "labels show on the row: {text}"
+        );
         assert!(text.contains("task-soon") && text.contains("task-next"));
         assert!(text.contains("tomorrow"), "{text}");
         assert!(!text.contains("task-far"), "later ones are not on Today");

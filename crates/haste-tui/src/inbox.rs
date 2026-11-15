@@ -24,8 +24,47 @@ pub fn is_mail(source: &str) -> bool {
     matches!(source, "gmail" | "icloud")
 }
 
-/// A sender for a list row: the display name when the identifier is `Name <addr>`, else the part
-/// before the `@`, else the whole identifier.
+/// Local parts that name no one (a robot address): the domain says more.
+const ROBOT_LOCAL_PARTS: [&str; 12] = [
+    "noreply",
+    "no-reply",
+    "no_reply",
+    "donotreply",
+    "do-not-reply",
+    "do_not_reply",
+    "notification",
+    "notifications",
+    "notify",
+    "mailer-daemon",
+    "postmaster",
+    "bounce",
+];
+
+/// The name of an address's domain without its ending: `accounts.google.com` is `google`,
+/// `news.shop.co.uk` is `shop`. Empty when the address has no domain.
+fn domain_name(address: &str) -> String {
+    let domain = address.rsplit_once('@').map_or("", |(_, d)| d).trim();
+    let mut labels: Vec<&str> = domain.split('.').filter(|l| !l.is_empty()).collect();
+    if labels.len() > 1 {
+        let second_level = matches!(
+            labels[labels.len() - 2],
+            "co" | "com" | "org" | "net" | "ac" | "gov"
+        ) && labels[labels.len() - 1].len() == 2;
+        labels.truncate(
+            labels.len()
+                - if second_level && labels.len() > 2 {
+                    2
+                } else {
+                    1
+                },
+        );
+    }
+    labels.last().map(|l| (*l).to_owned()).unwrap_or_default()
+}
+
+/// A sender for a list row or a message header: the display name when the identifier is
+/// `Name <addr>`; for a robot address (`noreply@…`) the domain without its ending; else the
+/// part before the `@`, else the whole identifier.
 #[must_use]
 pub fn short_sender(id: &str) -> String {
     let id = id.trim();
@@ -36,7 +75,28 @@ pub fn short_sender(id: &str) -> String {
         }
     }
     let bare = id.trim_matches(|c| c == '<' || c == '>');
-    bare.split('@').next().unwrap_or(bare).to_owned()
+    let local = bare.split('@').next().unwrap_or(bare);
+    if bare.contains('@') && ROBOT_LOCAL_PARTS.contains(&local.to_lowercase().as_str()) {
+        let domain = domain_name(bare);
+        if !domain.is_empty() {
+            return domain;
+        }
+    }
+    local.to_owned()
+}
+
+/// A message header's sender: the domain name for a robot address, otherwise the identifier as
+/// it is (the full address, so it can be told apart).
+#[must_use]
+pub fn short_sender_or_address(id: &str) -> String {
+    let short = short_sender(id);
+    let bare = id.trim().trim_matches(|c| c == '<' || c == '>');
+    let local = bare.split('@').next().unwrap_or(bare);
+    if bare.contains('@') && ROBOT_LOCAL_PARTS.contains(&local.to_lowercase().as_str()) {
+        short
+    } else {
+        id.to_owned()
+    }
 }
 
 /// What the mute list is matched against: the thread's senders, and for a chat also its name.
@@ -202,6 +262,29 @@ pub fn suggest_due(subject: &str, now: i64, off: i64) -> i64 {
 pub fn stamp(secs: i64, off: i64) -> String {
     let (y, m, d, h, mi) = to_civil(secs + off);
     format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}")
+}
+
+/// A message time that reads naturally while it is recent: `12 seconds ago`, `5 minutes ago`,
+/// `3 hours ago`, then `Fri 12:30` up to a week back, then the full date and time. A time in
+/// the future (a clock that disagrees) is shown as the full date and time.
+#[must_use]
+pub fn smart_stamp(secs: i64, now: i64, off: i64) -> String {
+    const NAMES: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    let age = now - secs;
+    let plural = |n: i64, unit: &str| format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" });
+    match age {
+        a if a < 0 => stamp(secs, off),
+        a if a < 60 => plural(a, "second"),
+        a if a < 3_600 => plural(a / 60, "minute"),
+        a if a < 86_400 => plural(a / 3_600, "hour"),
+        a if a < 7 * 86_400 => {
+            let local = secs + off;
+            let (_, _, _, h, mi) = to_civil(local);
+            let day = usize::try_from(local.div_euclid(86_400).rem_euclid(7)).unwrap_or(0);
+            format!("{} {h:02}:{mi:02}", NAMES[day])
+        }
+        _ => stamp(secs, off),
+    }
 }
 
 /// `Thu 12 Nov` for the local day containing `secs`.
@@ -473,6 +556,29 @@ mod tests {
         assert_eq!(short_sender("Ada Lovelace <ada@x.org>"), "Ada Lovelace");
         assert_eq!(short_sender("ada@x.org"), "ada");
         assert_eq!(short_sender("+36301234567"), "+36301234567");
+        assert_eq!(short_sender("noreply@accounts.google.com"), "google");
+        assert_eq!(short_sender("No-Reply@shop.co.uk"), "shop");
+        assert_eq!(short_sender("<donotreply@bank.hu>"), "bank");
+        assert_eq!(short_sender("notifications@github.com"), "github");
+        assert_eq!(short_sender("ana@x.org"), "ana");
+    }
+
+    #[test]
+    fn recent_times_read_naturally() {
+        let now = from_civil(2026, 11, 15, 14, 0); // a Sunday
+        assert_eq!(smart_stamp(now - 1, now, 0), "1 second ago");
+        assert_eq!(smart_stamp(now - 45, now, 0), "45 seconds ago");
+        assert_eq!(smart_stamp(now - 120, now, 0), "2 minutes ago");
+        assert_eq!(smart_stamp(now - 3 * 3_600, now, 0), "3 hours ago");
+        assert_eq!(
+            smart_stamp(from_civil(2026, 11, 13, 12, 30), now, 0),
+            "Fri 12:30"
+        );
+        assert_eq!(
+            smart_stamp(from_civil(2026, 11, 1, 9, 5), now, 0),
+            "2026-11-01 09:05"
+        );
+        assert_eq!(smart_stamp(now + 100, now, 0), stamp(now + 100, 0));
     }
 
     #[test]

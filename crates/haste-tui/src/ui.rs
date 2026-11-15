@@ -950,6 +950,7 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
             selected: reader.selected,
             own: reader.own.as_deref(),
             tz_offset: app.tz_offset,
+            now: haste_core::time::now_secs(),
             expanded: &reader.expanded,
         },
     );

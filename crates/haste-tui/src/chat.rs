@@ -242,6 +242,8 @@ pub struct Layout<'a> {
     /// The account's own address (mail), compared with the sender.
     pub own: Option<&'a str>,
     pub tz_offset: i64,
+    /// The current time (Unix seconds), for recent times such as `3 hours ago`.
+    pub now: i64,
     /// Messages (by id) shown in full, with their quoted history and recipient lists open.
     pub expanded: &'a std::collections::HashSet<String>,
 }
@@ -450,11 +452,19 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
         let chips: Vec<String> = files.iter().map(|f| format!("◫ {f}")).collect();
         let who = if own {
             "you".to_owned()
+        } else if inbox::is_mail(&m.source.as_name()) {
+            inbox::short_sender_or_address(
+                &inbox::sanitize(m.sender_identifier.as_deref().unwrap_or("unknown sender"))
+                    .replace('\n', " "),
+            )
         } else {
             inbox::sanitize(m.sender_identifier.as_deref().unwrap_or("unknown sender"))
                 .replace('\n', " ")
         };
-        let header = format!(" {who} · {} ", inbox::stamp(m.sent_at, l.tz_offset));
+        let header = format!(
+            " {who} · {} ",
+            inbox::smart_stamp(m.sent_at, l.now, l.tz_offset)
+        );
         let inner = body
             .iter()
             .map(|(s, _)| inbox::width(s))
@@ -605,6 +615,7 @@ mod tests {
                 selected: 0,
                 own: None,
                 tz_offset: 0,
+                now: 0,
                 expanded: &std::collections::HashSet::new(),
             },
         );
@@ -668,6 +679,7 @@ mod tests {
                 selected: 0,
                 own: None,
                 tz_offset: 0,
+                now: 0,
                 expanded: &std::collections::HashSet::new(),
             },
         );
@@ -764,6 +776,7 @@ mod tests {
                 selected: 0,
                 own: None,
                 tz_offset: 0,
+                now: 0,
                 expanded: &std::collections::HashSet::new(),
             },
         );

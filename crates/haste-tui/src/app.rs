@@ -137,7 +137,12 @@ pub struct Preview {
     pub name: String,
     pub lines: Vec<String>,
     pub scroll: usize,
+    /// A picture, drawn as half-block art instead of `lines`.
+    pub image: Option<crate::art::Image>,
 }
+
+/// Longest line of a text preview; longer ones are wrapped (a comfortable reading width).
+pub const PREVIEW_WIDTH: usize = 100;
 
 /// Lines a preview scrolls on a page key.
 pub const PREVIEW_PAGE: usize = 15;
@@ -1579,14 +1584,46 @@ impl App {
 
     /// The text of an attachment arrived: show it in a popup.
     pub fn show_preview(&mut self, name: &str, text: &str) {
-        let lines: Vec<String> = inbox::sanitize(text)
-            .lines()
-            .map(|l| l.trim_end().to_owned())
-            .collect();
+        // a form feed is a page (or slide) break: shown as a rule with the page number
+        let mut lines: Vec<String> = Vec::new();
+        for (n, page) in text.split('\u{c}').enumerate() {
+            if n > 0 && !page.trim().is_empty() && !page.trim_start().starts_with("── slide") {
+                lines.push(String::new());
+                lines.push(format!("── page {} ──", n + 1));
+                lines.push(String::new());
+            } else if n > 0 {
+                lines.push(String::new());
+            }
+            for l in inbox::sanitize(page).lines() {
+                let l = l.trim_end();
+                if inbox::width(l) > PREVIEW_WIDTH {
+                    let indent: String = l.chars().take_while(|c| *c == ' ').collect();
+                    lines.extend(
+                        inbox::wrap(l.trim_start(), PREVIEW_WIDTH - indent.len().min(40))
+                            .into_iter()
+                            .map(|w| format!("{indent}{w}")),
+                    );
+                } else {
+                    lines.push(l.to_owned());
+                }
+            }
+        }
         self.preview = Some(Preview {
             name: inbox::sanitize(name).replace('\n', " "),
             lines,
             scroll: 0,
+            image: None,
+        });
+        self.mode = Mode::Preview;
+    }
+
+    /// A picture arrived: show it as terminal art.
+    pub fn show_image(&mut self, name: &str, image: crate::art::Image) {
+        self.preview = Some(Preview {
+            name: inbox::sanitize(name).replace('\n', " "),
+            lines: Vec::new(),
+            scroll: 0,
+            image: Some(image),
         });
         self.mode = Mode::Preview;
     }
@@ -3097,6 +3134,17 @@ mod tests {
         press(&mut app, "+");
         assert!(press(&mut app, "0").is_empty());
         assert_eq!(app.mode, Mode::Read);
+    }
+
+    #[test]
+    fn a_preview_marks_pages_and_wraps_long_lines() {
+        let mut app = inbox_app();
+        let long = "word ".repeat(60);
+        app.show_preview("f.pdf", &format!("one\n{long}\u{c}two"));
+        let p = app.preview.as_ref().unwrap();
+        assert!(p.lines.iter().any(|l| l == "── page 2 ──"));
+        assert!(p.lines.iter().all(|l| inbox::width(l) <= PREVIEW_WIDTH));
+        assert!(p.image.is_none());
     }
 
     #[test]

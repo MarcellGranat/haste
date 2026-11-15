@@ -87,6 +87,12 @@ pub fn panel(title: &str) -> Block<'_> {
         .title(title)
 }
 
+/// A picture's own pixel colour (the one place colours do not come from the palette).
+#[must_use]
+pub fn pixel(rgb: [u8; 3]) -> Color {
+    Color::Rgb(rgb[0], rgb[1], rgb[2])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

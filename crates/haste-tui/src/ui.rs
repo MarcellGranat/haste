@@ -3,7 +3,10 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Wrap,
+};
 use ratatui::Frame;
 
 use crate::app::{summary, AgentRow, App, Mode, Row, TodayFocus, View};
@@ -371,7 +374,8 @@ fn draw_attachments(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 }
 
-/// An attachment's text in a large popup.
+/// An attachment in a large popup: a picture as half-block art, or text in a reading column
+/// with page rules, a scroll bar and the place in the file.
 fn draw_preview(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(p) = &app.preview else {
         return;
@@ -380,24 +384,78 @@ fn draw_preview(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let h = area.height.saturating_sub(4).max(8);
     let rect = centered(area, w, h);
     frame.render_widget(Clear, rect);
+    if let Some(img) = &p.image {
+        let title = format!(
+            " {} · {}x{} px · Esc closes ",
+            p.name, img.width, img.height
+        );
+        let block = theme::panel(&title).border_style(pane_border(true));
+        let inner = block.inner(rect);
+        frame.render_widget(block, rect);
+        let cells = img.fit(usize::from(inner.width), usize::from(inner.height));
+        let top = usize::from(inner.height).saturating_sub(cells.len()) / 2;
+        let lines: Vec<Line<'_>> = std::iter::repeat_n(Line::default(), top)
+            .chain(cells.iter().map(|row| {
+                let pad = usize::from(inner.width).saturating_sub(row.len()) / 2;
+                let mut spans = vec![Span::raw(" ".repeat(pad))];
+                spans.extend(row.iter().map(|(up, down)| {
+                    Span::styled(
+                        "▀",
+                        Style::new().fg(theme::pixel(*up)).bg(theme::pixel(*down)),
+                    )
+                }));
+                Line::from(spans)
+            }))
+            .collect();
+        frame.render_widget(Paragraph::new(lines), inner);
+        return;
+    }
+    let total = p.lines.len().max(1);
+    let percent = ((p.scroll + 1) * 100 / total).min(100);
     let title = format!(
-        " {} · line {}/{} · j/k scroll · Space/b page · Esc closes ",
+        " {} · line {}/{} · {percent}% · j/k scroll · Space/b page · g/G ends · Esc closes ",
         p.name,
         p.scroll + 1,
-        p.lines.len().max(1)
+        total
     );
     let block = theme::panel(&title).border_style(pane_border(true));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     let rows = usize::from(inner.height);
+    // a reading column, centred, with room for the scroll bar
+    let col = usize::from(inner.width.saturating_sub(2)).min(crate::app::PREVIEW_WIDTH + 2);
+    let column = Rect {
+        x: inner.x
+            + u16::try_from((usize::from(inner.width).saturating_sub(col + 2)) / 2).unwrap_or(0),
+        y: inner.y,
+        width: u16::try_from(col).unwrap_or(inner.width),
+        height: inner.height,
+    };
     let lines: Vec<Line<'_>> = p
         .lines
         .iter()
         .skip(p.scroll)
         .take(rows)
-        .map(|l| Line::from(Span::styled(l.clone(), Style::new().fg(theme::TEXT))))
+        .map(|l| {
+            if l.starts_with("── ") {
+                Line::from(Span::styled(
+                    l.clone(),
+                    Style::new()
+                        .fg(theme::LAVENDER)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(Span::styled(l.clone(), Style::new().fg(theme::TEXT)))
+            }
+        })
         .collect();
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines), column);
+    let mut bar = ScrollbarState::new(total.saturating_sub(rows)).position(p.scroll);
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight),
+        inner,
+        &mut bar,
+    );
 }
 
 fn draw_labels(frame: &mut Frame<'_>, app: &App, area: Rect) {

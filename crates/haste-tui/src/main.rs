@@ -770,8 +770,8 @@ fn edit_external(terminal: &mut ratatui::DefaultTerminal, app: &mut App, text: &
 
 /// A reply written in the form becomes a draft proposal, approved right away because the human
 /// wrote it. Sending is still its own step in Approvals, with the recipient check and countdown.
-/// Fetch one attachment into the daemon's private preview folder, read its text with the system
-/// tools (PDF and Word only), show it in a popup, and delete the file again.
+/// Fetch one attachment into the daemon's private preview folder, read its text or picture with the
+/// system tools, show it in a popup, and delete the file again.
 fn preview_attachment(app: &mut App, client: &Client, message_id: &str, index: usize) {
     let Some(file) = app
         .attach
@@ -781,7 +781,8 @@ fn preview_attachment(app: &mut App, client: &Client, message_id: &str, index: u
         return;
     };
     let Some(kind) = haste_tui::extract::kind_of(&file.name, &file.mime) else {
-        app.status = "no preview for this type (PDF and Word only): d downloads it".into();
+        app.status =
+            "no preview for this type (pictures, PDF, Word, PowerPoint): d downloads it".into();
         return;
     };
     let saved = client.call(RequestBody::AttachmentSave {
@@ -796,6 +797,15 @@ fn preview_attachment(app: &mut App, client: &Client, message_id: &str, index: u
         return;
     };
     let path = std::path::PathBuf::from(path);
+    if kind == haste_tui::extract::Kind::Image {
+        let image = haste_tui::extract::load_image(&path);
+        let _ = std::fs::remove_file(&path);
+        match image {
+            Ok(image) => app.show_image(&file.name, image),
+            Err(e) => app.status = e,
+        }
+        return;
+    }
     let text = haste_tui::extract::extract_text(&path, kind);
     let _ = std::fs::remove_file(&path);
     match text {

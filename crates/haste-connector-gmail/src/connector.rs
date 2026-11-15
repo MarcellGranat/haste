@@ -227,13 +227,44 @@ impl GmailConnector {
                 "this attachment was stored before it could be fetched: run `haste connector resync gmail`".into(),
             ));
         }
-        self.client
-            .get_attachment(
-                &request.message_external_id,
-                &request.reference,
-                haste_core::connector::MAX_FETCH_ATTACHMENT_BYTES,
-            )
-            .await
+        let max = haste_core::connector::MAX_FETCH_ATTACHMENT_BYTES;
+        let first = self
+            .client
+            .get_attachment(&request.message_external_id, &request.reference, max)
+            .await;
+        // Gmail attachment ids are not stable: one stored earlier can be refused (400, or 404).
+        // Read the message again, find the same file by name, and try once with its fresh id.
+        let stale =
+            matches!(&first, Err(ConnectorError::Other(m)) if m == "http 400" || m == "http 404");
+        if !stale || request.name.is_empty() || request.thread_external_id.is_empty() {
+            return first;
+        }
+        let Some(thread) = self.client.get_thread(&request.thread_external_id).await? else {
+            return first;
+        };
+        let Some(payload) = thread
+            .messages
+            .iter()
+            .find(|m| m.id == request.message_external_id)
+            .and_then(|m| m.payload.as_ref())
+        else {
+            return first;
+        };
+        let mut found = Vec::new();
+        fresh_references(payload, &request.name, &mut found);
+        let fresh = found
+            .iter()
+            .find(|(bytes, _)| *bytes == request.bytes)
+            .or_else(|| found.first())
+            .map(|(_, id)| id.clone());
+        match fresh {
+            Some(id) if id != request.reference => {
+                self.client
+                    .get_attachment(&request.message_external_id, &id, max)
+                    .await
+            }
+            _ => first,
+        }
     }
 
     async fn archive(&self, target: &ArchiveTarget) -> Result<(), ConnectorError> {
@@ -409,5 +440,55 @@ impl Connector for GmailConnector {
         draft: &'a DraftToSend,
     ) -> BoxFuture<'a, Result<DraftReceipt, ConnectorError>> {
         Box::pin(self.draft(draft))
+    }
+}
+
+/// `(size, attachment id)` of every part named `name`, in message order.
+fn fresh_references(part: &ApiPart, name: &str, out: &mut Vec<(u64, String)>) {
+    if part.filename == name {
+        if let Some(id) = &part.body.attachment_id {
+            out.push((part.body.size, id.clone()));
+        }
+    }
+    for p in &part.parts {
+        fresh_references(p, name, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::{ApiBody, ApiPart};
+
+    fn file(name: &str, size: u64, id: &str) -> ApiPart {
+        ApiPart {
+            filename: name.into(),
+            body: ApiBody {
+                size,
+                attachment_id: Some(id.into()),
+                ..ApiBody::default()
+            },
+            ..ApiPart::default()
+        }
+    }
+
+    #[test]
+    fn a_stale_reference_is_found_again_by_file_name() {
+        let root = ApiPart {
+            parts: vec![
+                file("a.pdf", 10, "NEW1"),
+                ApiPart {
+                    parts: vec![file("b.pdf", 20, "NEW2"), file("a.pdf", 30, "NEW3")],
+                    ..ApiPart::default()
+                },
+            ],
+            ..ApiPart::default()
+        };
+        let mut found = Vec::new();
+        fresh_references(&root, "a.pdf", &mut found);
+        assert_eq!(
+            found,
+            vec![(10, "NEW1".to_owned()), (30, "NEW3".to_owned())]
+        );
     }
 }

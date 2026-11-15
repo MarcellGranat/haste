@@ -78,6 +78,8 @@ pub struct AttachmentRequest {
     pub reference: String,
     /// The size the stored line says (a hint for the fetch; the cap below always applies).
     pub bytes: u64,
+    /// The file name the stored line says, to find the file again when its reference went stale.
+    pub name: String,
 }
 
 /// Which thread to read the earlier history of: what the daemon already stores of it.

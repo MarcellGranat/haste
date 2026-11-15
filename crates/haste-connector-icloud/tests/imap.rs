@@ -206,6 +206,7 @@ async fn an_attachment_is_listed_with_its_part_and_fetched_on_demand_with_peek_o
             thread_external_id: String::new(),
             reference: lines[0].reference.clone().unwrap(),
             bytes: lines[0].bytes,
+            name: lines[0].name.clone(),
         })
         .await
         .unwrap();

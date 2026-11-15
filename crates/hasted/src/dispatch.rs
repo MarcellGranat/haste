@@ -1728,6 +1728,7 @@ fn attachment_save(
         thread_external_id: thread.external_id.clone(),
         reference: line.reference.clone().unwrap_or_default(),
         bytes: line.bytes,
+        name: line.name.clone(),
     };
     let guard = Guarded {
         connector: connector.as_ref(),

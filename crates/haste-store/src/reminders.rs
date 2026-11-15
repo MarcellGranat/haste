@@ -595,6 +595,44 @@ impl Store {
         })
     }
 
+    /// How long a task takes on the calendar, here only (`None` goes back to the default).
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn set_reminder_duration(
+        &self,
+        external_id: &str,
+        minutes: Option<u32>,
+    ) -> StoreResult<()> {
+        let external_id = external_id.to_owned();
+        self.write(move |conn| {
+            match minutes {
+                Some(m) => conn.execute(
+                    "INSERT INTO reminder_durations (external_id, minutes) VALUES (?1, ?2) \
+                     ON CONFLICT(external_id) DO UPDATE SET minutes = ?2",
+                    params![external_id, m],
+                )?,
+                None => conn.execute(
+                    "DELETE FROM reminder_durations WHERE external_id = ?1",
+                    [&external_id],
+                )?,
+            };
+            Ok(())
+        })
+    }
+
+    /// The set durations (minutes) by the Reminders item's external id.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn reminder_durations(&self) -> StoreResult<std::collections::HashMap<String, u32>> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare("SELECT external_id, minutes FROM reminder_durations")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))?;
+            Ok(rows.collect::<Result<std::collections::HashMap<_, _>, _>>()?)
+        })
+    }
+
     /// The complete succeeded: mark the mirrored row done (version moves) and the proposal sent.
     ///
     /// # Errors

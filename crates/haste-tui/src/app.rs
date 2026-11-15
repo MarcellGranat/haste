@@ -73,6 +73,9 @@ pub enum TriageChange {
     SnoozeUntil(i64),
 }
 
+/// How long an all-day event lasts when it is given a time here.
+const DEFAULT_EVENT_MINUTES: i64 = 120;
+
 /// Most turns of one repeating task looked at when filling the agenda.
 const MAX_OCCURRENCES: i64 = 400;
 
@@ -274,6 +277,11 @@ pub enum Effect {
         thread_id: String,
         read: bool,
     },
+    /// How long a task takes on the calendar, here only.
+    SetDuration {
+        reminder_id: String,
+        minutes: u32,
+    },
     /// Move or resize a calendar event here only (`None` puts it back as Google has it).
     ShiftEvent {
         event_id: String,
@@ -430,6 +438,8 @@ pub enum Mode {
     RemindForm,
     /// The popup that moves or resizes a calendar event here only (`app.event_form`).
     EventEdit,
+    /// How long a task takes on the calendar (`app.task_duration`).
+    TaskDuration,
     /// The emoji keyboard, opened with Ctrl-e in a text field: a key types its emoji into the
     /// field of `back`, Esc goes back without one.
     Emoji {
@@ -475,6 +485,8 @@ pub struct App {
     pub remind: Option<Box<crate::remind::RemindForm>>,
     /// The event popup, while `Mode::EventEdit`.
     pub event_form: Option<Box<crate::eventedit::EventForm>>,
+    /// The duration popup while `Mode::TaskDuration`: reminder id, title, minutes.
+    pub task_duration: Option<(String, String, u32)>,
     /// Every known project label, offered in the reminder popup.
     pub known_labels: Vec<String>,
     /// The open label picker.
@@ -641,6 +653,7 @@ impl App {
             compose: None,
             remind: None,
             event_form: None,
+            task_duration: None,
             known_labels: Vec::new(),
             labeler: None,
             attach: None,
@@ -1362,6 +1375,7 @@ impl App {
             Mode::Snooze { thread_id, input } => self.key_snooze(key, thread_id, input),
             Mode::RemindForm => self.key_remind_form(key),
             Mode::EventEdit => self.key_event_edit(key),
+            Mode::TaskDuration => self.key_task_duration(key),
             Mode::Emoji { back } => self.key_emoji(key, *back),
             Mode::ReplyChoice { thread_id } => self.key_reply_choice(key, thread_id),
             Mode::Detail(_) => {
@@ -1499,6 +1513,7 @@ impl App {
             Key::Enter if thread_view => return self.open_selected(),
             Key::Enter if self.on_todos() => self.start_todo(),
             Key::Enter if self.view == View::Calendar => self.start_event_edit(),
+            Key::Char('d') if self.on_todos() => self.start_task_duration(),
             Key::Char('R') if self.view == View::Calendar => {
                 if let Some(e) = self.event_under_cursor().filter(|e| e.shifted) {
                     return Some(Effect::ShiftEvent {
@@ -1507,8 +1522,12 @@ impl App {
                     });
                 }
             }
-            Key::Char('h') if self.view == View::Calendar => self.calendar_day_step(false),
-            Key::Char('l') if self.view == View::Calendar => self.calendar_day_step(true),
+            Key::Char('h') | Key::Left if self.view == View::Calendar => {
+                self.calendar_day_step(false);
+            }
+            Key::Char('l') | Key::Right if self.view == View::Calendar => {
+                self.calendar_day_step(true);
+            }
             // a new TODO: the same popup as `t` on a mail, with nothing filled in
             Key::Char('c') if self.on_todos() => self.start_new_todo(),
             Key::Char('l') if thread_view => return self.start_labels(),
@@ -2694,6 +2713,49 @@ impl App {
         self.mode = Mode::RemindForm;
     }
 
+    /// `d` on a task: how long it takes on the calendar.
+    fn start_task_duration(&mut self) {
+        let Some(t) = self.todo_under_cursor() else {
+            return;
+        };
+        self.task_duration = Some((
+            t.reminder.id.clone(),
+            inbox::sanitize(&t.reminder.title).replace('\n', " "),
+            t.minutes,
+        ));
+        self.mode = Mode::TaskDuration;
+    }
+
+    /// Up and Down walk through 30 minutes, 1, 2, 3 and 4 hours (no more); Enter keeps it.
+    fn key_task_duration(&mut self, key: Key) -> Option<Effect> {
+        let (id, _, minutes) = self.task_duration.as_mut()?;
+        let steps = haste_proto::TASK_MINUTES;
+        let at = steps.iter().position(|m| m == minutes).unwrap_or(0);
+        match key {
+            Key::Up | Key::Char('k' | '+') | Key::Right | Key::Char('l') => {
+                *minutes = steps[(at + 1).min(steps.len() - 1)];
+            }
+            Key::Down | Key::Char('j' | '-') | Key::Left | Key::Char('h') => {
+                *minutes = steps[at.saturating_sub(1)];
+            }
+            Key::Enter => {
+                let effect = Effect::SetDuration {
+                    reminder_id: id.clone(),
+                    minutes: *minutes,
+                };
+                self.task_duration = None;
+                self.mode = Mode::Normal;
+                return Some(effect);
+            }
+            Key::Esc => {
+                self.task_duration = None;
+                self.mode = Mode::Normal;
+            }
+            _ => {}
+        }
+        None
+    }
+
     /// The event under the cursor on the Calendar tab.
     fn event_under_cursor(&self) -> Option<&EventView> {
         match self.agenda().get(self.calendar_selected) {
@@ -2707,15 +2769,19 @@ impl App {
         let Some(e) = self.event_under_cursor() else {
             return;
         };
-        if e.event.all_day {
-            self.status = "an all-day event has no time to move".into();
-            return;
-        }
+        // an all-day event is given a time here: the default hour, for two hours
+        let (start, end) = if e.event.all_day {
+            let date = e.event.start_at.div_euclid(86_400) * 86_400;
+            let start = date + inbox::DEFAULT_REMINDER_HOUR * 3_600 - self.tz_offset;
+            (start, start + DEFAULT_EVENT_MINUTES * 60)
+        } else {
+            (e.event.start_at, e.event.end_at)
+        };
         let form = crate::eventedit::EventForm::new(
             &e.event.id,
             &inbox::sanitize(&e.event.title).replace('\n', " "),
-            e.event.start_at,
-            e.event.end_at,
+            start,
+            end,
             e.shifted,
             self.tz_offset,
         );
@@ -2737,26 +2803,36 @@ impl App {
         times.map(|times| Effect::ShiftEvent { event_id, times })
     }
 
-    /// `h` and `l` on the Calendar tab: the first item of the previous or next day that has any.
+    /// `h`/`l` or Left/Right on the Calendar tab: the previous or next day that has anything,
+    /// on the item closest to the same hour of the day.
     fn calendar_day_step(&mut self, forward: bool) {
         let off = self.tz_offset;
-        let days: Vec<i64> = self
-            .agenda()
+        let agenda = self.agenda();
+        let days: Vec<i64> = agenda
             .iter()
             .map(|r| inbox::day_start(r.at(), off))
             .collect();
         let Some(here) = days.get(self.calendar_selected).copied() else {
             return;
         };
-        let target = if forward {
-            days.iter().position(|d| *d > here)
-        } else {
-            days.iter()
-                .rev()
-                .find(|d| **d < here)
-                .and_then(|d| days.iter().position(|x| x == d))
+        // an all-day item has no hour: it counts as the start of the day
+        let hour_of = |r: &AgendaItem<'_>| match r {
+            AgendaItem::Event(e) if e.event.all_day => 0,
+            other => (other.at() + off).rem_euclid(86_400),
         };
-        if let Some(i) = target {
+        let wanted = hour_of(&agenda[self.calendar_selected]);
+        let target_day = if forward {
+            days.iter().copied().filter(|d| *d > here).min()
+        } else {
+            days.iter().copied().filter(|d| *d < here).max()
+        };
+        let Some(day) = target_day else {
+            return;
+        };
+        let best = (0..agenda.len())
+            .filter(|i| days[*i] == day)
+            .min_by_key(|i| ((hour_of(&agenda[*i]) - wanted).abs(), *i));
+        if let Some(i) = best {
             self.calendar_selected = i;
         }
     }
@@ -3595,6 +3671,7 @@ mod tests {
             },
             tags: vec![],
             repeat: None,
+            minutes: 30,
         }
     }
 
@@ -4306,6 +4383,7 @@ mod tests {
             },
             tags: vec![],
             repeat: None,
+            minutes: 30,
         };
         app.set_reminder_list(vec![
             r("undated", None, false),
@@ -4524,23 +4602,109 @@ mod tests {
     }
 
     #[test]
-    fn an_all_day_event_has_no_time_to_move() {
+    fn an_all_day_event_is_given_a_time_here_ten_oclock_for_two_hours() {
         let mut app = App::new();
         let now = haste_core::time::now_secs();
+        // all-day events are dates: midnight UTC
         let day = on_a_weekday(now, 3_600);
-        app.set_events(vec![event_view(
-            "all",
-            day - day.rem_euclid(86_400),
-            24 * 60,
-            true,
-        )]);
+        let date = day - day.rem_euclid(86_400);
+        app.set_events(vec![event_view("all", date, 24 * 60, true)]);
         press(&mut app, "3");
         if app.agenda().is_empty() {
             return; // outside today's window in this time zone
         }
         app.handle_key(Key::Enter);
+        assert_eq!(app.mode, Mode::EventEdit);
+        let form = app.event_form.as_ref().unwrap();
+        assert_eq!(form.start, date + 10 * 3_600, "10:00 on its day");
+        assert_eq!(form.minutes, 120);
+        // an hour later: the end follows
+        app.handle_key(Key::Right);
+        app.handle_key(Key::Up);
+        let Some(Effect::ShiftEvent { times, .. }) = app.handle_key(Key::Enter) else {
+            panic!("expected the shift")
+        };
+        assert_eq!(
+            times,
+            Some((date + 11 * 3_600, date + 13 * 3_600)),
+            "11:00 to 13:00"
+        );
+    }
+
+    #[test]
+    fn left_and_right_go_to_the_next_day_on_the_item_nearest_the_same_hour() {
+        let mut app = App::new();
+        let now = haste_core::time::now_secs();
+        let day1 = on_a_weekday(now, 3_600);
+        let day1 = day1 - day1.rem_euclid(86_400);
+        let day2 = on_a_weekday(day1 + 86_400 + 1, 0);
+        let day2 = day2 - day2.rem_euclid(86_400);
+        let h = 3_600;
+        app.set_events(vec![
+            event_view("a-9", day1 + 9 * h, 60, false),
+            event_view("a-14", day1 + 14 * h, 60, false),
+            event_view("b-8", day2 + 8 * h, 60, false),
+            event_view("b-13", day2 + 13 * h + 1_800, 60, false),
+            event_view("b-17", day2 + 17 * h, 60, false),
+        ]);
+        press(&mut app, "3");
+        let id_at = |app: &App| match app.agenda()[app.calendar_selected] {
+            AgendaItem::Event(e) => e.event.id.clone(),
+            AgendaItem::Task { .. } => String::new(),
+        };
+        // from the first item of the first day
+        while id_at(&app) != "a-14" {
+            press(&mut app, "j");
+        }
+        // 14:00 is nearest 13:30 on the next day
+        app.handle_key(Key::Right);
+        assert_eq!(id_at(&app), "b-13");
+        // and back: nearest 13:30 on the day before is 14:00
+        app.handle_key(Key::Left);
+        assert_eq!(id_at(&app), "a-14");
+        // nothing further left: it stays
+        app.handle_key(Key::Left);
+        assert_eq!(id_at(&app), "a-14");
+    }
+
+    #[test]
+    fn d_sets_how_long_a_task_takes_from_30_minutes_to_4_hours() {
+        let mut app = App::new();
+        let now = haste_core::time::now_secs();
+        app.set_reminder_list(vec![reminder_view("rent", Some(on_a_weekday(now, 3_600)))]);
+        // on the calendar the task is under the cursor
+        press(&mut app, "3");
+        assert!(app.on_todos());
+        press(&mut app, "d");
+        assert_eq!(app.mode, Mode::TaskDuration);
+        assert_eq!(
+            app.task_duration.as_ref().unwrap().2,
+            30,
+            "30 minutes at first"
+        );
+        for expected in [60, 120, 180, 240, 240] {
+            app.handle_key(Key::Up);
+            assert_eq!(app.task_duration.as_ref().unwrap().2, expected);
+        }
+        app.handle_key(Key::Down);
+        assert_eq!(app.task_duration.as_ref().unwrap().2, 180);
+        assert_eq!(
+            app.handle_key(Key::Enter),
+            Some(Effect::SetDuration {
+                reminder_id: "rent".into(),
+                minutes: 180
+            })
+        );
         assert_eq!(app.mode, Mode::Normal);
-        assert!(app.status.contains("all-day"), "{}", app.status);
+        // Esc keeps what it had; and on the TODO tab d works the same
+        press(&mut app, "d");
+        assert!(app.handle_key(Key::Esc).is_none());
+        assert_eq!(app.mode, Mode::Normal);
+        press(&mut app, "1");
+        app.today_focus = TodayFocus::Todo;
+        app.set_reminder_list(vec![reminder_view("today", Some(now))]);
+        press(&mut app, "d");
+        assert_eq!(app.mode, Mode::TaskDuration);
     }
 
     #[test]

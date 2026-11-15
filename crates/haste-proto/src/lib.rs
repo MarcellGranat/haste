@@ -315,6 +315,12 @@ pub enum RequestBody {
     MutedDelete {
         thread_id: String,
     },
+    /// Human-only: how long a task takes on the calendar (30 minutes, 1, 2, 3 or 4 hours),
+    /// here only.
+    ReminderDuration {
+        reminder_id: String,
+        minutes: u32,
+    },
     /// Human-only: move or resize a calendar event here only (`None` puts it back as Google
     /// has it). Nothing is sent to Google.
     EventShift {
@@ -466,6 +472,18 @@ pub struct ReminderView {
     /// How it repeats, when it does.
     #[serde(default)]
     pub repeat: Option<haste_core::model::RepeatRule>,
+    /// How long it takes on the calendar, in minutes.
+    #[serde(default = "default_task_minutes")]
+    pub minutes: u32,
+}
+
+/// How long a task takes on the calendar until it is set.
+pub const DEFAULT_TASK_MINUTES: u32 = 30;
+/// The durations a task can have, in minutes.
+pub const TASK_MINUTES: [u32; 5] = [30, 60, 120, 180, 240];
+
+fn default_task_minutes() -> u32 {
+    DEFAULT_TASK_MINUTES
 }
 
 /// A file attached to a send, as the confirmation shows it.

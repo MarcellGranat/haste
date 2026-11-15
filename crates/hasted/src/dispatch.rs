@@ -103,6 +103,7 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::ReadSet { .. }
         | RequestBody::SenderRules
         | RequestBody::EventShift { .. }
+        | RequestBody::ReminderDuration { .. }
         | RequestBody::MutedDelete { .. }
         | RequestBody::RuleChange { .. }
         | RequestBody::ResolveExecuting { .. }
@@ -152,6 +153,7 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::ReadSet { .. } => "read_set",
         RequestBody::SenderRules => "sender_rules",
         RequestBody::EventShift { .. } => "event_shift",
+        RequestBody::ReminderDuration { .. } => "reminder_duration",
         RequestBody::MutedDelete { .. } => "muted_delete",
         RequestBody::RuleChange { .. } => "rule_change",
         _ => "request",
@@ -738,6 +740,10 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
         }
         RequestBody::IgnoreMute { thread_id } => ignore_mute(state, principal, &thread_id),
         RequestBody::MutedDelete { thread_id } => muted_delete(state, principal, &thread_id),
+        RequestBody::ReminderDuration {
+            reminder_id,
+            minutes,
+        } => reminder_duration(state, principal, &reminder_id, minutes),
         RequestBody::EventShift { event_id, times } => {
             event_shift(state, principal, &event_id, times)
         }
@@ -818,6 +824,7 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
 fn reminders_list(state: &State, principal: &Principal, include_completed: bool) -> Response {
     let tags = state.store.all_reminder_tags().unwrap_or_default();
     let repeats = state.store.reminder_repeats().unwrap_or_default();
+    let durations = state.store.reminder_durations().unwrap_or_default();
     let machine_labels = machine_labels_for(state, principal);
     match state.store.list_reminders(include_completed) {
         Ok(rows) => Response::Reminders {
@@ -827,6 +834,10 @@ fn reminders_list(state: &State, principal: &Principal, include_completed: bool)
                     let own = tags.get(&reminder.id).cloned().unwrap_or_default();
                     visible_to(principal, &own, machine_labels.as_ref()).then_some(ReminderView {
                         repeat: repeats.get(&reminder.external_id).copied(),
+                        minutes: durations
+                            .get(&reminder.external_id)
+                            .copied()
+                            .unwrap_or(haste_proto::DEFAULT_TASK_MINUTES),
                         reminder,
                         tags: own,
                     })
@@ -1018,6 +1029,38 @@ fn change_reminder_tag(
 }
 
 /// Event reads pass through the same scope filter as thread and reminder reads.
+/// How long a task takes on the calendar, here only: one of the offered lengths.
+fn reminder_duration(
+    state: &State,
+    actor: &Principal,
+    reminder_id: &str,
+    minutes: u32,
+) -> Response {
+    if !haste_proto::TASK_MINUTES.contains(&minutes) {
+        return err(
+            ErrorCode::Validation,
+            "a task takes 30 minutes, or 1 to 4 hours",
+        );
+    }
+    let external = match state.store.get_reminder(reminder_id) {
+        Ok(Some(r)) => r.external_id,
+        Ok(None) => return err(ErrorCode::NotFound, "reminder not found"),
+        Err(e) => return map_store(&e),
+    };
+    let stored = (minutes != haste_proto::DEFAULT_TASK_MINUTES).then_some(minutes);
+    if let Err(e) = state.store.set_reminder_duration(&external, stored) {
+        return map_store(&e);
+    }
+    state.audit(
+        &actor.id,
+        "reminder.duration",
+        "set",
+        Some(reminder_id),
+        None,
+    );
+    Response::Done
+}
+
 /// Move or resize an event here only. Google is never written to; `None` puts it back.
 fn event_shift(
     state: &State,
@@ -1030,12 +1073,6 @@ fn event_shift(
         Ok(None) => return err(ErrorCode::NotFound, "event not found"),
         Err(e) => return map_store(&e),
     };
-    if event.all_day {
-        return err(
-            ErrorCode::Validation,
-            "an all-day event has no time to move",
-        );
-    }
     if let Some((start, end)) = times {
         // a minute at least, a day at most
         if end <= start || end - start > 86_400 {
@@ -1071,6 +1108,8 @@ fn events_list(state: &State, principal: &Principal, from: i64) -> Response {
                             Some(&(start, end)) => {
                                 event.start_at = start;
                                 event.end_at = end;
+                                // an all-day event given a time is a timed one here
+                                event.all_day = false;
                                 true
                             }
                             None => false,

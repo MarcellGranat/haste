@@ -64,6 +64,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     if *base == Mode::EventEdit {
         draw_event_edit(frame, app, frame.area());
     }
+    if *base == Mode::TaskDuration {
+        draw_task_duration(frame, app, frame.area());
+    }
     if *base == Mode::Compose {
         let replying = app
             .compose
@@ -628,6 +631,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         View::Today if app.today_focus == TodayFocus::Todo => {
             vec![
                 ("Enter", "edit"),
+                ("d", "duration"),
                 ("c", "new"),
                 ("Space", "select"),
                 ("e", "done (30 s to undo)"),
@@ -653,13 +657,18 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
                 .get(app.calendar_selected)
                 .is_some_and(|r| matches!(r, crate::app::AgendaItem::Task { .. }))
             {
-                h.extend([("Enter", "edit"), ("e", "done (30 s to undo)")]);
+                h.extend([
+                    ("Enter", "edit"),
+                    ("d", "duration"),
+                    ("e", "done (30 s to undo)"),
+                ]);
             }
             h.push(("Tab", "next tab"));
             h
         }
         View::Later if app.later_focus == TodayFocus::Todo => vec![
             ("Enter", "edit"),
+            ("d", "duration"),
             ("c", "new"),
             ("Space", "select"),
             ("e", "done (30 s to undo)"),
@@ -1571,7 +1580,7 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .collect();
     let rows = app.agenda();
     let block = theme::panel(
-        " Calendar · next 7 days without the weekend · h/l day · j/k item · Enter edits ",
+        " Calendar · next 7 days without the weekend · ←→ day · j/k item · Enter edits ",
     )
     .border_style(Style::new().fg(theme::BORDER_ACTIVE));
     let inner = block.inner(area);
@@ -1581,7 +1590,7 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
     // place the items: timed ones in the grid, all-day ones in the strip above it
     let mut placed: Vec<Placed> = Vec::new();
-    let mut all_day: Vec<Vec<String>> = vec![Vec::new(); days.len()];
+    let mut all_day: Vec<Vec<(String, usize)>> = vec![Vec::new(); days.len()];
     for (index, row) in rows.iter().enumerate() {
         let at = row.at();
         let Some(day) = days.iter().position(|d| at >= *d && at < *d + 86_400) else {
@@ -1589,7 +1598,7 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         };
         match row {
             AgendaItem::Event(e) if e.event.all_day => {
-                all_day[day].push(inbox::sanitize(&e.event.title).replace('\n', " "));
+                all_day[day].push((inbox::sanitize(&e.event.title).replace('\n', " "), index));
             }
             AgendaItem::Event(e) => placed.push(Placed {
                 day,
@@ -1605,7 +1614,7 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
             AgendaItem::Task { reminder, at } => placed.push(Placed {
                 day,
                 start: *at,
-                end: *at + 1_800,
+                end: *at + i64::from(reminder.minutes) * 60,
                 lane: 0,
                 lanes: 1,
                 label: inbox::sanitize(&reminder.reminder.title).replace('\n', " "),
@@ -1708,16 +1717,24 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
             theme::muted(),
         )];
         for items in &all_day {
-            let text = match items.get(s) {
-                Some(t) if s + 1 == strip && items.len() > strip => {
-                    format!(" {t} +{}", items.len() - strip)
+            let (text, index) = match items.get(s) {
+                Some((t, i)) if s + 1 == strip && items.len() > strip => {
+                    (format!(" {t} +{}", items.len() - strip), Some(*i))
                 }
-                Some(t) => format!(" {t}"),
-                None => String::new(),
+                Some((t, i)) => (format!(" {t}"), Some(*i)),
+                None => (String::new(), None),
             };
+            let selected = index == Some(app.calendar_selected);
             spans.push(Span::styled(
                 fit(&text, col_w),
-                Style::new().fg(theme::SAPPHIRE),
+                if selected {
+                    Style::new()
+                        .fg(theme::BASE)
+                        .bg(theme::MAUVE)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new().fg(theme::SAPPHIRE)
+                },
             ));
         }
         lines.push(Line::from(spans));
@@ -1838,6 +1855,54 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         fit(&describe, width),
         Style::new().fg(theme::TEXT),
     )));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The popup that sets how long a task takes: 30 minutes up to 4 hours.
+fn draw_task_duration(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let Some((_, title, minutes)) = &app.task_duration else {
+        return;
+    };
+    let rect = centered(area, 58.min(area.width.saturating_sub(4)), 7);
+    frame.render_widget(Clear, rect);
+    let block =
+        theme::panel(" How long does it take? · here only ").border_style(pane_border(true));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let picked = Style::new()
+        .fg(theme::BASE)
+        .bg(theme::MAUVE)
+        .add_modifier(Modifier::BOLD);
+    let mut steps = vec![Span::raw("  ")];
+    for m in haste_proto::TASK_MINUTES {
+        let text = if m < 60 {
+            format!(" {m} min ")
+        } else {
+            format!(" {} h ", m / 60)
+        };
+        steps.push(Span::styled(
+            text,
+            if m == *minutes {
+                picked
+            } else {
+                Style::new().fg(theme::SUBTEXT0)
+            },
+        ));
+        steps.push(Span::raw(" "));
+    }
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("  ☐ {}", inbox::sanitize(title)),
+            Style::new().fg(theme::PEACH).add_modifier(Modifier::BOLD),
+        )),
+        Line::default(),
+        Line::from(steps),
+        Line::default(),
+        Line::from(Span::styled(
+            "  ↑↓ longer or shorter (4 h at most) · Enter keeps it · Esc cancels",
+            Style::new().fg(theme::OVERLAY0),
+        )),
+    ];
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -2411,6 +2476,7 @@ mod tests {
             },
             tags: vec![],
             repeat: None,
+            minutes: 30,
         };
         let now = haste_core::time::now_secs();
         let mut app = App::new();
@@ -2591,6 +2657,26 @@ mod tests {
             "no weekend: {text}"
         );
         assert!(text.contains("Enter edits"), "{text}");
+    }
+
+    #[test]
+    fn the_duration_popup_offers_30_minutes_to_4_hours() {
+        let mut app = App::new();
+        app.task_duration = Some(("r1".into(), "Pay rent".into(), 120));
+        app.mode = Mode::TaskDuration;
+        let text = render(&app);
+        for needle in [
+            "How long",
+            "Pay rent",
+            "30 min",
+            "1 h",
+            "2 h",
+            "3 h",
+            "4 h",
+            "4 h at most",
+        ] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
     }
 
     #[test]

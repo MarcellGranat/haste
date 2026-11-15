@@ -194,6 +194,14 @@ const MIGRATIONS: &[&str] = &[
         end_at INTEGER NOT NULL
     );
     ",
+    // 12: how long a task takes on the calendar (Reminders has no such thing), by the item's
+    // external id; a task without a row takes the default.
+    "
+    CREATE TABLE reminder_durations (
+        external_id TEXT PRIMARY KEY,
+        minutes INTEGER NOT NULL
+    );
+    ",
 ];
 
 /// Highest schema version this binary understands.

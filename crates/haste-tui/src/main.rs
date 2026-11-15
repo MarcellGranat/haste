@@ -43,6 +43,15 @@ fn load_rules(app: &mut App, client: &Client) {
     }
 }
 
+/// `30 min`, `1 h`, `2 h`.
+fn inbox_minutes(minutes: u32) -> String {
+    if minutes < 60 {
+        format!("{minutes} min")
+    } else {
+        format!("{} h", minutes / 60)
+    }
+}
+
 /// The TODO list again from the daemon.
 fn load_reminders(app: &mut App, client: &Client) {
     if let Ok(Response::Reminders { reminders }) = client.call(RequestBody::RemindersList {
@@ -512,6 +521,18 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 other => describe(other).err().unwrap_or_else(|| "not muted".into()),
             };
             load_rules(app, client);
+        }
+        Effect::SetDuration {
+            reminder_id,
+            minutes,
+        } => {
+            app.status = match describe(client.call(RequestBody::ReminderDuration {
+                reminder_id,
+                minutes,
+            })) {
+                Ok(()) => format!("the task takes {} on the calendar", inbox_minutes(minutes)),
+                Err(e) => e,
+            };
         }
         Effect::ShiftEvent { event_id, times } => {
             app.status = match describe(client.call(RequestBody::EventShift { event_id, times })) {

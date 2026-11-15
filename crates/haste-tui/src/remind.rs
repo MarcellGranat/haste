@@ -748,6 +748,7 @@ mod tests {
                 freq: RepeatFreq::Month,
                 every: 1,
             }),
+            minutes: 30,
         };
         let mut f = RemindForm::editing(&todo, &["haste".into()], NOW, OFF);
         assert_eq!(f.title, "Pay rent");

@@ -346,6 +346,68 @@ async fn an_event_can_be_moved_here_only_by_the_human_and_put_back() {
 }
 
 #[tokio::test]
+async fn an_all_day_event_given_a_time_is_a_timed_one_here_until_put_back() {
+    let rig = boot().await;
+    release_and_sync(&rig).await;
+    let store = &rig.daemon.state.store;
+    let day = 1_795_000_000 - 1_795_000_000 % 86_400;
+    store
+        .upsert_events(
+            &[haste_core::model::Event {
+                id: String::new(),
+                external_id: "primary/all-day".into(),
+                calendar: "primary".into(),
+                title: "Conference".into(),
+                start_at: day,
+                end_at: day + 86_400,
+                all_day: true,
+                status: "confirmed".into(),
+                attendees: vec![],
+                location: String::new(),
+                description_snippet: String::new(),
+                updated_at: 1,
+                missing_since: None,
+                version: 0,
+            }],
+            &[],
+        )
+        .unwrap();
+    let find = |events: Vec<haste_proto::EventView>| {
+        events
+            .into_iter()
+            .find(|e| e.event.external_id == "primary/all-day")
+            .unwrap()
+    };
+    let before = find(events_of(&rig).await);
+    assert!(before.event.all_day);
+    let (start, end) = (day + 10 * 3_600, day + 12 * 3_600);
+    assert!(matches!(
+        human(
+            &rig,
+            RequestBody::EventShift {
+                event_id: before.event.id.clone(),
+                times: Some((start, end)),
+            }
+        )
+        .await,
+        Response::Done
+    ));
+    let timed = find(events_of(&rig).await);
+    assert!(!timed.event.all_day && timed.shifted);
+    assert_eq!((timed.event.start_at, timed.event.end_at), (start, end));
+    human(
+        &rig,
+        RequestBody::EventShift {
+            event_id: before.event.id.clone(),
+            times: None,
+        },
+    )
+    .await;
+    assert!(find(events_of(&rig).await).event.all_day, "back to all day");
+    rig.daemon.shutdown().await;
+}
+
+#[tokio::test]
 async fn invalid_calendar_proposals_are_refused_at_creation_and_pending_ones_write_nothing() {
     let rig = boot().await;
     release_and_sync(&rig).await;

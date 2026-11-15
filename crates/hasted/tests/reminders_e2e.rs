@@ -666,6 +666,62 @@ async fn labels_set_in_the_popup_are_saved_for_a_new_todo_and_for_an_edit() {
 }
 
 #[tokio::test]
+async fn a_task_takes_30_minutes_to_4_hours_on_the_calendar_set_only_by_the_human() {
+    let rig = boot().await;
+    release_and_sync(&rig).await;
+    let id = rig.daemon.state.store.list_reminders(false).unwrap()[0]
+        .id
+        .clone();
+    let minutes_of = |rig: &Rig| {
+        let store = &rig.daemon.state.store;
+        let r = store.get_reminder(&id).unwrap().unwrap();
+        store
+            .reminder_durations()
+            .unwrap()
+            .get(&r.external_id)
+            .copied()
+            .unwrap_or(30)
+    };
+    assert_eq!(minutes_of(&rig), 30, "30 minutes until set");
+    let set = |minutes| RequestBody::ReminderDuration {
+        reminder_id: id.clone(),
+        minutes,
+    };
+    assert!(matches!(human(&rig, set(120)).await, Response::Done));
+    assert_eq!(minutes_of(&rig), 120);
+    let Response::Reminders { reminders } = human(
+        &rig,
+        RequestBody::RemindersList {
+            include_completed: false,
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert_eq!(reminders[0].minutes, 120);
+    // other lengths are refused: nothing under 30 minutes, nothing over 4 hours
+    for bad in [0, 15, 45, 300, 480] {
+        assert_eq!(
+            code(&human(&rig, set(bad)).await),
+            Some(ErrorCode::Validation),
+            "{bad}"
+        );
+    }
+    assert_eq!(minutes_of(&rig), 120);
+    // back to the default
+    assert!(matches!(human(&rig, set(30)).await, Response::Done));
+    assert_eq!(minutes_of(&rig), 30);
+    // an agent cannot
+    let token = agent(&rig).await;
+    assert_eq!(
+        code(&call(&rig, &token, set(60)).await),
+        Some(ErrorCode::Denied)
+    );
+    rig.daemon.shutdown().await;
+}
+
+#[tokio::test]
 async fn editing_a_reminder_can_set_and_clear_how_it_repeats() {
     use haste_core::model::{RepeatFreq, RepeatRule};
     let rig = boot().await;

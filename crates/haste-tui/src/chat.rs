@@ -414,6 +414,47 @@ fn is_own(m: &Message, own: Option<&str>) -> bool {
             (Some(o), Some(s)) if s.to_lowercase().contains(&o.to_lowercase()))
 }
 
+/// Longest gap (seconds) between two attachment-only messages that still count as one batch.
+const BATCH_GAP: i64 = 300;
+
+/// A message that is nothing but attachments (and no reactions yet on it).
+fn only_files(m: &Message) -> bool {
+    let (plain, _) = haste_core::reactions::take(&m.body_text);
+    let (text, files) = split_body(&plain);
+    text.is_empty() && !files.is_empty()
+}
+
+/// Does `cur` continue the batch that `prev` belongs to? Same sender, both attachment-only,
+/// close in time, and nothing reacted to on `prev` (a reaction belongs to its own message).
+fn joins_batch(prev: &Message, cur: &Message) -> bool {
+    prev.is_own == cur.is_own
+        && prev.sender_identifier == cur.sender_identifier
+        && (cur.sent_at - prev.sent_at).abs() <= BATCH_GAP
+        && only_files(prev)
+        && only_files(cur)
+        && haste_core::reactions::take(&prev.body_text).1.is_none()
+}
+
+/// The last message of the batch that starts at or contains `i`.
+#[must_use]
+pub fn batch_end(messages: &[Message], i: usize) -> usize {
+    let mut end = i;
+    while end + 1 < messages.len() && joins_batch(&messages[end], &messages[end + 1]) {
+        end += 1;
+    }
+    end
+}
+
+/// The first message of the batch containing `i`.
+#[must_use]
+pub fn batch_start(messages: &[Message], i: usize) -> usize {
+    let mut start = i.min(messages.len().saturating_sub(1));
+    while start > 0 && joins_batch(&messages[start - 1], &messages[start]) {
+        start -= 1;
+    }
+    start
+}
+
 /// Lay out the thread. Returns the lines and where each message sits.
 #[must_use]
 pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<Laid>) {
@@ -432,7 +473,10 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
             Style::new().fg(theme::LAVENDER),
         )));
     }
-    for (i, m) in messages.iter().enumerate() {
+    let mut i = 0;
+    while i < messages.len() {
+        let end = batch_end(messages, i);
+        let m = &messages[i];
         let this_day = inbox::day_start(m.sent_at, l.tz_offset);
         if day != Some(this_day) {
             day = Some(this_day);
@@ -444,9 +488,14 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
             )));
         }
         let own = is_own(m, l.own);
-        let selected = i == l.selected;
-        let (plain, reactions) = haste_core::reactions::take(&m.body_text);
-        let (text, files) = split_body(&inbox::sanitize(&decode_entities(&plain)));
+        let selected = (i..=end).contains(&l.selected);
+        let (plain, _) = haste_core::reactions::take(&m.body_text);
+        let (text, mut files) = split_body(&inbox::sanitize(&decode_entities(&plain)));
+        for extra in &messages[i + 1..=end] {
+            let (p, _) = haste_core::reactions::take(&extra.body_text);
+            files.extend(split_body(&inbox::sanitize(&decode_entities(&p))).1);
+        }
+        let reactions = haste_core::reactions::take(&messages[end].body_text).1;
         let reactions = reactions.map(|r| format!("↳ {}", inbox::sanitize(&r).replace('\n', " ")));
         let pieces = fold(&text, l.expanded.contains(&m.id));
         // each row: the text, and whether it is a fold marker
@@ -552,11 +601,15 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
             Span::raw(indent),
             Span::styled(format!("╰{}╯", "─".repeat(frame_w - 2)), edge),
         ]));
-        laid.push(Laid {
-            start,
-            end: lines.len(),
-            links: message_links,
-        });
+        // every message of a batch shares the one frame
+        for _ in i..=end {
+            laid.push(Laid {
+                start,
+                end: lines.len(),
+                links: message_links.clone(),
+            });
+        }
+        i = end + 1;
     }
     (lines, laid)
 }
@@ -691,6 +744,41 @@ mod tests {
             ["https://a.org/x?y=1", "http://b.io"]
         );
         assert!(links("ftp://nope javascript:alert(1) https://").is_empty());
+    }
+
+    #[test]
+    fn a_run_of_image_messages_is_one_frame() {
+        let img = "[attachment: image.jpg (image/jpeg, 10 bytes)]";
+        let messages = vec![
+            m("a", "me", "hello", 100, true),
+            m("b", "me", img, 200, true),
+            m("c", "me", img, 205, true),
+            m("d", "me", img, 210, true),
+            m("e", "you", img, 215, false),
+        ];
+        assert_eq!(batch_end(&messages, 1), 3);
+        assert_eq!(batch_start(&messages, 3), 1);
+        assert_eq!(batch_end(&messages, 0), 0, "a text message starts no batch");
+        assert_eq!(batch_end(&messages, 4), 4, "another sender is separate");
+        let expanded = std::collections::HashSet::new();
+        let l = Layout {
+            width: 80,
+            selected: 2,
+            own: None,
+            tz_offset: 0,
+            now: 300,
+            hidden: 0,
+            expanded: &expanded,
+        };
+        let (lines, laid) = layout(&messages, &l);
+        assert_eq!(laid.len(), messages.len());
+        assert_eq!((laid[1].start, laid[1].end), (laid[3].start, laid[3].end));
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(text.iter().filter(|t| t.contains("image.jpg")).count(), 4);
+        assert_eq!(text.iter().filter(|t| t.contains("╭─")).count(), 3);
     }
 
     #[test]

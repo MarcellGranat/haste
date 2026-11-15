@@ -455,17 +455,13 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
             notes,
             attachments,
         } => save_todo(app, client, reminder_id, title, due, notes, attachments),
-        Effect::SaveAttachments {
-            message_id,
-            indices,
-            dir,
-        } => {
-            let total = indices.len();
+        Effect::SaveAttachments { files, dir } => {
+            let total = files.len();
             let mut saved = 0;
             let mut failure = None;
-            for index in indices {
+            for (message_id, index) in files {
                 match client.call(RequestBody::AttachmentSave {
-                    message_id: message_id.clone(),
+                    message_id,
                     index,
                     dir: Some(dir.to_string_lossy().into_owned()),
                 }) {

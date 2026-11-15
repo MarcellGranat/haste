@@ -116,7 +116,8 @@ impl Reader {
 /// save, the folder picker with the files it will save.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachMenu {
-    pub message_id: String,
+    /// For each file: the message it is in and its index there (a batch spans messages).
+    pub refs: Vec<(String, usize)>,
     pub files: Vec<haste_core::attachment::AttachmentLine>,
     pub selected: usize,
     /// Choosing a folder to save into: the picker and which files (by index) go there.
@@ -223,8 +224,7 @@ pub enum Effect {
     },
     /// Save attachments of a message (by index) into a folder.
     SaveAttachments {
-        message_id: String,
-        indices: Vec<usize>,
+        files: Vec<(String, usize)>,
         dir: std::path::PathBuf,
     },
     /// Fetch one attachment for a text preview.
@@ -1528,8 +1528,10 @@ impl App {
                 editor::PickerOutcome::Closed => menu.picker = None,
                 editor::PickerOutcome::Chosen(dir) => {
                     let effect = Effect::SaveAttachments {
-                        message_id: menu.message_id.clone(),
-                        indices: indices.clone(),
+                        files: indices
+                            .iter()
+                            .filter_map(|i| menu.refs.get(*i).cloned())
+                            .collect(),
                         dir,
                     };
                     self.attach = None;
@@ -1548,10 +1550,8 @@ impl App {
             Key::Char('j') | Key::Down => menu.selected = (menu.selected + 1).min(last),
             Key::Char('k') | Key::Up => menu.selected = menu.selected.saturating_sub(1),
             Key::Char('p') | Key::Char(' ') => {
-                return Some(Effect::PreviewAttachment {
-                    message_id: menu.message_id.clone(),
-                    index: menu.selected,
-                });
+                let (message_id, index) = menu.refs.get(menu.selected)?.clone();
+                return Some(Effect::PreviewAttachment { message_id, index });
             }
             Key::Enter | Key::Char('d') => {
                 menu.picker = Some((
@@ -1622,26 +1622,49 @@ impl App {
         let thread_id = reader.view.thread.id.clone();
         let last = reader.messages.len().saturating_sub(1);
         let first = reader.first_visible();
-        let step = |at: usize, by: isize| at.saturating_add_signed(by).clamp(first, last);
+        // a batch of attachment-only messages is one item: moving lands on its last message
+        let step = |r: &Reader, by: isize| {
+            let base = if by > 0 {
+                crate::chat::batch_end(&r.messages, r.selected)
+            } else {
+                crate::chat::batch_start(&r.messages, r.selected)
+            };
+            let to = base.saturating_add_signed(by).clamp(first, last);
+            crate::chat::batch_end(&r.messages, to)
+        };
         match key {
             Key::Esc | Key::Enter | Key::Char('q' | 'h') => self.close_reader(),
-            Key::Char('j') | Key::Down => reader.selected = step(reader.selected, 1),
-            Key::Char('k') | Key::Up => reader.selected = step(reader.selected, -1),
-            Key::Char(' ' | 'd') => reader.selected = step(reader.selected, READER_PAGE),
-            Key::Char('b' | 'u') => reader.selected = step(reader.selected, -READER_PAGE),
-            Key::Char('g' | '0') => reader.selected = first,
+            Key::Char('j') | Key::Down => reader.selected = step(reader, 1),
+            Key::Char('k') | Key::Up => reader.selected = step(reader, -1),
+            Key::Char(' ' | 'd') => reader.selected = step(reader, READER_PAGE),
+            Key::Char('b' | 'u') => reader.selected = step(reader, -READER_PAGE),
+            Key::Char('g' | '0') => {
+                reader.selected = crate::chat::batch_end(&reader.messages, first)
+            }
             Key::Char('G') => reader.selected = last,
             Key::Char('a') => {
-                let found = reader.messages.get(reader.selected).map(|m| {
-                    (
-                        m.id.clone(),
-                        haste_core::attachment::lines_of(&inbox::sanitize(&m.body_text)),
-                    )
-                });
-                match found {
-                    Some((id, files)) if !files.is_empty() => {
+                let from = crate::chat::batch_start(&reader.messages, reader.selected);
+                let mut files = Vec::new();
+                let mut refs = Vec::new();
+                for m in reader
+                    .messages
+                    .iter()
+                    .skip(from)
+                    .take(crate::chat::batch_end(&reader.messages, reader.selected) + 1 - from)
+                {
+                    for (index, f) in
+                        haste_core::attachment::lines_of(&inbox::sanitize(&m.body_text))
+                            .into_iter()
+                            .enumerate()
+                    {
+                        refs.push((m.id.clone(), index));
+                        files.push(f);
+                    }
+                }
+                match (files.is_empty(), reader.messages.get(reader.selected)) {
+                    (false, Some(_)) => {
                         self.attach = Some(AttachMenu {
-                            message_id: id,
+                            refs,
                             files,
                             selected: 0,
                             picker: None,
@@ -2871,8 +2894,7 @@ mod tests {
         assert_eq!(
             app.handle_key(Key::Enter),
             Some(Effect::SaveAttachments {
-                message_id: "m2".into(),
-                indices: vec![0, 1],
+                files: vec![("m2".into(), 0), ("m2".into(), 1)],
                 dir: dir.clone(),
             })
         );

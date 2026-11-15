@@ -746,6 +746,16 @@ fn thread_line(
             Style::new().fg(theme::channel_colour(&source)),
         ),
     ];
+    // why it is on the Later tab (back at ..., set aside) comes first, where a long row
+    // cannot cut it off
+    if let Some(tag) = tag {
+        spans.push(Span::styled(
+            format!("{tag}  "),
+            Style::new()
+                .fg(theme::LAVENDER)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     if is_mail && !sender.is_empty() {
         let style = if (priority || unread) && !blocked {
             Style::new().fg(theme::TEXT).add_modifier(Modifier::BOLD)
@@ -788,12 +798,6 @@ fn thread_line(
         spans.push(Span::styled(
             format!(" {aside}"),
             Style::new().fg(theme::MUTED),
-        ));
-    }
-    if let Some(tag) = tag {
-        spans.push(Span::styled(
-            format!("  {tag}"),
-            Style::new().fg(theme::LAVENDER),
         ));
     }
     spans.push(Span::styled(
@@ -1506,6 +1510,42 @@ mod tests {
         assert!(!text.contains('\u{1b}') && !text.contains('\u{202E}'));
         assert!(text.contains("köszönöm") || text.contains("k[2Jöszönöm"));
         assert!(text.contains("Esc") && text.contains("reply"));
+    }
+
+    #[test]
+    fn the_later_tab_shows_why_a_thread_is_there_before_its_subject() {
+        let mut t = haste_proto::ThreadView {
+            thread: haste_core::model::Thread {
+                id: "a".into(),
+                source: haste_core::model::Source::Gmail,
+                external_id: "a".into(),
+                subject: "a-very-long-subject".into(),
+                participants: vec![],
+                last_activity_at: 1,
+                version: 1,
+            },
+            triage: haste_core::model::Triage::new("a", haste_core::model::ObjectKind::Thread),
+            tags: vec![],
+            last: None,
+            unread: false,
+            replied: false,
+            sender_known: true,
+            sender: None,
+        };
+        t.triage.snoozed_until = Some(haste_core::time::now_secs() + 7_200);
+        let mut app = App::new();
+        app.set_threads(vec![t]);
+        app.view = crate::app::View::Later;
+        let text = render(&app);
+        let (why, subject) = (
+            text.find("back ").unwrap(),
+            text.find("a-very-long").unwrap(),
+        );
+        assert!(why < subject, "{text}");
+        app.threads[0].triage.snoozed_until = None;
+        app.threads[0].triage.set_aside = true;
+        let text = render(&app);
+        assert!(text.find("set aside ").unwrap() < text.find("a-very-long").unwrap());
     }
 
     #[test]

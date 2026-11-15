@@ -295,23 +295,6 @@ fn store_batch(
             .filter_map(|(external, unread)| ids.get(external).map(|id| (id.clone(), *unread)))
             .collect();
         state.store.set_unread(&flags, now_secs())?;
-        // mail the provider says is read: its senders are known from now on, even if it is
-        // marked unread again
-        let read: std::collections::HashSet<&String> = batch
-            .unread
-            .iter()
-            .filter(|(_, unread)| !unread)
-            .map(|(external, _)| external)
-            .collect();
-        let senders: Vec<String> = batch
-            .messages
-            .iter()
-            .filter(|m| read.contains(&m.thread_id))
-            .filter_map(|m| m.sender_identifier.as_deref())
-            .map(haste_core::ignore::address_of)
-            .filter(|a| !a.is_empty())
-            .collect();
-        state.store.add_known_senders(&senders)?;
     }
     if !batch.repeats.is_empty() {
         state.store.set_reminder_repeats(&batch.repeats)?;

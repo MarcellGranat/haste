@@ -352,37 +352,6 @@ impl Store {
         })
     }
 
-    /// Remember senders (bare lowercase addresses) whose mail the human engaged with.
-    ///
-    /// # Errors
-    /// Database errors.
-    pub fn add_known_senders(&self, addresses: &[String]) -> StoreResult<()> {
-        let addresses = addresses.to_vec();
-        self.write(move |conn| {
-            let tx = conn.transaction()?;
-            for a in &addresses {
-                tx.execute(
-                    "INSERT OR IGNORE INTO known_senders (address) VALUES (?1)",
-                    [a],
-                )?;
-            }
-            tx.commit()?;
-            Ok(())
-        })
-    }
-
-    /// The remembered senders.
-    ///
-    /// # Errors
-    /// Database errors.
-    pub fn known_sender_addresses(&self) -> StoreResult<std::collections::HashSet<String>> {
-        self.read(|conn| {
-            let mut stmt = conn.prepare("SELECT address FROM known_senders")?;
-            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-            Ok(rows.collect::<Result<std::collections::HashSet<_>, _>>()?)
-        })
-    }
-
     /// Ids of the unread threads.
     ///
     /// # Errors
@@ -466,24 +435,6 @@ impl Store {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
             })?;
             Ok(rows.collect::<Result<std::collections::HashMap<_, _>, _>>()?)
-        })
-    }
-
-    /// Senders (as stored) of the mail messages in threads that are not unread: people whose
-    /// mail has been read or answered.
-    ///
-    /// # Errors
-    /// Database errors.
-    pub fn senders_of_read_mail(&self) -> StoreResult<Vec<String>> {
-        self.read(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT DISTINCT m.sender_identifier FROM messages m \
-                 JOIN threads t ON t.id = m.thread_id \
-                 WHERE t.source IN ('gmail', 'icloud') AND m.sender_identifier IS NOT NULL \
-                 AND m.thread_id NOT IN (SELECT thread_id FROM thread_flags WHERE unread = 1)",
-            )?;
-            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-            Ok(rows.collect::<Result<Vec<_>, _>>()?)
         })
     }
 
@@ -921,7 +872,7 @@ mod tests {
     }
 
     #[test]
-    fn unread_replied_and_known_senders_come_from_the_stored_mail() {
+    fn unread_replied_and_last_senders_come_from_the_stored_mail() {
         let (_dir, store) = test_store();
         let read = thread(&store, "g1", Source::Gmail, "Read", 10);
         let unread = thread(&store, "g2", Source::Gmail, "Unread", 20);
@@ -935,10 +886,6 @@ mod tests {
             store.unread_threads().unwrap(),
             std::collections::HashSet::from([unread.id.clone()])
         );
-        // a thread without a mark counts as read, so its senders are known
-        let known = store.senders_of_read_mail().unwrap();
-        assert!(known.iter().any(|s| s.contains("ana@x.org")));
-        assert!(!known.iter().any(|s| s.contains("stranger@")));
         // the human wrote last in one thread only
         let replied = store
             .replied_threads(&[("gmail".into(), "me@mail.com".into())])

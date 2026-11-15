@@ -578,6 +578,23 @@ impl Store {
         })
     }
 
+    /// The human's edit went through at the Reminders app: show it here at once (the next sync
+    /// finds the same values and changes nothing). The notes are only ever appended, and only
+    /// their short preview is kept here, so they are left to the sync.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn apply_reminder_edit(&self, id: &str, title: &str, due: Option<i64>) -> StoreResult<()> {
+        let (id, title) = (id.to_owned(), title.to_owned());
+        self.write(move |conn| {
+            conn.execute(
+                "UPDATE reminders SET title = ?2, due_at = ?3 WHERE id = ?1",
+                params![id, title, due],
+            )?;
+            Ok(())
+        })
+    }
+
     /// The complete succeeded: mark the mirrored row done (version moves) and the proposal sent.
     ///
     /// # Errors

@@ -313,7 +313,7 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
                                 ThreadView {
                                     unread: flags.unread.contains(&thread.id),
                                     replied: flags.replied.contains(&thread.id),
-                                    sender_known: flags.known(&thread),
+                                    sender_known: MailFlags::accepted(&thread),
                                     sender: flags.senders.get(&thread.id).cloned(),
                                     last: lasts.get(&thread.id).map(|(sender, body)| {
                                         haste_proto::LastMessage {
@@ -930,6 +930,7 @@ fn reminder_write(state: &State, actor: &Principal, write: ReminderWrite) -> Res
                 Ok(None) => return err(ErrorCode::NotFound, "reminder not found"),
                 Err(e) => return map_store(&e),
             };
+            let patch_title = title.clone();
             let done = handle.block_on(guard.update_reminder(
                 &external,
                 &haste_core::connector::ReminderPatch {
@@ -940,9 +941,14 @@ fn reminder_write(state: &State, actor: &Principal, write: ReminderWrite) -> Res
                     set_repeat,
                 },
             ));
-            // the new rule shows at once; the next sync confirms it
-            if done.is_ok() && set_repeat {
-                let _ = state.store.set_reminder_repeats(&[(external, repeat)]);
+            // the edit shows at once; the next sync finds the same values
+            if done.is_ok() {
+                let _ = state
+                    .store
+                    .apply_reminder_edit(&reminder_id, &patch_title, due);
+                if set_repeat {
+                    let _ = state.store.set_reminder_repeats(&[(external, repeat)]);
+                }
             }
             done
         }
@@ -1693,25 +1699,6 @@ fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     std::fs::rename(tmp, path)
 }
 
-/// Remember the senders of a mail thread (not the human's own address) as known.
-fn remember_senders(state: &State, thread_id: &str, source: &Source) {
-    let own = state
-        .connector_for(source)
-        .and_then(|c| c.own_address())
-        .map(|a| haste_core::ignore::address_of(&a))
-        .unwrap_or_default();
-    let Ok(messages) = state.store.messages_for_thread(thread_id) else {
-        return;
-    };
-    let senders: Vec<String> = messages
-        .iter()
-        .filter_map(|m| m.sender_identifier.as_deref())
-        .map(haste_core::ignore::address_of)
-        .filter(|a| !a.is_empty() && *a != own)
-        .collect();
-    let _ = state.store.add_known_senders(&senders);
-}
-
 /// Mark a mail thread read or unread. The mark is stored here first; then the provider is
 /// asked once (Gmail). A provider that cannot or does not is reported, and the local mark stays.
 fn read_set(state: &State, actor: &Principal, thread_id: &str, read: bool) -> Response {
@@ -1722,15 +1709,6 @@ fn read_set(state: &State, actor: &Principal, thread_id: &str, read: bool) -> Re
     };
     if !matches!(thread.source, Source::Gmail | Source::Icloud) {
         return err(ErrorCode::Validation, "only mail has a read mark");
-    }
-    // Whoever wrote this thread is remembered as engaged with, so marking it unread again (or
-    // the provider doing so) never turns them into a stranger.
-    let was_unread = state
-        .store
-        .unread_threads()
-        .is_ok_and(|u| u.contains(thread_id));
-    if read || !was_unread {
-        remember_senders(state, thread_id, &thread.source);
     }
     if let Err(e) = state
         .store
@@ -1811,12 +1789,10 @@ fn ignore_mute(state: &State, actor: &Principal, thread_id: &str) -> Response {
 const MAX_TRIAGE_PRIORITY: i32 = 9;
 
 /// What the thread list needs about mail beyond the threads themselves: unread marks, which
-/// threads the human answered last, and whose mail has been read before.
+/// threads the human answered last, and who the newest sender is.
 struct MailFlags {
     unread: std::collections::HashSet<String>,
     replied: std::collections::HashSet<String>,
-    /// Lowercase addresses of senders whose mail was read or answered.
-    known: std::collections::HashSet<String>,
     /// Per thread: the newest sender who is not the human.
     senders: std::collections::HashMap<String, String>,
 }
@@ -1842,37 +1818,17 @@ impl MailFlags {
             .store
             .last_incoming_senders(&gmail, &icloud)
             .unwrap_or_default();
-        let mut known: std::collections::HashSet<String> = state
-            .store
-            .senders_of_read_mail()
-            .unwrap_or_default()
-            .iter()
-            .map(|s| haste_core::ignore::address_of(s))
-            .collect();
-        known.extend(state.store.known_sender_addresses().unwrap_or_default());
-        // whoever the human answered is known too
-        for id in &replied {
-            if let Some(s) = senders.get(id) {
-                known.insert(haste_core::ignore::address_of(s));
-            }
-        }
         Self {
             unread: state.store.unread_threads().unwrap_or_default(),
             replied,
-            known,
             senders,
         }
     }
 
-    /// Mail from someone whose mail was never read or answered is not known; chats always are.
-    fn known(&self, thread: &haste_core::model::Thread) -> bool {
-        if !matches!(thread.source, Source::Gmail | Source::Icloud) {
-            return true;
-        }
-        match self.senders.get(&thread.id) {
-            Some(s) => self.known.contains(&haste_core::ignore::address_of(s)),
-            None => true,
-        }
+    /// Mail senders are blocked until the human accepts them (`b`: the allowed list, or the
+    /// priority list); nothing is accepted by reading or answering. Chats are never blocked.
+    fn accepted(thread: &haste_core::model::Thread) -> bool {
+        !matches!(thread.source, Source::Gmail | Source::Icloud)
     }
 }
 

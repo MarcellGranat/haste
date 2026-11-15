@@ -574,7 +574,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         ("s", "snooze"),
         ("t", "remind"),
         ("x", "mute"),
-        ("b", "unblock"),
+        ("b", "accept sender"),
         ("f", "filter"),
     ];
     match app.view {

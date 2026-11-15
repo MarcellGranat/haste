@@ -1296,10 +1296,10 @@ async fn triage_writes_are_human_only_local_and_leave_content_alone() {
 }
 
 #[tokio::test]
-async fn a_sender_stays_known_after_the_thread_is_marked_unread_again() {
+async fn mail_senders_stay_blocked_until_accepted_and_reading_does_not_accept() {
     let rig = boot("working").await;
     let store = &rig.daemon.state.store;
-    let t = store
+    let mail = store
         .upsert_thread(
             &haste_core::model::Source::Gmail,
             "g-1",
@@ -1308,10 +1308,19 @@ async fn a_sender_stays_known_after_the_thread_is_marked_unread_again() {
             10,
         )
         .unwrap();
+    let chat = store
+        .upsert_thread(
+            &haste_core::model::Source::Whatsapp,
+            "c-1",
+            "Friends",
+            &[],
+            11,
+        )
+        .unwrap();
     store
         .upsert_message(&haste_core::model::Message {
             id: String::new(),
-            thread_id: t.id.clone(),
+            thread_id: mail.id.clone(),
             source: haste_core::model::Source::Gmail,
             external_id: "m-1".into(),
             sender_person_id: None,
@@ -1321,46 +1330,36 @@ async fn a_sender_stays_known_after_the_thread_is_marked_unread_again() {
             is_own: false,
         })
         .unwrap();
-    store.set_unread(&[(t.id.clone(), true)], 1).unwrap();
-    let listed = |resp: Response| -> (bool, bool) {
-        let Response::Threads { threads } = resp else {
-            panic!()
-        };
-        let v = threads.iter().find(|v| v.thread.id == t.id).unwrap();
-        (v.unread, v.sender_known)
-    };
+    store.set_unread(&[(mail.id.clone(), true)], 1).unwrap();
     let list = || RequestBody::ThreadList {
         sources: vec![],
         include_archived: false,
         include_snoozed: true,
     };
-    assert_eq!(
-        listed(human(&rig, list()).await),
-        (true, false),
-        "a stranger"
-    );
-    human(
-        &rig,
-        RequestBody::ReadSet {
-            thread_id: t.id.clone(),
-            read: true,
-        },
-    )
-    .await;
-    assert_eq!(listed(human(&rig, list()).await), (false, true));
-    human(
-        &rig,
-        RequestBody::ReadSet {
-            thread_id: t.id.clone(),
-            read: false,
-        },
-    )
-    .await;
-    assert_eq!(
-        listed(human(&rig, list()).await),
-        (true, true),
-        "unread again, but not a stranger"
-    );
+    let view = |resp: Response, id: &str| -> (bool, bool, Option<String>) {
+        let Response::Threads { threads } = resp else {
+            panic!()
+        };
+        let v = threads.iter().find(|v| v.thread.id == id).unwrap();
+        (v.unread, v.sender_known, v.sender.clone())
+    };
+    // mail is not accepted; a chat never needs it; the sender is the one the rules match
+    let (unread, known, sender) = view(human(&rig, list()).await, &mail.id);
+    assert!(unread && !known);
+    assert_eq!(sender.as_deref(), Some("Shop <shop@y.org>"));
+    assert!(view(human(&rig, list()).await, &chat.id).1);
+    // reading it, and marking it unread again, accepts nobody
+    for read in [true, false] {
+        human(
+            &rig,
+            RequestBody::ReadSet {
+                thread_id: mail.id.clone(),
+                read,
+            },
+        )
+        .await;
+        assert!(!view(human(&rig, list()).await, &mail.id).1);
+    }
     rig.daemon.shutdown().await;
 }
 

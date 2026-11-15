@@ -43,6 +43,19 @@ fn load_rules(app: &mut App, client: &Client) {
     }
 }
 
+/// The TODO list again from the daemon.
+fn load_reminders(app: &mut App, client: &Client) {
+    if let Ok(Response::Reminders { reminders }) = client.call(RequestBody::RemindersList {
+        include_completed: false,
+    }) {
+        app.set_reminder_list(reminders);
+    }
+}
+
+/// How often the TODO list is read again while the TUI is open: a change made in the
+/// Reminders app, or one the daemon finished syncing, shows up without a restart.
+const REMINDERS_EVERY: Duration = Duration::from_secs(20);
+
 fn refresh(app: &mut App, client: &Client) {
     app.refresh_tz();
     match client.call(RequestBody::ProposalList {
@@ -85,11 +98,7 @@ fn refresh(app: &mut App, client: &Client) {
     }) {
         app.set_events(events);
     }
-    if let Ok(Response::Reminders { reminders }) = client.call(RequestBody::RemindersList {
-        include_completed: false,
-    }) {
-        app.set_reminder_list(reminders);
-    }
+    load_reminders(app, client);
     match client.call(RequestBody::ThreadList {
         sources: vec![],
         include_archived: false,
@@ -1051,6 +1060,7 @@ fn main() -> io::Result<()> {
     let events = client.subscribe();
     let mut app = App::new();
     refresh(&mut app, &client);
+    let mut last_reminders = Instant::now();
     let (archive_jobs, archive_done) = archive_worker(client.clone());
 
     let mut terminal = ratatui::init();
@@ -1092,6 +1102,10 @@ fn main() -> io::Result<()> {
                         }
                     }
                 }
+            }
+            if last_reminders.elapsed() >= REMINDERS_EVERY {
+                last_reminders = Instant::now();
+                load_reminders(&mut app, &client);
             }
             if let Some(effect) = app.tick(Instant::now()) {
                 if run_effect(&mut app, &client, effect) {

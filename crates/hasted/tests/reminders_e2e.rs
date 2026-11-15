@@ -691,6 +691,12 @@ async fn editing_a_reminder_can_set_and_clear_how_it_repeats() {
         human(&rig, edit(Some(rule), true)).await,
         Response::Done
     ));
+    // the edit shows in the list at once, not only after the next sync
+    let shown = rig.daemon.state.store.get_reminder(&id).unwrap().unwrap();
+    assert_eq!(
+        (shown.title.as_str(), shown.due_at),
+        ("same", Some(1_800_000_000))
+    );
     assert!(rig.helper.calls.lock().unwrap().iter().any(|c| matches!(
         c,
         RemindersRequest::UpdateReminder { repeat: Some(r), set_repeat: true, .. } if *r == rule

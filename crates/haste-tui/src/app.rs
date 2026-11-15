@@ -498,6 +498,8 @@ pub struct App {
     pub todo_offset: Cell<usize>,
     pub channel_offset: Cell<usize>,
     pub later_offset: Cell<usize>,
+    /// Reactions sent and not answered yet, per message: how many, and the body before them.
+    pub reactions_pending: std::collections::HashMap<String, (usize, String)>,
     pub muted_offset: Cell<usize>,
     /// Rows the list on screen shows (set while drawing), for Ctrl-d and Ctrl-u.
     pub list_rows: Cell<usize>,
@@ -643,6 +645,7 @@ impl App {
             todo_offset: Cell::new(0),
             channel_offset: Cell::new(0),
             later_offset: Cell::new(0),
+            reactions_pending: std::collections::HashMap::new(),
             muted_offset: Cell::new(0),
             list_rows: Cell::new(0),
             channels_selected: 0,
@@ -1803,13 +1806,58 @@ impl App {
     }
 
     /// Keys while choosing a reaction: a digit sends that emoji, Esc goes back.
+    /// Show the reaction on the message at once; it is taken back if Beeper refuses it.
+    fn begin_reaction(&mut self, message_id: &str, emoji: &str) {
+        let Some(reader) = self.reader.as_mut() else {
+            return;
+        };
+        let Some(m) = reader.messages.iter_mut().find(|m| m.id == message_id) else {
+            return;
+        };
+        let entry = self
+            .reactions_pending
+            .entry(message_id.to_owned())
+            .or_insert_with(|| (0, m.body_text.clone()));
+        entry.0 += 1;
+        m.body_text = haste_core::reactions::add_key(&m.body_text, emoji);
+    }
+
+    /// The answer to a reaction: on a refusal the message goes back to how it was.
+    pub fn finish_reaction(&mut self, message_id: &str, result: Result<(), String>) {
+        let Some((count, before)) = self.reactions_pending.get_mut(message_id) else {
+            return;
+        };
+        *count = count.saturating_sub(1);
+        let (done, before) = (*count == 0, before.clone());
+        match result {
+            Ok(()) => self.status = "reaction sent".into(),
+            Err(why) => {
+                if let Some(m) = self
+                    .reader
+                    .as_mut()
+                    .and_then(|r| r.messages.iter_mut().find(|m| m.id == message_id))
+                {
+                    m.body_text = before;
+                }
+                // the others still in flight are shown again when their answers come
+                self.status = format!("reaction not sent, taken back: {why}");
+                self.reactions_pending.remove(message_id);
+                return;
+            }
+        }
+        if done {
+            self.reactions_pending.remove(message_id);
+        }
+    }
+
     fn key_react(&mut self, key: Key, message_id: &str) -> Option<Effect> {
         match key {
             Key::Char(c) if c.is_ascii_digit() => {
                 self.mode = Mode::Read;
                 let pick = usize::try_from(c.to_digit(10)?.checked_sub(1)?).ok()?;
                 let emoji = REACTIONS.get(pick)?;
-                self.status = format!("reacting {emoji} …");
+                self.begin_reaction(message_id, emoji);
+                self.status = format!("reacted {emoji} (sending …)");
                 Some(Effect::React {
                     message_id: message_id.to_owned(),
                     key: (*emoji).to_owned(),
@@ -3784,6 +3832,33 @@ mod tests {
         press(&mut app, "+");
         assert!(press(&mut app, "0").is_empty());
         assert_eq!(app.mode, Mode::Read);
+    }
+
+    #[test]
+    fn a_reaction_shows_at_once_and_is_taken_back_when_it_fails() {
+        let mut app = App::new();
+        let mut chat = mail_thread("t3", "Ana", &["a@x.com"], 30);
+        chat.thread.source = haste_core::model::Source::Whatsapp;
+        app.set_threads(vec![chat.clone()]);
+        app.show_thread(chat, vec![message("m1", "a@x.com", "hi", 10)], None);
+        let body = |app: &App| app.reader.as_ref().unwrap().messages[0].body_text.clone();
+        assert_eq!(body(&app), "hi");
+        press(&mut app, "+");
+        press(&mut app, "1");
+        // the reaction is on the message before Beeper has answered
+        assert!(body(&app).contains("👍"), "{}", body(&app));
+        // it went through: it stays
+        app.finish_reaction("m1", Ok(()));
+        assert!(body(&app).contains("👍"));
+        assert!(app.reactions_pending.is_empty());
+        // another one that Beeper refuses: gone again, and the status says so
+        press(&mut app, "+");
+        press(&mut app, "2");
+        assert!(body(&app).contains("❤️"));
+        app.finish_reaction("m1", Err("Beeper refused".into()));
+        assert!(!body(&app).contains("❤️"), "{}", body(&app));
+        assert!(app.status.contains("taken back"), "{}", app.status);
+        assert!(app.reactions_pending.is_empty());
     }
 
     #[test]

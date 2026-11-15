@@ -366,6 +366,43 @@ fn archive_worker(client: Client) -> (Sender<ArchiveJob>, Receiver<ArchiveDone>)
     (job_tx, done_rx)
 }
 
+/// A reaction handed to the background worker.
+struct ReactJob {
+    message_id: String,
+    key: String,
+}
+
+/// The worker's answer.
+struct ReactDone {
+    message_id: String,
+    result: Result<(), String>,
+}
+
+/// Reactions go out one at a time in the background, so the screen shows them at once and
+/// Beeper's slowness never holds the keys. A reaction is never sent twice.
+fn react_worker(client: Client) -> (Sender<ReactJob>, Receiver<ReactDone>) {
+    let (job_tx, job_rx) = channel::<ReactJob>();
+    let (done_tx, done_rx) = channel::<ReactDone>();
+    std::thread::spawn(move || {
+        while let Ok(job) = job_rx.recv() {
+            let result = describe(client.call(RequestBody::ReactionAdd {
+                message_id: job.message_id.clone(),
+                key: job.key,
+            }));
+            if done_tx
+                .send(ReactDone {
+                    message_id: job.message_id,
+                    result,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    (job_tx, done_rx)
+}
+
 /// Take the thread out of the list now and queue the archive.
 fn start_archive(app: &mut App, jobs: &Sender<ArchiveJob>, thread_id: String) {
     let done = if app.thread_is_mail(&thread_id) {
@@ -1073,6 +1110,7 @@ fn main() -> io::Result<()> {
     refresh(&mut app, &client);
     let mut last_reminders = Instant::now();
     let (archive_jobs, archive_done) = archive_worker(client.clone());
+    let (react_jobs, react_done) = react_worker(client.clone());
 
     let mut terminal = ratatui::init();
     let result = (|| -> io::Result<()> {
@@ -1107,6 +1145,19 @@ fn main() -> io::Result<()> {
                             } = effect
                             {
                                 start_archive(&mut app, &archive_jobs, thread_id);
+                            } else if let Effect::React { message_id, key } = effect {
+                                if react_jobs
+                                    .send(ReactJob {
+                                        message_id: message_id.clone(),
+                                        key,
+                                    })
+                                    .is_err()
+                                {
+                                    app.finish_reaction(
+                                        &message_id,
+                                        Err("the reaction worker stopped".into()),
+                                    );
+                                }
                             } else if run_effect(&mut app, &client, effect) {
                                 return Ok(());
                             }
@@ -1124,6 +1175,9 @@ fn main() -> io::Result<()> {
                 }
             }
             let mut dirty = false;
+            while let Ok(answer) = react_done.try_recv() {
+                app.finish_reaction(&answer.message_id, answer.result);
+            }
             while let Ok(finished) = archive_done.try_recv() {
                 let failed = finished.result.is_err();
                 app.finish_archive(&finished.thread_id, finished.result.map(|()| finished.done));

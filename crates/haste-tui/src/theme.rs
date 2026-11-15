@@ -47,8 +47,8 @@ pub const OK: Color = GREEN;
 // Row backgrounds in the thread lists (each a slight tint over BASE).
 /// A thread not read yet: a little brighter than the page.
 pub const UNREAD_BG: Color = Color::Rgb(0x28, 0x29, 0x3d);
-/// A thread the human answered: blue.
-pub const REPLIED_BG: Color = Color::Rgb(0x1c, 0x2d, 0x4d);
+/// A thread the human answered: green.
+pub const REPLIED_BG: Color = Color::Rgb(0x1d, 0x3a, 0x2a);
 /// A priority thread: orange.
 pub const PRIORITY_BG: Color = Color::Rgb(0x8a, 0x48, 0x0b);
 /// A blocked sender's thread: red.

@@ -727,7 +727,10 @@ fn thread_line(
         .and_then(|l| l.sender.as_deref())
         .map(inbox::short_sender)
         .unwrap_or_default();
+    // unread mail: a thin bar at the left edge of the row, and bold text
+    let unread = t.unread && !blocked;
     let mut spans = vec![
+        Span::styled(if unread { "▎" } else { " " }, Style::new().fg(theme::BLUE)),
         Span::styled(
             format!("{} ", if blocked { "⊘" } else { star }),
             Style::new().fg(if blocked {
@@ -744,7 +747,7 @@ fn thread_line(
         ),
     ];
     if is_mail && !sender.is_empty() {
-        let style = if priority && !blocked {
+        let style = if (priority || unread) && !blocked {
             Style::new().fg(theme::TEXT).add_modifier(Modifier::BOLD)
         } else {
             Style::new().fg(theme::SUBTEXT0)
@@ -1503,6 +1506,33 @@ mod tests {
         assert!(!text.contains('\u{1b}') && !text.contains('\u{202E}'));
         assert!(text.contains("köszönöm") || text.contains("k[2Jöszönöm"));
         assert!(text.contains("Esc") && text.contains("reply"));
+    }
+
+    #[test]
+    fn unread_mail_has_a_bar_at_the_row_edge() {
+        let thread = |id: &str, unread: bool| haste_proto::ThreadView {
+            thread: haste_core::model::Thread {
+                id: id.into(),
+                source: haste_core::model::Source::Gmail,
+                external_id: id.into(),
+                subject: format!("subject-{id}"),
+                participants: vec![],
+                last_activity_at: 1,
+                version: 1,
+            },
+            triage: haste_core::model::Triage::new(id, haste_core::model::ObjectKind::Thread),
+            tags: vec![],
+            last: None,
+            unread,
+            replied: false,
+            sender_known: true,
+            sender: None,
+        };
+        let mut app = App::new();
+        app.set_threads(vec![thread("a", true)]);
+        assert!(render(&app).contains('▎'));
+        app.set_threads(vec![thread("a", false)]);
+        assert!(!render(&app).contains('▎'));
     }
 
     #[test]

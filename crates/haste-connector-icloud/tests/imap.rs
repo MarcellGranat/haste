@@ -702,6 +702,7 @@ async fn opening_a_thread_reads_its_older_messages_from_every_folder() {
         last_activity_at: 1_700_000_000,
         oldest_known_at: 1_700_000_000,
         known: 2,
+        deep: false,
     };
     let batch = r.connector.fetch_thread_history(&request).await.unwrap();
     // the same conversation from INBOX and Archive; "Invoice 55" and "Other topic" stay out

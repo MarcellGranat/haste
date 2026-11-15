@@ -19,6 +19,8 @@ pub const BEEPER_BACKFILL_PER_CHAT: usize = 200;
 /// pages counted from the newest.
 pub const BEEPER_HISTORY_EXTRA: usize = 150;
 pub const BEEPER_HISTORY_MAX_PAGES: usize = 10;
+/// Pages walked when the human asks for older messages (no date limit).
+pub const BEEPER_HISTORY_DEEP_PAGES: usize = 60;
 /// A message body is stored cut to this many bytes (at a character boundary).
 pub const BEEPER_BODY_MAX_BYTES: usize = 8 * 1024;
 pub const BEEPER_DEFAULT_HISTORY_DAYS: u32 = 30;

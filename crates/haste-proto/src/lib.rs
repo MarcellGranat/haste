@@ -200,6 +200,10 @@ pub enum RequestBody {
     /// Human-only: ask for a fresh sync of the thread's source (the daemon rate-limits it).
     ThreadRefresh {
         thread_id: String,
+        /// The human pressed `o` with nothing older stored: read further back, now, with no date
+        /// limit (older clients leave it out).
+        #[serde(default)]
+        older: bool,
     },
     /// Human-only: create a reminder now (no approval: the human typed it).
     ReminderNew {

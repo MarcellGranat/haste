@@ -229,6 +229,10 @@ pub enum Effect {
     ReloadThread {
         thread_id: String,
     },
+    /// Nothing older is stored: ask the provider for older messages, with no date limit.
+    LoadOlder {
+        thread_id: String,
+    },
     /// Hide a thread's sender from the TUI (the local `.haste_ignore` list).
     Mute {
         thread_id: String,
@@ -1727,7 +1731,11 @@ impl App {
             Key::Char('o') => {
                 let hidden = reader.first_visible();
                 if hidden == 0 {
-                    self.status = "no older messages are stored for this thread".into();
+                    // everything stored is on screen: read further back at the provider; the
+                    // messages that arrive fill the extra room
+                    reader.shown += READER_WINDOW;
+                    self.status = "asking for older messages…".into();
+                    return Some(Effect::LoadOlder { thread_id });
                 } else {
                     reader.shown += READER_WINDOW;
                     self.status = format!(
@@ -3190,8 +3198,13 @@ mod tests {
         assert!(app.status.contains("12 of 15"), "{}", app.status);
         press(&mut app, "o");
         assert_eq!(app.reader.as_ref().unwrap().first_visible(), 0);
-        press(&mut app, "o");
-        assert!(app.status.contains("no older"), "{}", app.status);
+        // everything stored is shown: `o` asks the provider for older messages
+        assert_eq!(
+            press(&mut app, "o"),
+            vec![Effect::LoadOlder {
+                thread_id: app.reader.as_ref().unwrap().view.thread.id.clone()
+            }]
+        );
         press(&mut app, "g");
         assert_eq!(app.reader.as_ref().unwrap().selected, 0);
     }

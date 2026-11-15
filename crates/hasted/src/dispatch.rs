@@ -350,7 +350,8 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             Ok(None) => err(ErrorCode::NotFound, "thread not found"),
             Err(e) => map_store(&e),
         },
-        RequestBody::ThreadRefresh { thread_id } => match state.store.get_thread(&thread_id) {
+        RequestBody::ThreadRefresh { thread_id, older } => match state.store.get_thread(&thread_id)
+        {
             Ok(Some((thread, _))) => {
                 // Opening a thread may wake its source's sync, at most once per interval.
                 if state.connector_for(&thread.source).is_some()
@@ -360,7 +361,7 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
                 }
                 // and its earlier history is read once, if the provider can give it
                 if state.connector_for(&thread.source).is_some() {
-                    state.queue_history(&thread.source, &thread.id);
+                    state.queue_history(&thread.source, &thread.id, older);
                 }
                 Response::Done
             }

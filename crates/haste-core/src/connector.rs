@@ -93,6 +93,9 @@ pub struct HistoryRequest {
     pub oldest_known_at: i64,
     /// How many messages are stored.
     pub known: usize,
+    /// The human asked for older messages: read as far back as the provider allows (no date
+    /// limit), not just the usual first pages.
+    pub deep: bool,
 }
 
 /// A reaction the human adds to a message of a chat.

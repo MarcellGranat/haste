@@ -108,6 +108,8 @@ struct HistoryQueue {
     /// When each thread's history was last asked for.
     done: HashMap<String, std::time::Instant>,
     waiting: HashMap<Source, Vec<String>>,
+    /// Threads whose waiting read was asked for by the human (read deeper).
+    deep: std::collections::HashSet<String>,
 }
 
 /// Remembers when each source was last woken, so opening threads cannot hammer a provider.
@@ -185,17 +187,22 @@ impl State {
 
     /// Ask for the earlier messages of a thread, at most once per [`HISTORY_MIN_INTERVAL`] each
     /// (chats also come back with their current reactions). Returns whether it was queued.
-    pub fn queue_history(&self, source: &Source, thread_id: &str) -> bool {
+    /// A `deep` ask (the human wants older messages) is never held back by the interval.
+    pub fn queue_history(&self, source: &Source, thread_id: &str, deep: bool) -> bool {
         let mut q = self
             .history
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = std::time::Instant::now();
-        if q.done
-            .get(thread_id)
-            .is_some_and(|t| now.duration_since(*t) < HISTORY_MIN_INTERVAL)
+        if !deep
+            && q.done
+                .get(thread_id)
+                .is_some_and(|t| now.duration_since(*t) < HISTORY_MIN_INTERVAL)
         {
             return false;
+        }
+        if deep {
+            q.deep.insert(thread_id.to_owned());
         }
         q.done.insert(thread_id.to_owned(), now);
         q.waiting
@@ -215,6 +222,15 @@ impl State {
             .waiting
             .remove(source)
             .unwrap_or_default()
+    }
+
+    /// Was this thread's waiting read asked for by the human? (Asking clears it.)
+    pub fn take_deep(&self, thread_id: &str) -> bool {
+        self.history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .deep
+            .remove(thread_id)
     }
 
     /// A history read failed in a way worth trying again on the next open.

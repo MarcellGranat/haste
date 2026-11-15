@@ -411,7 +411,10 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                     app.show_thread(view, messages, own);
                     // Ask for a fresh sync of this source (the daemon rate-limits it); the
                     // reader reloads when the new messages arrive. A failure changes nothing.
-                    let _ = client.call(RequestBody::ThreadRefresh { thread_id });
+                    let _ = client.call(RequestBody::ThreadRefresh {
+                        thread_id,
+                        older: false,
+                    });
                 }
                 other => {
                     app.status = describe(other)
@@ -426,6 +429,18 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 other => describe(other)
                     .err()
                     .unwrap_or_else(|| "could not react".into()),
+            };
+        }
+        Effect::LoadOlder { thread_id } => {
+            app.status = match client.call(RequestBody::ThreadRefresh {
+                thread_id,
+                older: true,
+            }) {
+                Ok(_) => {
+                    "reading older messages from the provider (none appear if there are no more)"
+                        .into()
+                }
+                Err(e) => format!("could not ask for older messages: {e}"),
             };
         }
         Effect::ReloadThread { thread_id } => {

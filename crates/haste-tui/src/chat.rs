@@ -530,10 +530,13 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
         } else {
             String::new()
         };
-        let header = format!(
-            " {who} · {count}{} ",
-            inbox::smart_stamp(m.sent_at, l.now, l.tz_offset)
-        );
+        // your own messages carry only the date, others the sender too
+        let stamp = inbox::smart_stamp(m.sent_at, l.now, l.tz_offset);
+        let header = if own {
+            format!(" {count}{stamp} ")
+        } else {
+            format!(" {who} · {count}{stamp} ")
+        };
         let inner = body
             .iter()
             .map(|(s, _)| inbox::width(s))
@@ -847,7 +850,10 @@ mod tests {
         }
         let mine = text_of(&lines[laid[1].start]);
         assert!(mine.starts_with(' '), "yours is indented to the right");
-        assert!(mine.trim_start().starts_with("╭─ you"));
+        assert!(
+            mine.trim_start().starts_with("╭─ ") && !mine.contains("you"),
+            "yours shows the date only"
+        );
         assert!(lines[laid[1].start..laid[1].end]
             .iter()
             .any(|l| text_of(l).contains("◫ f.pdf")));

@@ -201,6 +201,7 @@ pub async fn history_once(state: &Arc<State>, connector: &Arc<dyn Connector>) {
     for thread_id in state.take_history(&source) {
         let st = Arc::clone(state);
         let id = thread_id.clone();
+        let deep = state.take_deep(&thread_id);
         let request = tokio::task::spawn_blocking(move || {
             let (thread, _) = st.store.get_thread(&id).ok().flatten()?;
             let messages = st.store.messages_for_thread(&id).ok()?;
@@ -210,6 +211,7 @@ pub async fn history_once(state: &Arc<State>, connector: &Arc<dyn Connector>) {
                 last_activity_at: thread.last_activity_at,
                 oldest_known_at: messages.iter().map(|m| m.sent_at).min().unwrap_or(0),
                 known: messages.len(),
+                deep,
             })
         })
         .await

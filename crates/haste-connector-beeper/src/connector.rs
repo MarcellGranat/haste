@@ -15,9 +15,9 @@ use serde::{Deserialize, Serialize};
 use crate::client::BeeperClient;
 use crate::config::BeeperConfig;
 use crate::consts::{
-    BEEPER_BACKFILL_PER_CHAT, BEEPER_HISTORY_EXTRA, BEEPER_HISTORY_MAX_PAGES,
-    BEEPER_MAX_CHATS_PER_CYCLE, BEEPER_MAX_PAGES_PER_CHAT, BEEPER_MAX_SEND_BYTES, BEEPER_PAGE_SIZE,
-    DAY_SECS,
+    BEEPER_BACKFILL_PER_CHAT, BEEPER_HISTORY_DEEP_PAGES, BEEPER_HISTORY_EXTRA,
+    BEEPER_HISTORY_MAX_PAGES, BEEPER_MAX_CHATS_PER_CYCLE, BEEPER_MAX_PAGES_PER_CHAT,
+    BEEPER_MAX_SEND_BYTES, BEEPER_PAGE_SIZE, DAY_SECS,
 };
 pub use crate::mapper::BeeperSource;
 use crate::mapper::{map_message, Mapped};
@@ -243,7 +243,12 @@ impl BeeperConnector {
         let mut found: Vec<Mapped> = Vec::new();
         let mut older = 0_usize;
         let mut cursor: Option<String> = None;
-        for _ in 0..BEEPER_HISTORY_MAX_PAGES {
+        let pages = if request.deep {
+            BEEPER_HISTORY_DEEP_PAGES
+        } else {
+            BEEPER_HISTORY_MAX_PAGES
+        };
+        for _ in 0..pages {
             let (items, more, next) = self
                 .client
                 .messages(chat_id, BEEPER_PAGE_SIZE, cursor.as_deref())

@@ -1528,6 +1528,8 @@ impl App {
             Key::Esc | Key::Char('h') if self.view == View::Channels && self.channel_inner => {
                 self.channel_inner = false;
             }
+            // a first Esc dismisses the red notice in the footer
+            Key::Esc if !self.notices.is_empty() => self.notices.clear(),
             Key::Esc if !self.view.is_tab() => self.view = View::Today,
             Key::Enter | Key::Char('l') if self.view == View::Channels && !self.channel_inner => {
                 self.channel_inner = true;
@@ -4435,6 +4437,18 @@ mod tests {
         // another thread's box is empty
         app.open_reply_form("t2");
         assert_eq!(app.compose.as_ref().unwrap().focused_text(), "");
+    }
+
+    #[test]
+    fn esc_dismisses_the_footer_notice_before_it_does_anything_else() {
+        let mut app = inbox_app();
+        app.view = View::Connectors;
+        app.notices.push("a send needs a check".into());
+        app.handle_key(Key::Esc);
+        assert!(app.notices.is_empty());
+        assert_eq!(app.view, View::Connectors, "the first Esc only dismisses");
+        app.handle_key(Key::Esc);
+        assert_eq!(app.view, View::Today);
     }
 
     #[test]

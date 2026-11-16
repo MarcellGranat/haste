@@ -961,10 +961,15 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
             }
         }
         Effect::Resolve { id, done } => {
-            app.status = match describe(client.call(RequestBody::ResolveExecuting {
-                proposal_id: id,
+            let settled = describe(client.call(RequestBody::ResolveExecuting {
+                proposal_id: id.clone(),
                 done,
-            })) {
+            }));
+            if settled.is_ok() {
+                // the "may or may not have been delivered" notice has done its job
+                app.notices.retain(|n| !n.contains(&id));
+            }
+            app.status = match settled {
                 Ok(()) if done => "marked done".into(),
                 Ok(()) => "returned to approved".into(),
                 Err(e) => e,

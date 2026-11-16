@@ -40,6 +40,9 @@ func wire(_ r: EKReminder) -> [String: Any] {
         "modified": Int((r.lastModifiedDate ?? Date(timeIntervalSince1970: 0)).timeIntervalSince1970),
     ]
     if r.priority != 0 { out["priority"] = r.priority }
+    if let alarm = (r.alarms ?? []).first(where: { $0.absoluteDate == nil && $0.structuredLocation == nil && $0.relativeOffset < 0 }) {
+        out["early"] = Int(-alarm.relativeOffset / 60)
+    }
     if let comps = r.dueDateComponents, let date = Calendar.current.date(from: comps) {
         out["due"] = Int(date.timeIntervalSince1970)
     }
@@ -161,6 +164,9 @@ case "create_reminder":
         }
     }
     if let priority = request["priority"] as? Int, (1...9).contains(priority) { reminder.priority = priority }
+    if let early = request["early"] as? Int, early > 0, reminder.dueDateComponents != nil {
+        reminder.addAlarm(EKAlarm(relativeOffset: -TimeInterval(early * 60)))
+    }
     do { try store.save(reminder, commit: true) } catch { fail("failed", "save failed") }
     emit(["op": "create_reminder", "reminder": wire(reminder)])
 
@@ -172,6 +178,20 @@ case "complete_reminder":
     reminder.isCompleted = true
     do { try store.save(reminder, commit: true) } catch { fail("failed", "save failed") }
     emit(["op": "complete_reminder"])
+
+case "set_early":
+    guard authorized() else { fail("not_authorized") }
+    guard let id = request["external_id"] as? String,
+          let minutes = request["minutes"] as? Int, minutes >= 0 else { fail("bad_request") }
+    guard let reminder = store.calendarItem(withIdentifier: id) as? EKReminder else { fail("not_found") }
+    for alarm in reminder.alarms ?? [] where alarm.absoluteDate == nil && alarm.structuredLocation == nil {
+        reminder.removeAlarm(alarm)
+    }
+    if minutes > 0 && reminder.dueDateComponents != nil {
+        reminder.addAlarm(EKAlarm(relativeOffset: -TimeInterval(minutes * 60)))
+    }
+    do { try store.save(reminder, commit: true) } catch { fail("failed", "save failed") }
+    emit(["op": "set_early"])
 
 case "set_priority":
     guard authorized() else { fail("not_authorized") }

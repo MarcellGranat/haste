@@ -3428,8 +3428,8 @@ mod tests {
     fn ctrl_g_in_the_notes_field_hands_the_notes_to_the_editor_and_takes_them_back() {
         let mut app = inbox_app();
         press(&mut app, "t");
-        // Tab: title -> date -> length -> priority -> repeat -> notes
-        for _ in 0..5 {
+        // Tab: title -> date -> early -> length -> priority -> repeat -> notes
+        for _ in 0..6 {
             app.handle_key(Key::Tab);
         }
         press(&mut app, "first");
@@ -3727,6 +3727,7 @@ mod tests {
             repeat: None,
             minutes: 30,
             priority: haste_proto::TaskPriority::Middle,
+            early: None,
         }
     }
 
@@ -4440,6 +4441,7 @@ mod tests {
             repeat: None,
             minutes: 30,
             priority: haste_proto::TaskPriority::Middle,
+            early: None,
         };
         app.set_reminder_list(vec![
             r("undated", None, false),

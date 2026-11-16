@@ -35,7 +35,12 @@ pub enum RemindersRequest {
         /// Reminders' own number (1 to 9), left out for none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         priority: Option<u8>,
+        /// Minutes before it is due that Reminders alerts early.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        early: Option<u32>,
     },
+    /// Set the early reminder (minutes before it is due; 0 removes it) and nothing else.
+    SetEarly { external_id: String, minutes: u32 },
     /// Set the priority number (0 for none) and nothing else.
     SetPriority { external_id: String, priority: u8 },
     /// Fails when the target is missing or already completed.
@@ -96,6 +101,9 @@ pub struct WireReminder {
     /// Reminders' own priority number (0 none, 1 to 9), when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<u8>,
+    /// Minutes before it is due of its early reminder, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub early: Option<u32>,
 }
 
 impl WireReminder {
@@ -136,6 +144,7 @@ pub enum RemindersResponse {
     CompleteReminder {},
     UpdateReminder {},
     SetPriority {},
+    SetEarly {},
     /// `kind`: `not_authorized`, `not_found`, `already_completed`, `list_not_found`, `failed`.
     Error {
         kind: String,
@@ -207,6 +216,7 @@ mod tests {
             modified: 7,
             repeat: None,
             priority: None,
+            early: None,
         };
         let r = wire.into_reminder();
         assert!(r.notes_snippet.chars().count() <= haste_core::model::NOTES_SNIPPET_MAX);

@@ -683,6 +683,42 @@ impl Store {
         })
     }
 
+    /// Take the early reminders Reminders reports (`None` is none).
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn set_reminder_earlies(&self, earlies: &[(String, Option<u32>)]) -> StoreResult<()> {
+        let earlies = earlies.to_vec();
+        self.write(move |conn| {
+            for (external_id, minutes) in &earlies {
+                match minutes {
+                    Some(m) if *m > 0 => conn.execute(
+                        "INSERT INTO reminder_early (external_id, minutes) VALUES (?1, ?2) \
+                         ON CONFLICT(external_id) DO UPDATE SET minutes = ?2",
+                        params![external_id, m],
+                    )?,
+                    _ => conn.execute(
+                        "DELETE FROM reminder_early WHERE external_id = ?1",
+                        [external_id],
+                    )?,
+                };
+            }
+            Ok(())
+        })
+    }
+
+    /// The early reminders (minutes before) by the Reminders item's external id.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn reminder_earlies(&self) -> StoreResult<std::collections::HashMap<String, u32>> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare("SELECT external_id, minutes FROM reminder_early")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))?;
+            Ok(rows.collect::<Result<std::collections::HashMap<_, _>, _>>()?)
+        })
+    }
+
     /// The set priorities (ranks) by the Reminders item's external id.
     ///
     /// # Errors

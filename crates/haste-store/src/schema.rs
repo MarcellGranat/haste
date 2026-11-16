@@ -209,6 +209,13 @@ const MIGRATIONS: &[&str] = &[
         priority INTEGER NOT NULL
     );
     ",
+    // 14: minutes before the due time of a reminder's early reminder, as Reminders reports it.
+    "
+    CREATE TABLE reminder_early (
+        external_id TEXT PRIMARY KEY,
+        minutes INTEGER NOT NULL
+    );
+    ",
 ];
 
 /// Highest schema version this binary understands.

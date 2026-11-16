@@ -219,9 +219,14 @@ fn run_cycle(
             )
         })
         .collect();
+    let earlies = reminders
+        .iter()
+        .map(|w| (w.external_id.clone(), w.early))
+        .collect();
     Ok(Batch {
         repeats,
         priorities,
+        earlies,
         reminders: reminders
             .into_iter()
             .map(crate::protocol::WireReminder::into_reminder)
@@ -291,6 +296,7 @@ impl Connector for RemindersConnector {
                 notes: reminder.notes.clone(),
                 repeat: reminder.repeat,
                 priority: reminder.priority.map(|p| p.to_apple()).filter(|n| *n != 0),
+                early: reminder.early.filter(|m| *m != 0),
             };
             let reply = tokio::task::spawn_blocking(move || helper.call(&request))
                 .await
@@ -300,6 +306,29 @@ impl Connector for RemindersConnector {
                 RemindersResponse::CreateReminder { reminder } => Ok(ReminderReceipt {
                     external_id: reminder.external_id,
                 }),
+                RemindersResponse::Error { kind, .. } => Err(reply_error(&kind)),
+                _ => Err(unexpected()),
+            }
+        })
+    }
+
+    fn set_reminder_early<'a>(
+        &'a self,
+        external_id: &'a str,
+        minutes: Option<u32>,
+    ) -> BoxFuture<'a, Result<(), ConnectorError>> {
+        Box::pin(async move {
+            let helper = Arc::clone(&self.helper);
+            let request = RemindersRequest::SetEarly {
+                external_id: external_id.to_owned(),
+                minutes: minutes.unwrap_or(0),
+            };
+            let reply = tokio::task::spawn_blocking(move || helper.call(&request))
+                .await
+                .map_err(|_| ConnectorError::Other("reminder task failed".into()))?
+                .map_err(helper_error)?;
+            match reply {
+                RemindersResponse::SetEarly {} => Ok(()),
                 RemindersResponse::Error { kind, .. } => Err(reply_error(&kind)),
                 _ => Err(unexpected()),
             }
@@ -422,6 +451,7 @@ mod tests {
             modified,
             repeat: None,
             priority: None,
+            early: None,
         }
     }
 
@@ -578,6 +608,7 @@ mod tests {
                 notes: Some("haste:thread/x".into()),
                 repeat: None,
                 priority: None,
+                early: None,
             })
             .await
             .unwrap();

@@ -45,6 +45,7 @@ fn wire(id: &str, title: &str) -> WireReminder {
         modified: 10,
         repeat: None,
         priority: None,
+        early: None,
     }
 }
 
@@ -79,6 +80,7 @@ impl Helper for FakeHelper {
                 repeat,
                 due,
                 priority,
+                early,
                 ..
             } => {
                 if mode == Mode::TimeOutOnWrite {
@@ -92,6 +94,7 @@ impl Helper for FakeHelper {
                 r.repeat = *repeat;
                 r.due = *due;
                 r.priority = priority.filter(|p| *p != 0);
+                r.early = *early;
                 list.push(r.clone());
                 Ok(RemindersResponse::CreateReminder { reminder: r })
             }
@@ -130,6 +133,19 @@ impl Helper for FakeHelper {
                         r.notes = format!("{}{extra}", r.notes);
                     }
                     Ok(RemindersResponse::UpdateReminder {})
+                }
+                None => Ok(RemindersResponse::Error {
+                    kind: "not_found".into(),
+                    message: String::new(),
+                }),
+            },
+            RemindersRequest::SetEarly {
+                external_id,
+                minutes,
+            } => match list.iter_mut().find(|r| &r.external_id == external_id) {
+                Some(r) => {
+                    r.early = (*minutes != 0).then_some(*minutes);
+                    Ok(RemindersResponse::SetEarly {})
                 }
                 None => Ok(RemindersResponse::Error {
                     kind: "not_found".into(),
@@ -596,6 +612,7 @@ async fn a_new_reminder_carries_its_repeat_rule_thread_link_and_shows_at_once() 
                 thread_id: Some(thread.id.clone()),
                 minutes: Some(45),
                 priority: None,
+                early: None,
             }
         )
         .await,
@@ -654,6 +671,7 @@ async fn labels_set_in_the_popup_are_saved_for_a_new_todo_and_for_an_edit() {
                 thread_id: None,
                 minutes: None,
                 priority: None,
+                early: None,
             }
         )
         .await,
@@ -683,6 +701,87 @@ async fn labels_set_in_the_popup_are_saved_for_a_new_todo_and_for_an_edit() {
     }
     let all = rig.daemon.state.store.all_reminder_tags().unwrap();
     assert_eq!(all.get(&made.id), Some(&vec!["haste".to_owned()]));
+    rig.daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_task_has_an_early_reminder_written_to_reminders_and_read_back() {
+    let rig = boot().await;
+    release_and_sync(&rig).await;
+    let id = rig.daemon.state.store.list_reminders(false).unwrap()[0]
+        .id
+        .clone();
+    async fn early_of(rig: &Rig) -> Option<u32> {
+        let Response::Reminders { reminders } = human(
+            rig,
+            RequestBody::RemindersList {
+                include_completed: false,
+            },
+        )
+        .await
+        else {
+            panic!()
+        };
+        reminders[0].early
+    }
+    let set = |minutes| RequestBody::ReminderEarly {
+        reminder_id: id.clone(),
+        minutes,
+    };
+    assert_eq!(early_of(&rig).await, None);
+    // a task without a date cannot have one
+    assert!(matches!(human(&rig, set(Some(60))).await, Response::Done));
+    assert_eq!(early_of(&rig).await, None);
+    // give it a date, then an early reminder
+    assert!(matches!(
+        human(
+            &rig,
+            RequestBody::ReminderEdit {
+                reminder_id: id.clone(),
+                title: "t".into(),
+                due: Some(4_000_000_000),
+                append_notes: None,
+                repeat: None,
+                set_repeat: false,
+            }
+        )
+        .await,
+        Response::Done
+    ));
+    assert!(matches!(human(&rig, set(Some(60))).await, Response::Done));
+    assert_eq!(early_of(&rig).await, Some(60));
+    let told = rig
+        .helper
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|c| match c {
+            RemindersRequest::SetEarly { minutes, .. } => Some(*minutes),
+            _ => None,
+        });
+    assert_eq!(told, Some(60));
+    // set in the Reminders app itself: read at the next sync
+    {
+        let mut list = rig.helper.reminders.lock().unwrap();
+        list[0].early = Some(1440);
+        list[0].modified = 99;
+    }
+    sync_once(&rig.daemon.state, &rig.connector).await.unwrap();
+    assert_eq!(early_of(&rig).await, Some(1440));
+    assert!(matches!(human(&rig, set(None)).await, Response::Done));
+    assert_eq!(early_of(&rig).await, None);
+    // more than a week is refused; an agent cannot
+    assert_eq!(
+        code(&human(&rig, set(Some(20_000))).await),
+        Some(ErrorCode::Validation)
+    );
+    let token = agent(&rig).await;
+    assert_eq!(
+        code(&call(&rig, &token, set(Some(5))).await),
+        Some(ErrorCode::Denied)
+    );
     rig.daemon.shutdown().await;
 }
 
@@ -912,6 +1011,7 @@ async fn the_human_creates_and_edits_reminders_directly_and_an_agent_cannot() {
                 thread_id: None,
                 minutes: None,
                 priority: None,
+                early: None,
             }
         )
         .await,
@@ -941,6 +1041,7 @@ async fn the_human_creates_and_edits_reminders_directly_and_an_agent_cannot() {
                     thread_id: None,
                     minutes: None,
                     priority: None,
+                    early: None,
                 }
             )
             .await

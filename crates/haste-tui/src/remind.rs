@@ -21,6 +21,7 @@ const MAX_EVERY: u32 = 99;
 pub enum Field {
     Title,
     Date,
+    Early,
     Duration,
     Priority,
     Repeat,
@@ -30,9 +31,10 @@ pub enum Field {
 }
 
 impl Field {
-    const ORDER: [Self; 8] = [
+    const ORDER: [Self; 9] = [
         Self::Title,
         Self::Date,
+        Self::Early,
         Self::Duration,
         Self::Priority,
         Self::Repeat,
@@ -45,6 +47,38 @@ impl Field {
         let i = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
         Self::ORDER[(i + 1) % Self::ORDER.len()]
     }
+}
+
+/// The early reminders Up and Down step through, in minutes before the due time (0: none).
+pub const EARLY_STEPS: [u32; 9] = [0, 5, 10, 15, 30, 60, 120, 1440, 2880];
+
+/// The early reminder a new TODO gets from its date: due later today 5 minutes before; one or two
+/// days ahead an hour before; further ahead the day before. No date, or one already past: none.
+#[must_use]
+pub fn default_early(due: Option<i64>, now: i64, off: i64) -> Option<u32> {
+    let due = due.filter(|d| *d > now)?;
+    let days = (due + off).div_euclid(DAY) - (now + off).div_euclid(DAY);
+    Some(match days {
+        0 => 5,
+        1 | 2 => 60,
+        _ => 1440,
+    })
+}
+
+/// "5 min", "1 hour", "2 hours", "1 day".
+#[must_use]
+pub fn early_text(minutes: u32) -> String {
+    let (n, unit) = if minutes.is_multiple_of(1440) {
+        (minutes / 1440, "day")
+    } else if minutes.is_multiple_of(60) {
+        (minutes / 60, "hour")
+    } else {
+        (minutes, "min")
+    };
+    format!(
+        "{n} {unit}{}",
+        if n == 1 || unit == "min" { "" } else { "s" }
+    )
 }
 
 /// Which part of the date Left and Right are on.
@@ -71,6 +105,10 @@ pub struct Task {
     pub minutes: u32,
     /// How long it took before an edit (the same as `minutes` for a new one).
     pub minutes_before: u32,
+    /// Minutes before it is due that it reminds early (`None`: no early reminder).
+    pub early: Option<u32>,
+    /// What it had before an edit.
+    pub early_before: Option<u32>,
     /// How important it is.
     pub priority: haste_proto::TaskPriority,
     /// How important it was before an edit (the same as `priority` for a new one).
@@ -105,6 +143,11 @@ pub struct RemindForm {
     /// digits type it.
     pub duration: crate::durfield::DurationEdit,
     minutes_before: u32,
+    /// The early reminder: set by hand (or the TODO's own when editing). A new TODO's follows
+    /// its date until then.
+    early: Option<u32>,
+    early_touched: bool,
+    early_before: Option<u32>,
     /// How important it is: Up, Down, Left and Right step, `l` `m` `h` `u` pick.
     pub priority: haste_proto::TaskPriority,
     priority_before: haste_proto::TaskPriority,
@@ -169,6 +212,9 @@ impl RemindForm {
             ),
             minutes_before: haste_proto::DEFAULT_TASK_MINUTES,
             priority: haste_proto::TaskPriority::Middle,
+            early: None,
+            early_touched: false,
+            early_before: None,
             priority_before: haste_proto::TaskPriority::Middle,
             date_typed: String::new(),
             notes: String::new(),
@@ -219,6 +265,8 @@ impl RemindForm {
             true,
         );
         form.minutes_before = todo.minutes;
+        form.early = todo.early;
+        form.early_before = todo.early;
         form.priority = todo.priority;
         form.priority_before = todo.priority;
         // the words of the title set the date and the repeat (also as it opens); without
@@ -281,6 +329,39 @@ impl RemindForm {
         ))
     }
 
+    /// The early reminder in effect: the hand-set one, an edited TODO's own, or for a new TODO
+    /// the one its date asks for. None without a date.
+    #[must_use]
+    pub fn early_minutes(&self) -> Option<u32> {
+        self.due?;
+        if self.early_touched || self.edit_id.is_some() {
+            self.early
+        } else {
+            default_early(self.due, self.now, self.off)
+        }
+    }
+
+    /// Up (`more`) or Down: the next early reminder in [`EARLY_STEPS`].
+    fn step_early(&mut self, more: bool) {
+        let cur = self.early_minutes().unwrap_or(0);
+        let next = if more {
+            EARLY_STEPS
+                .iter()
+                .copied()
+                .find(|m| *m > cur)
+                .unwrap_or(EARLY_STEPS[EARLY_STEPS.len() - 1])
+        } else {
+            EARLY_STEPS
+                .iter()
+                .rev()
+                .copied()
+                .find(|m| *m < cur)
+                .unwrap_or(0)
+        };
+        self.early = (next != 0).then_some(next);
+        self.early_touched = true;
+    }
+
     /// The title to save: the words that gave the date or the repeat are taken out (they live
     /// in the date now, and opening the task again must not read them a second time). A title
     /// that was only such words keeps them.
@@ -317,6 +398,8 @@ impl RemindForm {
             repeat: self.repeat,
             minutes: self.duration.minutes,
             minutes_before: self.minutes_before,
+            early: self.early_minutes(),
+            early_before: self.early_before,
             priority: self.priority,
             priority_before: self.priority_before,
             notes: self.notes.trim().to_owned(),
@@ -532,6 +615,12 @@ impl RemindForm {
             (Field::Date, Key::Char(c)) if c.is_ascii_digit() => self.type_into_date(c),
             (Field::Duration, k) => {
                 self.duration.handle(k);
+            }
+            (Field::Early, Key::Up | Key::Right) => self.step_early(true),
+            (Field::Early, Key::Down | Key::Left) => self.step_early(false),
+            (Field::Early, Key::Backspace) => {
+                self.early = None;
+                self.early_touched = true;
             }
             (Field::Priority, Key::Up | Key::Right) => self.priority = self.priority.step(true),
             (Field::Priority, Key::Down | Key::Left) => self.priority = self.priority.step(false),
@@ -861,6 +950,7 @@ mod tests {
             }),
             minutes: 30,
             priority: haste_proto::TaskPriority::Middle,
+            early: None,
         };
         let mut f = RemindForm::editing(&todo, &["haste".into()], NOW, OFF);
         assert_eq!(f.title, "Pay rent");
@@ -945,10 +1035,61 @@ mod tests {
     }
 
     #[test]
+    fn a_new_todo_gets_an_early_reminder_from_how_far_off_it_is() {
+        let day = |d: i64, h: i64| NOW + d * DAY + h * HOUR;
+        // later today: 5 minutes before
+        assert_eq!(default_early(Some(NOW + 2 * HOUR), NOW, OFF), Some(5));
+        // one or two days off: an hour before
+        let tomorrow = (NOW + OFF).div_euclid(DAY) * DAY + DAY + 9 * HOUR - OFF;
+        assert_eq!(default_early(Some(tomorrow), NOW, OFF), Some(60));
+        assert_eq!(default_early(Some(tomorrow + DAY), NOW, OFF), Some(60));
+        // further: the day before
+        assert_eq!(
+            default_early(Some(tomorrow + 2 * DAY), NOW, OFF),
+            Some(1440)
+        );
+        assert_eq!(default_early(Some(day(30, 0)), NOW, OFF), Some(1440));
+        // no date, or one that is past: none
+        assert_eq!(default_early(None, NOW, OFF), None);
+        assert_eq!(default_early(Some(NOW - HOUR), NOW, OFF), None);
+        assert_eq!(early_text(5), "5 min");
+        assert_eq!(early_text(60), "1 hour");
+        assert_eq!(early_text(120), "2 hours");
+        assert_eq!(early_text(1440), "1 day");
+    }
+
+    #[test]
+    fn the_early_reminder_follows_the_date_until_it_is_set_by_hand() {
+        let mut f = form("Mail");
+        let tomorrow_default = f.early_minutes();
+        assert_eq!(
+            tomorrow_default,
+            Some(60),
+            "tomorrow morning: an hour before"
+        );
+        f.handle(Key::Tab); // date
+        f.handle(Key::Tab); // early
+        assert_eq!(f.field, Field::Early);
+        f.handle(Key::Up);
+        assert_eq!(f.early_minutes(), Some(120));
+        f.handle(Key::Backspace);
+        assert_eq!(f.early_minutes(), None, "none by hand stays none");
+        f.handle(Key::Down);
+        assert_eq!(f.early_minutes(), None);
+        f.handle(Key::Up);
+        assert_eq!(f.early_minutes(), Some(5));
+        let Outcome::Save(task) = f.handle(Key::Enter) else {
+            panic!("expected a task")
+        };
+        assert_eq!((task.early, task.early_before), (Some(5), None));
+    }
+
+    #[test]
     fn the_priority_is_stepped_or_picked_by_its_first_letter() {
         use haste_proto::TaskPriority::{High, Low, Middle, Urgent};
         let mut f = form("Mail");
         f.handle(Key::Tab); // date
+        f.handle(Key::Tab); // early
         f.handle(Key::Tab); // length
         f.handle(Key::Tab); // priority
         assert_eq!(f.field, Field::Priority);
@@ -973,6 +1114,7 @@ mod tests {
     fn the_length_is_a_field_of_its_own_stepped_or_typed() {
         let mut f = form("Mail");
         f.handle(Key::Tab); // date
+        f.handle(Key::Tab); // early
         f.handle(Key::Tab); // length
         assert_eq!(f.field, Field::Duration);
         assert_eq!(f.duration.minutes, 30, "30 minutes by default");

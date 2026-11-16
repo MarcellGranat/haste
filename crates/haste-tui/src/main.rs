@@ -294,6 +294,7 @@ fn save_todo(
                 thread_id: None,
                 minutes: None,
                 priority: None,
+                early: None,
             },
             "TODO created",
         ),
@@ -805,6 +806,12 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                         minutes: task.minutes,
                     }));
                 }
+                if result.is_ok() && task.early != task.early_before {
+                    result = describe(client.call(RequestBody::ReminderEarly {
+                        reminder_id: reminder_id.clone(),
+                        minutes: task.early,
+                    }));
+                }
                 if result.is_ok() && task.priority != task.priority_before {
                     result = describe(client.call(RequestBody::ReminderPriority {
                         reminder_id: reminder_id.clone(),
@@ -845,6 +852,7 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 thread_id: task.thread_id,
                 minutes: Some(task.minutes),
                 priority: Some(task.priority),
+                early: task.early,
             })) {
                 Ok(()) => "reminder created".into(),
                 Err(e) => format!("reminder not created: {e}"),

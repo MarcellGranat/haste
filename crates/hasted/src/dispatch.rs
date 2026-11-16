@@ -105,6 +105,7 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::EventShift { .. }
         | RequestBody::ReminderDuration { .. }
         | RequestBody::ReminderPriority { .. }
+        | RequestBody::ReminderEarly { .. }
         | RequestBody::MutedDelete { .. }
         | RequestBody::ThreadDelete { .. }
         | RequestBody::RuleChange { .. }
@@ -157,6 +158,7 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::EventShift { .. } => "event_shift",
         RequestBody::ReminderDuration { .. } => "reminder_duration",
         RequestBody::ReminderPriority { .. } => "reminder_priority",
+        RequestBody::ReminderEarly { .. } => "reminder_early",
         RequestBody::MutedDelete { .. } => "muted_delete",
         RequestBody::ThreadDelete { .. } => "thread_delete",
         RequestBody::RuleChange { .. } => "rule_change",
@@ -688,6 +690,7 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             thread_id,
             minutes,
             priority,
+            early,
         } => reminder_write(
             state,
             principal,
@@ -700,6 +703,7 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
                 thread_id,
                 minutes,
                 priority,
+                early,
             },
         ),
         RequestBody::ReminderEdit {
@@ -759,6 +763,10 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             reminder_id,
             priority,
         } => reminder_priority(state, principal, &reminder_id, priority),
+        RequestBody::ReminderEarly {
+            reminder_id,
+            minutes,
+        } => reminder_early(state, principal, &reminder_id, minutes),
         RequestBody::EventShift { event_id, times } => {
             event_shift(state, principal, &event_id, times)
         }
@@ -841,6 +849,7 @@ fn reminders_list(state: &State, principal: &Principal, include_completed: bool)
     let repeats = state.store.reminder_repeats().unwrap_or_default();
     let durations = state.store.reminder_durations().unwrap_or_default();
     let priorities = state.store.reminder_priorities().unwrap_or_default();
+    let earlies = state.store.reminder_earlies().unwrap_or_default();
     let machine_labels = machine_labels_for(state, principal);
     match state.store.list_reminders(include_completed) {
         Ok(rows) => Response::Reminders {
@@ -854,6 +863,7 @@ fn reminders_list(state: &State, principal: &Principal, include_completed: bool)
                             .get(&reminder.external_id)
                             .copied()
                             .unwrap_or(haste_proto::DEFAULT_TASK_MINUTES),
+                        early: earlies.get(&reminder.external_id).copied(),
                         priority: priorities
                             .get(&reminder.external_id)
                             .and_then(|r| haste_proto::TaskPriority::from_rank(*r))
@@ -878,6 +888,7 @@ enum ReminderWrite {
         thread_id: Option<String>,
         minutes: Option<u32>,
         priority: Option<haste_proto::TaskPriority>,
+        early: Option<u32>,
     },
     Edit {
         reminder_id: String,
@@ -904,12 +915,14 @@ fn reminder_write(state: &State, actor: &Principal, write: ReminderWrite) -> Res
             notes,
             tags,
             minutes,
+            early,
             ..
         } => {
             title_ok(title)
                 && notes.as_ref().is_none_or(|n| n.len() <= 20_000)
                 && tags.len() <= 20
                 && minutes.is_none_or(haste_proto::valid_task_minutes)
+                && early.is_none_or(|m| m <= haste_proto::MAX_EARLY_MINUTES)
         }
         ReminderWrite::Edit {
             title,
@@ -938,6 +951,7 @@ fn reminder_write(state: &State, actor: &Principal, write: ReminderWrite) -> Res
             thread_id,
             minutes,
             priority,
+            early,
         } => handle
             .block_on(guard.create_reminder(&NewReminder {
                 title: title.clone(),
@@ -946,6 +960,7 @@ fn reminder_write(state: &State, actor: &Principal, write: ReminderWrite) -> Res
                 notes: notes.clone(),
                 repeat,
                 priority,
+                early: early.filter(|m| *m != 0 && due.is_some()),
             }))
             .map(|receipt| {
                 // show it at once, with its tags, its thread and its repeat rule
@@ -972,6 +987,11 @@ fn reminder_write(state: &State, actor: &Principal, write: ReminderWrite) -> Res
                     let _ = state
                         .store
                         .set_reminder_duration(&created.external_id, Some(m));
+                }
+                if let Some(m) = early.filter(|m| *m != 0 && due.is_some()) {
+                    let _ = state
+                        .store
+                        .set_reminder_earlies(&[(created.external_id.clone(), Some(m))]);
                 }
                 if let Some(p) = priority.filter(|p| *p != haste_proto::TaskPriority::Middle) {
                     let _ = state
@@ -1101,6 +1121,52 @@ fn reminder_duration(
         Some(reminder_id),
         None,
     );
+    Response::Done
+}
+
+/// The early reminder of a task: written to Reminders as an alert, then kept here as it reads
+/// back. A task without a due date cannot have one.
+fn reminder_early(
+    state: &State,
+    actor: &Principal,
+    reminder_id: &str,
+    minutes: Option<u32>,
+) -> Response {
+    if minutes.is_some_and(|m| m > haste_proto::MAX_EARLY_MINUTES) {
+        return err(ErrorCode::Validation, "an early reminder is a week at most");
+    }
+    let reminder = match state.store.get_reminder(reminder_id) {
+        Ok(Some(r)) => r,
+        Ok(None) => return err(ErrorCode::NotFound, "reminder not found"),
+        Err(e) => return map_store(&e),
+    };
+    let minutes = minutes.filter(|m| *m != 0 && reminder.due_at.is_some());
+    let Some(connector) = state.connector_for(&Source::Reminders) else {
+        return err(ErrorCode::NotFound, "no reminders connector");
+    };
+    let guard = Guarded {
+        connector: connector.as_ref(),
+        hooks: state,
+    };
+    let done = tokio::runtime::Handle::current()
+        .block_on(guard.set_reminder_early(&reminder.external_id, minutes));
+    if let Err(e) = done {
+        state.audit(
+            &actor.id,
+            "reminder.early",
+            "error",
+            Some(reminder_id),
+            None,
+        );
+        return err(ErrorCode::Internal, &format!("{e:?}"));
+    }
+    if let Err(e) = state
+        .store
+        .set_reminder_earlies(&[(reminder.external_id, minutes)])
+    {
+        return map_store(&e);
+    }
+    state.audit(&actor.id, "reminder.early", "set", Some(reminder_id), None);
     Response::Done
 }
 
@@ -1408,6 +1474,7 @@ fn execute_reminder(
                 notes: notes.clone(),
                 repeat: None,
                 priority: None,
+                early: None,
             };
             match handle.block_on(guard.create_reminder(&new)) {
                 Ok(receipt) => {

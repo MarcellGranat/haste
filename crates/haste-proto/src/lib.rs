@@ -227,6 +227,9 @@ pub enum RequestBody {
         /// How important it is (here only), when not the middle one.
         #[serde(default)]
         priority: Option<TaskPriority>,
+        /// Minutes before it is due to remind early (set in Reminders as an alert).
+        #[serde(default)]
+        early: Option<u32>,
     },
     /// Human-only: set a reminder's title and due date and append to its notes.
     ReminderEdit {
@@ -331,6 +334,13 @@ pub enum RequestBody {
     ReminderDuration {
         reminder_id: String,
         minutes: u32,
+    },
+    /// Human-only: the early reminder of a task, in minutes before it is due (`None` removes
+    /// it). Written to Reminders as an alert.
+    ReminderEarly {
+        reminder_id: String,
+        #[serde(default)]
+        minutes: Option<u32>,
     },
     /// Human-only: how important a task is (low, middle, high, urgent), here only.
     ReminderPriority {
@@ -494,7 +504,13 @@ pub struct ReminderView {
     /// How important it is (here only).
     #[serde(default)]
     pub priority: TaskPriority,
+    /// Minutes before it is due of its early reminder, when it has one.
+    #[serde(default)]
+    pub early: Option<u32>,
 }
+
+/// The longest early reminder: a week, in minutes.
+pub const MAX_EARLY_MINUTES: u32 = 7 * 24 * 60;
 
 pub use haste_core::model::TaskPriority;
 

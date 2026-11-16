@@ -65,6 +65,8 @@ pub struct Batch {
     pub repeats: Vec<(String, Option<crate::model::RepeatRule>)>,
     /// Reminders: `(external id, priority)` as the Reminders app reports it.
     pub priorities: Vec<(String, crate::model::TaskPriority)>,
+    /// Reminders: `(external id, minutes of the early reminder)` as the app reports it.
+    pub earlies: Vec<(String, Option<u32>)>,
 }
 
 /// What an upstream read or unread mark acts on: the provider's thread id and the provider ids
@@ -199,6 +201,8 @@ pub struct NewReminder {
     pub notes: Option<String>,
     pub repeat: Option<crate::model::RepeatRule>,
     pub priority: Option<crate::model::TaskPriority>,
+    /// Minutes before the due time it should remind early.
+    pub early: Option<u32>,
 }
 
 /// A human's change to a reminder: the title and due date are set, text is only ever appended to
@@ -382,6 +386,20 @@ pub trait Connector: Send + Sync {
         Box::pin(async {
             Err(ConnectorError::Unsupported(
                 "reminders have no priority here".into(),
+            ))
+        })
+    }
+
+    /// Set (or with `None` remove) a reminder's early reminder, in minutes before it is due.
+    /// Default: unsupported. Only the human's own TUI change calls it.
+    fn set_reminder_early<'a>(
+        &'a self,
+        _external_id: &'a str,
+        _minutes: Option<u32>,
+    ) -> BoxFuture<'a, Result<(), ConnectorError>> {
+        Box::pin(async {
+            Err(ConnectorError::Unsupported(
+                "reminders have no early reminder here".into(),
             ))
         })
     }
@@ -820,6 +838,39 @@ impl Guarded<'_> {
         }
     }
 
+    /// Set a reminder's early reminder in the app. Never retried.
+    ///
+    /// # Errors
+    /// See [`CallError`].
+    pub async fn set_reminder_early(
+        &self,
+        external_id: &str,
+        minutes: Option<u32>,
+    ) -> Result<(), CallError> {
+        self.precheck(
+            self.connector.capabilities().reminders_create,
+            "reminder.early",
+        )?;
+        let source = self.connector.source();
+        match self
+            .connector
+            .set_reminder_early(external_id, minutes)
+            .await
+        {
+            Ok(()) => {
+                self.hooks.audit("reminder.early", &source, "ok");
+                Ok(())
+            }
+            Err(e @ (ConnectorError::Challenge(_) | ConnectorError::Checkpoint(_))) => {
+                Err(self.trip("reminder.early", e))
+            }
+            Err(e) => {
+                self.hooks.audit("reminder.early", &source, "error");
+                Err(CallError::Connector(e))
+            }
+        }
+    }
+
     /// Mark a reminder completed after a human approved the proposal. Never retried.
     ///
     /// # Errors
@@ -1096,6 +1147,7 @@ mod tests {
             notes: None,
             repeat: None,
             priority: None,
+            early: None,
         };
         assert_eq!(
             block_on(g.create_reminder(&new)),

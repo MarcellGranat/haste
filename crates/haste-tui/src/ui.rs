@@ -954,7 +954,7 @@ fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(form) = &app.remind else {
         return;
     };
-    let rect = centered(area, 76.min(area.width.saturating_sub(4)), 14);
+    let rect = centered(area, 76.min(area.width.saturating_sub(4)), 15);
     frame.render_widget(Clear, rect);
     let block = theme::panel(" New reminder · Tab next · Enter saves · Esc cancels ")
         .border_style(pane_border(true));
@@ -1030,6 +1030,16 @@ fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
         )),
     }
     lines.push(Line::from(when));
+    let mut early = vec![label("Early", Field::Early)];
+    early.push(match (form.early_minutes(), form.due) {
+        (_, None) => Span::styled("needs a date", dim),
+        (Some(m), _) => Span::styled(format!("{} before", crate::remind::early_text(m)), text),
+        (None, _) => Span::styled("none", dim),
+    });
+    if form.field == Field::Early {
+        early.push(Span::styled("  ↑↓ change · ⌫ none", dim));
+    }
+    lines.push(Line::from(early));
     let mut length = vec![label("Length", Field::Duration)];
     length.extend(duration_spans(
         &form.duration,
@@ -2554,6 +2564,7 @@ mod tests {
             repeat: None,
             minutes: 30,
             priority: haste_proto::TaskPriority::Middle,
+            early: None,
         };
         let now = haste_core::time::now_secs();
         let mut app = App::new();

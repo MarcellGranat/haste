@@ -165,6 +165,9 @@ impl Compose {
                 self.attachments.pop();
             }
             Key::Tab => self.focus = (self.focus + 1) % self.fields.len(),
+            Key::BackTab => {
+                self.focus = (self.focus + self.fields.len() - 1) % self.fields.len();
+            }
             Key::Enter if !self.fields[self.focus].area.handle(Key::Enter) => {
                 // a one-line field: Enter moves on, and from the last field it saves
                 if self.focus + 1 < self.fields.len() {
@@ -318,7 +321,7 @@ impl LabelPicker {
                 let last = self.rows().len().saturating_sub(1);
                 self.selected = (self.selected + 1).min(last);
             }
-            Key::Up => self.selected = self.selected.saturating_sub(1),
+            Key::Up | Key::BackTab => self.selected = self.selected.saturating_sub(1),
             Key::Backspace => {
                 self.input.pop();
                 self.selected = 0;

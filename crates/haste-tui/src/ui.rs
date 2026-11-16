@@ -2792,7 +2792,8 @@ mod tests {
         let mut app = App::new();
         let now = haste_core::time::now_secs();
         let weekday = |t: i64| (t.div_euclid(86_400) + 3).rem_euclid(7);
-        let mut day = now - now.rem_euclid(86_400);
+        // tomorrow or the next weekday: events earlier today would be past and not listed
+        let mut day = now - now.rem_euclid(86_400) + 86_400;
         while weekday(day) >= 5 {
             day += 86_400;
         }

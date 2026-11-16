@@ -47,6 +47,11 @@ impl Field {
         let i = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
         Self::ORDER[(i + 1) % Self::ORDER.len()]
     }
+
+    fn prev(self) -> Self {
+        let i = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ORDER[(i + Self::ORDER.len() - 1) % Self::ORDER.len()]
+    }
 }
 
 /// The early reminders Up and Down step through, in minutes before the due time (0: none).
@@ -563,13 +568,17 @@ impl RemindForm {
                 }
                 return Outcome::Save(Box::new(self.task()));
             }
-            Key::Tab => {
+            Key::Tab | Key::BackTab => {
                 // leaving the title with nothing typed takes the suggestion as the title
                 if self.field == Field::Title && self.title.trim().is_empty() {
                     self.title = self.suggestion.clone();
                     self.reread();
                 }
-                self.field = self.field.next();
+                self.field = if key == Key::BackTab {
+                    self.field.prev()
+                } else {
+                    self.field.next()
+                };
                 self.date_typed.clear();
                 return Outcome::Continue;
             }
@@ -1082,6 +1091,17 @@ mod tests {
             panic!("expected a task")
         };
         assert_eq!((task.early, task.early_before), (Some(5), None));
+    }
+
+    #[test]
+    fn shift_tab_walks_the_fields_backwards() {
+        let mut f = form("Mail");
+        f.handle(Key::BackTab);
+        assert_eq!(f.field, Field::Files, "from the first field to the last");
+        f.handle(Key::BackTab);
+        assert_eq!(f.field, Field::Labels);
+        f.handle(Key::Tab);
+        assert_eq!(f.field, Field::Files);
     }
 
     #[test]

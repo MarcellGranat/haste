@@ -17,7 +17,9 @@ fn map_key(code: KeyCode, mods: KeyModifiers) -> Option<Key> {
             Key::Ctrl(c.to_ascii_lowercase())
         }
         KeyCode::Char(c) => Key::Char(c),
-        KeyCode::BackTab => Key::Tab,
+        KeyCode::BackTab => Key::BackTab,
+        // some terminals send Shift-Tab as a Tab with the Shift modifier
+        KeyCode::Tab if mods.contains(KeyModifiers::SHIFT) => Key::BackTab,
         KeyCode::Left => Key::Left,
         KeyCode::Right => Key::Right,
         KeyCode::Enter => Key::Enter,

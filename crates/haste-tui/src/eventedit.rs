@@ -101,7 +101,7 @@ impl EventForm {
             Key::Esc => return Outcome::Cancel,
             Key::Enter => return Outcome::Save(self.start, self.end()),
             Key::Char('R') if self.shifted => return Outcome::Reset,
-            Key::Tab => {
+            Key::Tab | Key::BackTab => {
                 self.field = match self.field {
                     Field::Start => Field::Duration,
                     Field::Duration => Field::Start,

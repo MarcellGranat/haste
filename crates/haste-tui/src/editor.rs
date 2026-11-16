@@ -294,7 +294,7 @@ impl FilePicker {
                 let last = self.matches().len().saturating_sub(1);
                 self.selected = (self.selected + 1).min(last);
             }
-            Key::Up => self.selected = self.selected.saturating_sub(1),
+            Key::Up | Key::BackTab => self.selected = self.selected.saturating_sub(1),
             Key::Backspace => {
                 self.query.pop();
                 self.selected = 0;

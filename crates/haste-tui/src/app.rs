@@ -23,6 +23,8 @@ pub enum Key {
     Enter,
     Esc,
     Tab,
+    /// Shift-Tab: the way back from Tab.
+    BackTab,
     Backspace,
     Down,
     Up,
@@ -1490,13 +1492,13 @@ impl App {
             || self.view == View::Muted;
         match key {
             Key::Char('q') => return Some(Effect::Quit),
-            Key::Tab if self.view == View::Today => {
+            Key::Tab | Key::BackTab if self.view == View::Today => {
                 self.today_focus = match self.today_focus {
                     TodayFocus::Inbox => TodayFocus::Todo,
                     TodayFocus::Todo => TodayFocus::Inbox,
                 };
             }
-            Key::Tab if self.view == View::Later => {
+            Key::Tab | Key::BackTab if self.view == View::Later => {
                 self.later_focus = match self.later_focus {
                     TodayFocus::Inbox => TodayFocus::Todo,
                     TodayFocus::Todo => TodayFocus::Inbox,
@@ -1505,6 +1507,12 @@ impl App {
             Key::Tab => {
                 self.view = match View::TABS.iter().position(|v| *v == self.view) {
                     Some(i) => View::TABS[(i + 1) % View::TABS.len()],
+                    None => View::Today,
+                };
+            }
+            Key::BackTab => {
+                self.view = match View::TABS.iter().position(|v| *v == self.view) {
+                    Some(i) => View::TABS[(i + View::TABS.len() - 1) % View::TABS.len()],
                     None => View::Today,
                 };
             }
@@ -5391,6 +5399,30 @@ mod tests {
             .filter(|r| matches!(r, Row::Item(_)))
             .count();
         assert_eq!(items, 1);
+    }
+
+    #[test]
+    fn shift_tab_goes_back_between_the_panes_and_the_tabs() {
+        let mut app = App::new();
+        // Today: the two panes, either way
+        app.handle_key(Key::BackTab);
+        assert_eq!((app.view, app.today_focus), (View::Today, TodayFocus::Todo));
+        app.handle_key(Key::BackTab);
+        assert_eq!(app.today_focus, TodayFocus::Inbox);
+        // the other tabs cycle backwards, and Tab undoes it
+        press(&mut app, "2");
+        app.handle_key(Key::BackTab);
+        assert_eq!(app.view, View::Today);
+        press(&mut app, "3");
+        app.handle_key(Key::Tab);
+        assert_eq!(app.view, View::Later);
+        press(&mut app, "3");
+        app.handle_key(Key::BackTab);
+        assert_eq!(app.view, View::Channels);
+        // Later has panes like Today
+        press(&mut app, "4");
+        app.handle_key(Key::BackTab);
+        assert_eq!((app.view, app.later_focus), (View::Later, TodayFocus::Todo));
     }
 
     #[test]

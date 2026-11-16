@@ -888,6 +888,16 @@ fn thread_line(
         format!("  {age}"),
         Style::new().fg(theme::MUTED),
     ));
+    // on the vivid orange of a priority row every word is dark
+    if priority && !blocked {
+        for s in &mut spans {
+            s.style.fg = Some(if s.style.fg == Some(theme::MUTED) {
+                theme::PRIORITY_INK_SOFT
+            } else {
+                theme::PRIORITY_INK
+            });
+        }
+    }
     // one background per row: blocked, priority, answered, unread, in that order of weight
     let item = ListItem::new(Line::from(spans));
     if blocked {
@@ -939,13 +949,36 @@ fn draw_scrolling(
         .with_offset(start)
         .with_selected(selected);
     frame.render_stateful_widget(
-        List::new(items)
-            .block(block)
-            .highlight_style(theme::selected())
-            .highlight_symbol("▌ "),
+        List::new(items).block(block).highlight_symbol("▌ "),
         area,
         &mut state,
     );
+    // The selected row keeps the colour of its kind (priority, unread, blocked...) but lighter,
+    // in bold, with grey text turned readable: a plain grey highlight left the greyed words of
+    // the row unreadable.
+    if let Some(sel) = selected {
+        let y = usize::from(area.y) + 1 + sel.saturating_sub(start);
+        if sel >= start && sel - start < rows {
+            if let Ok(y) = u16::try_from(y) {
+                let buf = frame.buffer_mut();
+                for x in area.x.saturating_add(1)..area.right().saturating_sub(1) {
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        let style = cell.style();
+                        cell.set_style(
+                            Style::new()
+                                .bg(theme::lifted(
+                                    style.bg.unwrap_or(ratatui::style::Color::Reset),
+                                ))
+                                .add_modifier(Modifier::BOLD),
+                        );
+                        if let Some(fg) = theme::readable_on_selection(style.fg) {
+                            cell.set_fg(fg);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The reminder popup: title (with the dim suggestion), date, repeat, notes, labels, files.
@@ -2281,6 +2314,63 @@ mod tests {
     use crate::app::Key;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    #[test]
+    fn a_selected_row_keeps_its_colour_and_its_grey_words_stay_readable() {
+        use ratatui::style::Color;
+        let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
+        let rows = |priority: bool| -> Vec<ListItem<'static>> {
+            let fg = if priority {
+                theme::PRIORITY_INK_SOFT
+            } else {
+                theme::MUTED
+            };
+            let bg = if priority {
+                theme::PRIORITY_BG
+            } else {
+                theme::UNREAD_BG
+            };
+            vec![ListItem::new(Line::from(vec![
+                Span::styled("word ", Style::new().fg(theme::TEXT)),
+                Span::styled("grey", Style::new().fg(fg)),
+            ]))
+            .style(Style::new().bg(bg))]
+        };
+        for priority in [true, false] {
+            terminal
+                .draw(|f| {
+                    draw_scrolling(
+                        f,
+                        f.area(),
+                        theme::panel(" t "),
+                        rows(priority),
+                        Some(0),
+                        &std::cell::Cell::new(0),
+                        &std::cell::Cell::new(0),
+                    );
+                })
+                .unwrap();
+            let buf = terminal.backend().buffer().clone();
+            // row 1, after the border and the two-cell cursor; "grey" starts at x = 3 + 5
+            let cell = buf.cell((9, 1)).unwrap();
+            let base = if priority {
+                theme::PRIORITY_BG
+            } else {
+                theme::UNREAD_BG
+            };
+            assert_eq!(
+                cell.bg,
+                theme::lifted(base),
+                "a lighter shade of its own colour"
+            );
+            if priority {
+                assert_eq!(cell.fg, theme::PRIORITY_INK_SOFT, "dark on the orange");
+            } else {
+                assert_eq!(cell.fg, theme::TEXT, "grey text is turned readable");
+            }
+            assert_ne!(cell.bg, Color::Reset);
+        }
+    }
 
     fn render(app: &App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();

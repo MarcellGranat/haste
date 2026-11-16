@@ -49,8 +49,11 @@ pub const OK: Color = GREEN;
 pub const UNREAD_BG: Color = Color::Rgb(0x28, 0x29, 0x3d);
 /// A thread the human answered: green.
 pub const REPLIED_BG: Color = Color::Rgb(0x1d, 0x3a, 0x2a);
-/// A priority thread: orange.
-pub const PRIORITY_BG: Color = Color::Rgb(0x8a, 0x48, 0x0b);
+/// A priority thread: a vivid orange, read with dark text.
+pub const PRIORITY_BG: Color = Color::Rgb(0xff, 0x8a, 0x1f);
+/// Text on a priority row: dark, and a softer brown for the less important words.
+pub const PRIORITY_INK: Color = Color::Rgb(0x1a, 0x0f, 0x03);
+pub const PRIORITY_INK_SOFT: Color = Color::Rgb(0x5c, 0x32, 0x08);
 /// A blocked sender's thread: red.
 pub const BLOCKED_BG: Color = Color::Rgb(0x3a, 0x1f, 0x2a);
 
@@ -75,6 +78,29 @@ pub fn text() -> Style {
 #[must_use]
 pub fn muted() -> Style {
     Style::new().fg(MUTED).bg(BASE)
+}
+
+/// A row colour made lighter: how the selected row differs from the others while it keeps its
+/// own colour. A row without one (the page's own) takes the selection grey.
+#[must_use]
+pub fn lifted(bg: Color) -> Color {
+    match bg {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            r.saturating_add(0x30),
+            g.saturating_add(0x30),
+            b.saturating_add(0x30),
+        ),
+        _ => SELECTED_BG,
+    }
+}
+
+/// Text that would be hard to read on a selected row is shown in the normal text colour.
+#[must_use]
+pub fn readable_on_selection(fg: Option<Color>) -> Option<Color> {
+    match fg {
+        Some(c) if [MUTED, OVERLAY1, OVERLAY2, SUBTEXT0, SUBTEXT1].contains(&c) => Some(TEXT),
+        other => other,
+    }
 }
 
 #[must_use]

@@ -937,6 +937,7 @@ fn kind(body: &RequestBody) -> Kind {
         | RequestBody::ReminderDuration { .. }
         | RequestBody::ReminderPriority { .. }
         | RequestBody::MutedDelete { .. }
+        | RequestBody::ThreadDelete { .. }
         | RequestBody::RuleChange { .. }
         | RequestBody::Execute { .. }
         | RequestBody::ResolveExecuting { .. }

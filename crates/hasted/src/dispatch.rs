@@ -106,6 +106,7 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::ReminderDuration { .. }
         | RequestBody::ReminderPriority { .. }
         | RequestBody::MutedDelete { .. }
+        | RequestBody::ThreadDelete { .. }
         | RequestBody::RuleChange { .. }
         | RequestBody::ResolveExecuting { .. }
         | RequestBody::Subscribe { .. } => Action::Manage,
@@ -157,6 +158,7 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::ReminderDuration { .. } => "reminder_duration",
         RequestBody::ReminderPriority { .. } => "reminder_priority",
         RequestBody::MutedDelete { .. } => "muted_delete",
+        RequestBody::ThreadDelete { .. } => "thread_delete",
         RequestBody::RuleChange { .. } => "rule_change",
         _ => "request",
     }
@@ -746,6 +748,9 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
         }
         RequestBody::IgnoreMute { thread_id } => ignore_mute(state, principal, &thread_id),
         RequestBody::MutedDelete { thread_id } => muted_delete(state, principal, &thread_id),
+        RequestBody::ThreadDelete { thread_id } => {
+            delete_local(state, principal, &thread_id, "thread.delete")
+        }
         RequestBody::ReminderDuration {
             reminder_id,
             minutes,
@@ -1782,6 +1787,16 @@ fn muted_delete(state: &State, actor: &Principal, thread_id: &str) -> Response {
     if !mute.is_muted(&[sender.as_str()]) {
         return err(ErrorCode::Validation, "this sender is not muted");
     }
+    delete_local(state, actor, thread_id, "muted.delete")
+}
+
+/// Delete one thread's stored copy here only. Counts and ids are audited, never the content.
+fn delete_local(state: &State, actor: &Principal, thread_id: &str, action: &str) -> Response {
+    match state.store.get_thread(thread_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => return err(ErrorCode::NotFound, "thread not found"),
+        Err(e) => return map_store(&e),
+    }
     let messages = state
         .store
         .messages_for_thread(thread_id)
@@ -1791,7 +1806,7 @@ fn muted_delete(state: &State, actor: &Principal, thread_id: &str) -> Response {
     }
     state.audit(
         &actor.id,
-        "muted.delete",
+        action,
         "deleted",
         Some(thread_id),
         Some(&format!("messages={messages}")),

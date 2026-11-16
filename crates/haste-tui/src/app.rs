@@ -291,6 +291,10 @@ pub enum Effect {
     DeleteMuted {
         thread_id: String,
     },
+    /// Delete one thread from the local store (the mailbox is untouched).
+    DeleteThread {
+        thread_id: String,
+    },
     /// Let a blocked sender through: out of the mute list, into the allowed list, thread read.
     Unblock {
         thread_id: String,
@@ -383,6 +387,11 @@ pub enum Mode {
     ConfirmRelease(String),
     /// `d` on the Muted screen: delete this one mail here, after a yes.
     ConfirmDeleteMuted {
+        thread_id: String,
+        subject: String,
+    },
+    /// `d` on a thread: delete this one thread here, after a yes.
+    ConfirmDeleteThread {
         thread_id: String,
         subject: String,
     },
@@ -1402,6 +1411,9 @@ impl App {
                 },
             ),
             Mode::ConfirmRelease(source) => self.confirm(key, Effect::ReleaseConnector { source }),
+            Mode::ConfirmDeleteThread { thread_id, .. } => {
+                self.confirm(key, Effect::DeleteThread { thread_id })
+            }
             Mode::ConfirmDeleteMuted { thread_id, .. } => {
                 self.confirm(key, Effect::DeleteMuted { thread_id })
             }
@@ -1556,6 +1568,7 @@ impl App {
             Key::Char('u') if thread_view => return self.toggle_read(),
             Key::Char('b') if thread_view => return self.unblock_selected(),
             Key::Char('d') if self.view == View::Muted => return self.start_delete_muted(),
+            Key::Char('d') if thread_view => return self.start_delete_thread(),
             Key::Ctrl('r') => return Some(Effect::Refresh),
             Key::Char('s') if thread_view => self.start_snooze(),
             Key::Char('t') if thread_view => self.start_remind(),
@@ -2570,6 +2583,16 @@ impl App {
         None
     }
 
+    /// `d` on a thread: ask before deleting this one thread here.
+    fn start_delete_thread(&mut self) -> Option<Effect> {
+        let t = self.selected_thread()?;
+        self.mode = Mode::ConfirmDeleteThread {
+            thread_id: t.thread.id.clone(),
+            subject: inbox::sanitize(&t.thread.subject).replace('\n', " "),
+        };
+        None
+    }
+
     /// `b`: let a blocked sender through.
     fn unblock_selected(&mut self) -> Option<Effect> {
         let t = self.selected_thread()?;
@@ -2958,6 +2981,9 @@ impl App {
             )),
             Mode::ConfirmDeleteMuted { subject, .. } => Some(format!(
                 "Delete the mail \"{subject}\" here? The mailbox is not touched and the sender stays muted. [y/N]"
+            )),
+            Mode::ConfirmDeleteThread { subject, .. } => Some(format!(
+                "Delete \"{subject}\" here? The mailbox is not touched; a resync may bring it back. [y/N]"
             )),
             Mode::ConfirmStaleApprove(id) => {
                 Some(format!("Thread changed. Approve {id} anyway? [y/N]"))
@@ -3490,12 +3516,30 @@ mod tests {
     }
 
     #[test]
+    fn d_on_a_thread_deletes_it_here_after_a_yes() {
+        let mut app = inbox_app();
+        let id = app.selected_thread().unwrap().thread.id.clone();
+        assert!(press(&mut app, "d").is_empty());
+        let prompt = app.confirm_prompt().unwrap();
+        assert!(prompt.contains("mailbox is not touched"), "{prompt}");
+        assert!(press(&mut app, "n").is_empty(), "n declines");
+        assert_eq!(app.mode, Mode::Normal);
+        press(&mut app, "d");
+        assert_eq!(
+            press(&mut app, "y"),
+            vec![Effect::DeleteThread { thread_id: id }]
+        );
+    }
+
+    #[test]
     fn d_on_the_muted_screen_asks_before_deleting_this_one_mail() {
         let mut app = inbox_app();
         app.threads[1].sender = Some("b@x.com".into());
         app.set_ignore(&["^b@x\\.com$".to_owned()], vec![]);
-        // d does nothing outside the Muted screen
+        // outside the Muted screen d asks about the thread itself (declined here)
         assert!(press(&mut app, "d").is_empty());
+        assert!(matches!(app.mode, Mode::ConfirmDeleteThread { .. }));
+        app.handle_key(Key::Esc);
         assert_eq!(app.mode, Mode::Normal);
         press(&mut app, "7");
         assert!(press(&mut app, "d").is_empty());

@@ -555,6 +555,16 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                     .unwrap_or_else(|| "nothing was deleted".into()),
             };
         }
+        Effect::DeleteThread { thread_id } => {
+            app.status = match client.call(RequestBody::ThreadDelete { thread_id }) {
+                Ok(Response::Deleted { .. }) => {
+                    "deleted here (the mailbox is untouched)".to_owned()
+                }
+                other => describe(other)
+                    .err()
+                    .unwrap_or_else(|| "nothing was deleted".into()),
+            };
+        }
         Effect::SetRead { thread_id, read } => {
             app.status = match describe(client.call(RequestBody::ReadSet { thread_id, read })) {
                 Ok(()) if read => "marked read".into(),

@@ -628,6 +628,33 @@ async fn a_resync_forgets_the_local_mail_and_reads_the_inbox_again() {
 }
 
 #[tokio::test]
+async fn any_one_thread_can_be_deleted_here_by_the_human_only() {
+    let h = boot().await;
+    let thread = synced_thread(&h).await;
+    let store = &h.daemon.state.store;
+    let agent = register(&h, "agent-d", PrincipalKind::Agent).await;
+    let delete = || RequestBody::ThreadDelete {
+        thread_id: thread.clone(),
+    };
+    assert_eq!(
+        code(&call_with(&h, &agent, delete()).await),
+        Some(ErrorCode::Denied)
+    );
+    assert!(store.get_thread(&thread).unwrap().is_some());
+    assert!(matches!(
+        human(&h, delete()).await,
+        Response::Deleted { .. }
+    ));
+    assert!(store.get_thread(&thread).unwrap().is_none());
+    assert_eq!(
+        code(&human(&h, delete()).await),
+        Some(ErrorCode::NotFound),
+        "already gone"
+    );
+    h.daemon.shutdown().await;
+}
+
+#[tokio::test]
 async fn muting_keeps_the_mail_and_deleting_one_mail_is_a_separate_human_only_step() {
     let h = boot().await;
     let thread = synced_thread(&h).await;

@@ -321,6 +321,11 @@ pub enum RequestBody {
     MutedDelete {
         thread_id: String,
     },
+    /// Human-only: delete the stored copy of one thread (here only; the mailbox or chat app is
+    /// untouched, and a later message in it is stored again).
+    ThreadDelete {
+        thread_id: String,
+    },
     /// Human-only: how long a task takes on the calendar (30 minutes, 1, 2, 3 or 4 hours),
     /// here only.
     ReminderDuration {

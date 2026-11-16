@@ -4497,7 +4497,7 @@ mod tests {
         let Some(Effect::CreateReminder(task)) = app.handle_key(Key::Enter) else {
             panic!("expected a task")
         };
-        assert_eq!(task.title, "pay rent every month");
+        assert_eq!(task.title, "pay rent", "the repeat words leave the title");
         assert!(task.thread_id.is_none());
         assert_eq!(
             task.repeat.map(|r| r.freq),

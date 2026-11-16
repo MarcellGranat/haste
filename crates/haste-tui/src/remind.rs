@@ -281,12 +281,38 @@ impl RemindForm {
         ))
     }
 
+    /// The title to save: the words that gave the date or the repeat are taken out (they live
+    /// in the date now, and opening the task again must not read them a second time). A title
+    /// that was only such words keeps them.
+    fn saved_title(&self) -> String {
+        let title = self.effective_title();
+        if self.title.trim().is_empty() || self.marks.is_empty() {
+            return title.trim().to_owned();
+        }
+        let mut out = String::new();
+        let mut at = 0;
+        for (s, e) in &self.marks {
+            if let (Some(before), true) = (self.title.get(at..*s), *e <= self.title.len()) {
+                out.push_str(before);
+                at = *e;
+            }
+        }
+        out.push_str(self.title.get(at..).unwrap_or(""));
+        let cleaned = out.split_whitespace().collect::<Vec<_>>().join(" ");
+        let cleaned = cleaned.trim_matches(|c: char| c == ',' || c == '-' || c.is_whitespace());
+        if cleaned.is_empty() {
+            title.trim().to_owned()
+        } else {
+            cleaned.to_owned()
+        }
+    }
+
     fn task(&self) -> Task {
         Task {
             reminder_id: self.edit_id.clone(),
             tags_before: self.tags_before.clone(),
             thread_id: self.thread_id.clone(),
-            title: self.effective_title().trim().to_owned(),
+            title: self.saved_title(),
             due: self.due,
             repeat: self.repeat,
             minutes: self.duration.minutes,
@@ -862,7 +888,7 @@ mod tests {
         assert_eq!(task.reminder_id.as_deref(), Some("r1"));
         assert_eq!(task.minutes, 30, "the length it has now");
         assert_eq!(task.tags_before, vec!["work".to_owned()]);
-        assert_eq!(task.title, "Pay rent tomorrow");
+        assert_eq!(task.title, "Pay rent", "the date words leave the title");
         assert_eq!(task.due, Some(at(16, 10, 0)));
         assert_eq!(task.notes, "bring ID");
         assert!(task.thread_id.is_none());
@@ -892,6 +918,30 @@ mod tests {
         f.field = Field::Title;
         type_text(&mut f, " tomorrow");
         assert_eq!(f.date_parts().unwrap().1, "14");
+    }
+
+    #[test]
+    fn the_date_words_leave_the_title_when_it_is_saved() {
+        let mut f = form("Mail");
+        for c in "Call the bank tomorrow".chars() {
+            f.handle(Key::Char(c));
+        }
+        assert!(f.due_from_title);
+        let due = f.due;
+        let Outcome::Save(task) = f.handle(Key::Enter) else {
+            panic!("expected a task")
+        };
+        assert_eq!(task.title, "Call the bank");
+        assert_eq!(task.due, due, "the date is kept");
+        // a title that is only a date keeps its words
+        let mut f = form("");
+        for c in "tomorrow".chars() {
+            f.handle(Key::Char(c));
+        }
+        let Outcome::Save(task) = f.handle(Key::Enter) else {
+            panic!("expected a task")
+        };
+        assert_eq!(task.title, "tomorrow");
     }
 
     #[test]

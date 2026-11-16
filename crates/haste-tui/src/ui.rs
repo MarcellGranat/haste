@@ -2033,7 +2033,7 @@ fn draw_snooze(frame: &mut Frame<'_>, app: &App, area: Rect, state: (&str, &str,
     let rect = centered(area, 62.min(area.width.saturating_sub(4)), 12);
     frame.render_widget(Clear, rect);
     let heading = if todo {
-        " Snooze · the task's date here becomes when it returns "
+        " Snooze · the task's due time becomes when it returns "
     } else {
         " Snooze · back in the inbox at "
     };

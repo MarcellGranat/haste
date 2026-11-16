@@ -1148,7 +1148,8 @@ fn reminder_duration(
     Response::Done
 }
 
-/// Set a task aside or snooze it, here only: nothing is written to Reminders.
+/// Set a task aside (here only: nothing is written to Reminders), or snooze it: the new due
+/// time is written to Reminders like any edit of the date, and a local aside flag is dropped.
 fn reminder_later(
     state: &State,
     actor: &Principal,
@@ -1162,19 +1163,38 @@ fn reminder_later(
             "a task is set aside or snoozed, not both",
         );
     }
-    let external = match state.store.get_reminder(reminder_id) {
-        Ok(Some(r)) => r.external_id,
+    let reminder = match state.store.get_reminder(reminder_id) {
+        Ok(Some(r)) => r,
         Ok(None) => return err(ErrorCode::NotFound, "reminder not found"),
         Err(e) => return map_store(&e),
     };
-    if let Err(e) = state.store.set_reminder_later(&external, set_aside, until) {
+    if let Some(until) = until {
+        let done = reminder_write(
+            state,
+            actor,
+            ReminderWrite::Edit {
+                reminder_id: reminder_id.to_owned(),
+                title: reminder.title.clone(),
+                due: Some(until),
+                append_notes: None,
+                repeat: None,
+                set_repeat: false,
+            },
+        );
+        if matches!(done, Response::Done) {
+            let _ = state
+                .store
+                .set_reminder_later(&reminder.external_id, false, None);
+        }
+        return done;
+    }
+    if let Err(e) = state
+        .store
+        .set_reminder_later(&reminder.external_id, set_aside, None)
+    {
         return map_store(&e);
     }
-    let label = match (set_aside, until) {
-        (true, _) => "aside",
-        (_, Some(_)) => "snooze",
-        _ => "back",
-    };
+    let label = if set_aside { "aside" } else { "back" };
     state.audit(&actor.id, "reminder.later", label, Some(reminder_id), None);
     Response::Done
 }

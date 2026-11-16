@@ -540,9 +540,7 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 Ok(()) if set_aside => {
                     "set aside on the Later tab (here only); g brings it back".into()
                 }
-                Ok(()) if until.is_some() => {
-                    "snoozed: its date here is now when it returns (Reminders keeps its own)".into()
-                }
+                Ok(()) if until.is_some() => "snoozed: the due time is now when it returns".into(),
                 Ok(()) => "back in the inbox".into(),
                 Err(e) => e,
             };

@@ -329,8 +329,8 @@ pub enum RequestBody {
     ThreadDelete {
         thread_id: String,
     },
-    /// Human-only: set a task aside or snooze it, here only (Reminders is untouched). `until`
-    /// is the new due time shown; no flag and no time puts it back.
+    /// Human-only: set a task aside (here only) or snooze it (`until` is the new due time,
+    /// written to Reminders); no flag and no time brings an aside task back.
     ReminderLater {
         reminder_id: String,
         set_aside: bool,

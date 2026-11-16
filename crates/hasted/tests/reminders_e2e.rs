@@ -916,7 +916,7 @@ async fn a_task_takes_5_minutes_to_4_hours_on_the_calendar_set_only_by_the_human
 }
 
 #[tokio::test]
-async fn a_task_set_aside_or_snoozed_changes_only_what_haste_shows() {
+async fn a_task_set_aside_stays_local_and_a_snooze_moves_its_due_time() {
     let rig = boot().await;
     release_and_sync(&rig).await;
     let id = rig.daemon.state.store.list_reminders(false).unwrap()[0]
@@ -943,18 +943,15 @@ async fn a_task_set_aside_or_snoozed_changes_only_what_haste_shows() {
     ));
     let r = shown(human(&rig, list.clone()).await);
     assert!(r.set_aside && !r.snoozed);
-    // a snooze shows its time as the due time; the stored (Reminders) one is untouched
+    // a snooze changes the due time itself (in Reminders too) and drops the aside flag
     assert!(matches!(
         human(&rig, later(false, Some(4_000_000_000))).await,
         Response::Done
     ));
     let r = shown(human(&rig, list.clone()).await);
-    assert!(!r.set_aside && r.snoozed);
+    assert!(!r.set_aside && !r.snoozed);
     assert_eq!(r.reminder.due_at, Some(4_000_000_000));
-    assert_eq!(
-        rig.daemon.state.store.list_reminders(false).unwrap()[0].due_at,
-        own_due
-    );
+    assert!(rig.daemon.state.store.reminder_laters().unwrap().is_empty());
     // both at once is refused
     assert_eq!(
         code(&human(&rig, later(true, Some(5))).await),
@@ -967,7 +964,8 @@ async fn a_task_set_aside_or_snoozed_changes_only_what_haste_shows() {
     ));
     let r = shown(human(&rig, list).await);
     assert!(!r.set_aside && !r.snoozed);
-    assert_eq!(r.reminder.due_at, own_due);
+    assert_eq!(r.reminder.due_at, Some(4_000_000_000));
+    let _ = own_due;
     assert!(rig.daemon.state.store.reminder_laters().unwrap().is_empty());
     // an agent cannot
     let token = agent(&rig).await;

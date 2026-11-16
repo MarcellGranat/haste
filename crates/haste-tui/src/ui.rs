@@ -67,6 +67,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     if *base == Mode::TaskDuration {
         draw_task_duration(frame, app, frame.area());
     }
+    if let Mode::SendAt { input, pick, .. } = base {
+        draw_send_at(frame, app, frame.area(), input, *pick);
+    }
     if let Mode::Snooze {
         thread_id,
         input,
@@ -76,7 +79,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     {
         draw_snooze(frame, app, frame.area(), (thread_id, input, *todo, *pick));
     }
-    if *base == Mode::Compose {
+    if matches!(base, Mode::Compose | Mode::ConfirmDiscardCompose)
+        || (matches!(base, Mode::SendAt { .. }) && app.compose.is_some())
+    {
         let replying = app
             .compose
             .as_ref()
@@ -588,7 +593,7 @@ fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Span::styled(" │ ", theme::muted()),
     ];
     let pending = app.proposals.len();
-    let approvals = format!("5 Approvals {pending}");
+    let approvals = format!("5 Outbox {pending}");
     spans.push(if pending > 0 && app.view != View::Approvals {
         Span::styled(
             format!(" {approvals} "),
@@ -708,8 +713,10 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ("j/k", "move"),
         ],
         View::Approvals => vec![
-            ("a", "approve"),
-            ("s", "send"),
+            ("s", "send now"),
+            ("t", "send later"),
+            ("u", "unschedule"),
+            ("a", "approve agent proposal"),
             ("r", "reject"),
             ("x", "mark"),
             ("/", "filter"),
@@ -753,7 +760,12 @@ fn draw_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             return;
         }
     })];
-    if let Some(notice) = app.notices.last() {
+    if let Some(warning) = app.send_warning() {
+        lines.push(Line::from(Span::styled(
+            format!("⚠ {warning}"),
+            Style::new().fg(theme::WARNING).add_modifier(Modifier::BOLD),
+        )));
+    } else if let Some(notice) = app.notices.last() {
         lines.push(Line::from(Span::styled(
             format!("! {notice}"),
             Style::new().fg(theme::DANGER),
@@ -764,7 +776,12 @@ fn draw_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 fn return_footer(frame: &mut Frame<'_>, app: &App, area: Rect, spans: Vec<Span<'static>>) {
     let mut lines = vec![Line::from(spans)];
-    if let Some(notice) = app.notices.last() {
+    if let Some(warning) = app.send_warning() {
+        lines.push(Line::from(Span::styled(
+            format!("⚠ {warning}"),
+            Style::new().fg(theme::WARNING).add_modifier(Modifier::BOLD),
+        )));
+    } else if let Some(notice) = app.notices.last() {
         lines.push(Line::from(Span::styled(
             format!("! {notice}"),
             Style::new().fg(theme::DANGER),
@@ -2030,13 +2047,75 @@ fn draw_snooze(frame: &mut Frame<'_>, app: &App, area: Rect, state: (&str, &str,
             .map(|t| t.thread.subject.clone())
     }
     .unwrap_or_default();
-    let rect = centered(area, 62.min(area.width.saturating_sub(4)), 12);
-    frame.render_widget(Clear, rect);
     let heading = if todo {
         " Snooze · the task's due time becomes when it returns "
     } else {
         " Snooze · back in the inbox at "
     };
+    let now = haste_core::time::now_secs();
+    draw_time_popup(
+        frame,
+        app,
+        area,
+        &TimePopup {
+            heading,
+            title: &title,
+            presets: inbox::snooze_presets(now, app.tz_offset),
+            input,
+            pick,
+            hint: "  ↑↓ choose · or type 3h, 2d, 1w (hours, days, weeks)",
+            enter: "  Enter snoozes · Esc cancels",
+        },
+    );
+}
+
+/// The popup that picks when a reply is sent.
+fn draw_send_at(frame: &mut Frame<'_>, app: &App, area: Rect, input: &str, pick: usize) {
+    let now = haste_core::time::now_secs();
+    let title = app
+        .compose
+        .as_ref()
+        .map(|c| c.fields[0].area.text())
+        .or_else(|| app.send_at_title())
+        .unwrap_or_default();
+    draw_time_popup(
+        frame,
+        app,
+        area,
+        &TimePopup {
+            heading: " Send later · it goes out from the Outbox at ",
+            title: &title,
+            presets: inbox::send_presets(now, app.tz_offset),
+            input,
+            pick,
+            hint: "  ↑↓ choose · or type 3h, 2d, tomorrow 14:30, 2026-11-20 09:00",
+            enter: "  Enter schedules · Esc goes back",
+        },
+    );
+}
+
+struct TimePopup<'a> {
+    heading: &'a str,
+    title: &'a str,
+    presets: [(&'static str, i64); 3],
+    input: &'a str,
+    pick: usize,
+    hint: &'a str,
+    enter: &'a str,
+}
+
+fn draw_time_popup(frame: &mut Frame<'_>, app: &App, area: Rect, spec: &TimePopup<'_>) {
+    let TimePopup {
+        heading,
+        title,
+        presets,
+        input,
+        pick,
+        hint,
+        enter,
+    } = *spec;
+    let rect = centered(area, 62.min(area.width.saturating_sub(4)), 12);
+    frame.render_widget(Clear, rect);
     let block = theme::panel(heading).border_style(pane_border(true));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
@@ -2045,18 +2124,14 @@ fn draw_snooze(frame: &mut Frame<'_>, app: &App, area: Rect, state: (&str, &str,
         .fg(theme::BASE)
         .bg(theme::MAUVE)
         .add_modifier(Modifier::BOLD);
-    let now = haste_core::time::now_secs();
     let mut lines = vec![
         Line::from(Span::styled(
-            format!("  {}", inbox::sanitize(&title).replace('\n', " ").trim()),
+            format!("  {}", inbox::sanitize(title).replace('\n', " ").trim()),
             Style::new().fg(theme::PEACH).add_modifier(Modifier::BOLD),
         )),
         Line::default(),
     ];
-    for (i, (label, at)) in inbox::snooze_presets(now, app.tz_offset)
-        .into_iter()
-        .enumerate()
-    {
+    for (i, (label, at)) in presets.into_iter().enumerate() {
         let row = format!(" {label:<20}{}", inbox::stamp(at, app.tz_offset));
         let style = if pick == i && input.is_empty() {
             on
@@ -2084,14 +2159,8 @@ fn draw_snooze(frame: &mut Frame<'_>, app: &App, area: Rect, state: (&str, &str,
         ),
     ]));
     lines.push(Line::default());
-    lines.push(Line::from(Span::styled(
-        "  ↑↓ choose · or type 3h, 2d, 1w (hours, days, weeks)",
-        dim,
-    )));
-    lines.push(Line::from(Span::styled(
-        "  Enter snoozes · Esc cancels",
-        dim,
-    )));
+    lines.push(Line::from(Span::styled(hint, dim)));
+    lines.push(Line::from(Span::styled(enter, dim)));
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -2326,13 +2395,21 @@ fn draw_approvals(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     .as_deref()
                     .map(|x| format!(" [{x}]"))
                     .unwrap_or_default();
-                ListItem::new(format!("  {mark} {state}{stale}{project} {}", summary(p)))
+                let when = app
+                    .scheduled
+                    .get(&p.id)
+                    .map(|at| format!(" ⏰ {}", inbox::stamp(*at, app.tz_offset)))
+                    .unwrap_or_default();
+                ListItem::new(format!(
+                    "  {mark} {state}{stale}{when}{project} {}",
+                    summary(p)
+                ))
             }
         })
         .collect();
     let mut state = ListState::default().with_selected(Some(app.approvals_selected));
     let help =
-        "a approve · A batch · x mark · s send/run · m/b settle NEEDS CHECK · r reject · c collapse · P group by agent/project · / filter";
+        "s send now · t send later · u unschedule · a approve an agent's · r discard/reject · x mark · m/b settle NEEDS CHECK · c collapse · P group · / filter";
     frame.render_stateful_widget(
         List::new(items)
             .block(theme::panel(help))
@@ -2756,6 +2833,43 @@ mod tests {
             app.handle_key(Key::Char(c));
         }
         assert!(render(&app).contains("every 1 week"));
+    }
+
+    #[test]
+    fn a_waiting_send_warns_in_the_footer_and_send_later_has_a_popup() {
+        let mut app = App::new();
+        app.pending_send = Some(crate::app::PendingSend {
+            id: "p1".into(),
+            recipients: vec!["ana@x.org".into()],
+            subject: "Re: plan".into(),
+            source: "gmail".into(),
+            remaining: 4,
+            recipients_digest: "d".into(),
+            deadline: app.now + std::time::Duration::from_secs(7),
+            restore: None,
+        });
+        let text = render(&app);
+        assert!(
+            text.contains("SENDING to ana@x.org") && text.contains("U undoes"),
+            "{text}"
+        );
+        assert!(text.contains("5 Outbox"), "{text}");
+        let mut app = App::new();
+        app.mode = Mode::SendAt {
+            target: crate::app::SendAtTarget::Proposal("p1".into()),
+            input: String::new(),
+            pick: 0,
+        };
+        let text = render(&app);
+        for needle in [
+            "Send later",
+            "In 1 hour",
+            "Tomorrow morning",
+            "Next Monday",
+            "Your own",
+        ] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
     }
 
     #[test]

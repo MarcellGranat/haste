@@ -70,6 +70,7 @@ fn action_for(body: &RequestBody) -> Action {
         // Running an approved reminder proposal is as human-only as sending a draft.
         RequestBody::Send { .. }
         | RequestBody::SendPreview { .. }
+        | RequestBody::ScheduleSend { .. }
         | RequestBody::Execute { .. } => Action::Send,
         RequestBody::RegisterPrincipal { .. }
         | RequestBody::RevokeToken { .. }
@@ -105,6 +106,7 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::EventShift { .. }
         | RequestBody::ReminderDuration { .. }
         | RequestBody::ReminderLater { .. }
+        | RequestBody::ScheduledList
         | RequestBody::ReminderPriority { .. }
         | RequestBody::ReminderEarly { .. }
         | RequestBody::MutedDelete { .. }
@@ -159,6 +161,8 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::EventShift { .. } => "event_shift",
         RequestBody::ReminderDuration { .. } => "reminder_duration",
         RequestBody::ReminderLater { .. } => "reminder_later",
+        RequestBody::ScheduleSend { .. } => "schedule_send",
+        RequestBody::ScheduledList => "scheduled_list",
         RequestBody::ReminderPriority { .. } => "reminder_priority",
         RequestBody::ReminderEarly { .. } => "reminder_early",
         RequestBody::MutedDelete { .. } => "muted_delete",
@@ -602,6 +606,13 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             now,
         ),
         RequestBody::SendPreview { proposal_id } => send_preview(state, &proposal_id, now),
+        RequestBody::ScheduleSend { proposal_id, at } => {
+            schedule_send(state, principal, &proposal_id, at, now)
+        }
+        RequestBody::ScheduledList => match state.store.scheduled_sends() {
+            Ok(items) => Response::Scheduled { items },
+            Err(e) => map_store(&e),
+        },
         RequestBody::RegisterPrincipal {
             principal_id,
             kind,
@@ -3468,6 +3479,98 @@ fn send_preview(state: &State, proposal_id: &str, now: i64) -> Response {
             sends_remaining: remaining,
         },
     }
+}
+
+/// The human picks the time an approved draft goes out (or takes the time off). Only a draft
+/// that could be sent now can be scheduled, and the time must be ahead.
+fn schedule_send(
+    state: &State,
+    actor: &Principal,
+    proposal_id: &str,
+    at: Option<i64>,
+    now: i64,
+) -> Response {
+    let proposal = match state.store.get_proposal(proposal_id) {
+        Ok(p) => p,
+        Err(e) => return map_store(&e),
+    };
+    if let Some(at) = at {
+        if proposal.state != haste_core::proposal::ProposalState::Approved
+            || !matches!(proposal.payload, Payload::Draft { .. })
+        {
+            return err(
+                ErrorCode::IllegalTransition,
+                "only an approved draft can be scheduled",
+            );
+        }
+        if at <= now || at > now + 366 * 86_400 {
+            return err(
+                ErrorCode::Validation,
+                "the send time must be ahead, within a year",
+            );
+        }
+    }
+    let stored = at.map(|t| (t, actor.id.as_str()));
+    if let Err(e) = state.store.set_scheduled_send(proposal_id, stored) {
+        return map_store(&e);
+    }
+    state.audit(
+        &actor.id,
+        "proposal.schedule",
+        if at.is_some() { "set" } else { "cleared" },
+        Some(proposal_id),
+        None,
+    );
+    Response::Done
+}
+
+/// Send the drafts whose time has come, once each, as the human who scheduled them. A send is
+/// never retried: whatever the outcome, the draft leaves the schedule. A draft whose thread
+/// changed since it was written is held back for the human instead of going out.
+pub(crate) fn run_due_sends(state: &State, now: i64) -> usize {
+    let Ok(due) = state.store.take_due_sends(now) else {
+        return 0;
+    };
+    for (proposal_id, actor_id) in &due {
+        let actor = Principal {
+            id: actor_id.clone(),
+            kind: PrincipalKind::Human,
+        };
+        let held = |reason: &str| {
+            state.audit(
+                &actor.id,
+                "proposal.send",
+                "held",
+                Some(proposal_id),
+                Some(reason),
+            );
+            state.publish(Event::Notice {
+                message: format!("a scheduled send was held ({reason}): see the Outbox"),
+            });
+        };
+        let Ok(proposal) = state.store.get_proposal(proposal_id) else {
+            continue;
+        };
+        if proposal.state != haste_core::proposal::ProposalState::Approved {
+            continue;
+        }
+        let resolved = match resolve_send(state, &proposal) {
+            Ok(r) => r,
+            Err(response) => {
+                held(&reason_of(&response));
+                continue;
+            }
+        };
+        if resolved.stale {
+            held("the thread changed");
+            continue;
+        }
+        let response = send(state, &actor, proposal_id, false, &resolved.digest, now);
+        if matches!(response, Response::Error { .. }) {
+            held(&reason_of(&Box::new(response)));
+        }
+    }
+    due.len()
 }
 
 /// The human sends an approved draft. One attempt, ever: `approved -> executing`, one guarded

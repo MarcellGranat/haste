@@ -76,7 +76,7 @@ pub fn transition(
         (Pending, Approved | Rejected | Expired | Superseded)
             // Nothing reaches `Sent` without passing `Executing`: reminders, calendar writes and
             // mail sends all use it, so an ambiguous outcome can stay there for a human check.
-            | (Approved, Executing | Superseded)
+            | (Approved, Executing | Superseded | Rejected)
             | (Executing, Sent | Approved)
     );
     if ok {
@@ -359,6 +359,7 @@ mod tests {
             (Pending, Superseded),
             (Approved, Executing),
             (Approved, Superseded),
+            (Approved, Rejected), // the human withdraws their own draft
             (Executing, Sent),
             (Executing, Approved), // an execution failed before any external effect
         ];

@@ -240,6 +240,34 @@ pub fn snooze_presets(now: i64, off: i64) -> [(&'static str, i64); 3] {
     ]
 }
 
+/// The quick choices of the send-later popup.
+#[must_use]
+pub fn send_presets(now: i64, off: i64) -> [(&'static str, i64); 3] {
+    [
+        ("In 1 hour", now + HOUR),
+        ("Tomorrow morning", tomorrow_morning(now, off)),
+        ("Next Monday", next_week(now, off)),
+    ]
+}
+
+/// The time typed in the send-later popup: a date (`tomorrow 14:30`, `2026-11-20 09:00`, `+2d`)
+/// or a wait (`3h`, `2d`, `1w`). It must be ahead.
+///
+/// # Errors
+/// A short message for anything else.
+pub fn parse_send_time(input: &str, now: i64, off: i64) -> Result<i64, String> {
+    let hint = "type 3h, 2d, 1w, tomorrow 14:30 or 2026-11-20 09:00".to_owned();
+    let at = match parse_due(input, now, off) {
+        Ok(Some(t)) => t,
+        Ok(None) => return Err(hint),
+        Err(_) => now + parse_snooze(input).map_err(|_| hint)?,
+    };
+    if at <= now {
+        return Err("the send time must be ahead".into());
+    }
+    Ok(at)
+}
+
 /// A due date from the custom prompt (local time). Empty means no date. Accepts `today`,
 /// `tomorrow`, `+Nd`, `YYYY-MM-DD`, each optionally followed by `HH:MM`.
 ///

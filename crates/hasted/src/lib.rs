@@ -105,6 +105,7 @@ pub async fn start(config: DaemonConfig) -> io::Result<DaemonHandle> {
         tokio::spawn(accept_loop(listener, Arc::clone(&state), shutdown_rx)),
         tokio::spawn(scheduler::expiry_loop(Arc::clone(&state))),
         tokio::spawn(scheduler::delivery_loop(Arc::clone(&state))),
+        tokio::spawn(scheduler::scheduled_send_loop(Arc::clone(&state))),
     ];
     if let Some(cfg) = state.config.herdr.clone() {
         tasks.extend(herdr::start(&state, &cfg));

@@ -42,6 +42,23 @@ pub async fn run_expiry(state: &Arc<State>) -> usize {
     expired.len()
 }
 
+/// Send the drafts whose chosen time has come (see [`crate::dispatch::run_due_sends`]).
+pub async fn scheduled_send_loop(state: Arc<State>) {
+    let mut ticker = interval(std::time::Duration::from_secs(10));
+    loop {
+        ticker.tick().await;
+        run_scheduled_sends(&state).await;
+    }
+}
+
+/// One pass over the schedule; exposed so tests can drive it deterministically.
+pub async fn run_scheduled_sends(state: &Arc<State>) -> usize {
+    let st = Arc::clone(state);
+    tokio::task::spawn_blocking(move || crate::dispatch::run_due_sends(&st, now_secs()))
+        .await
+        .unwrap_or(0)
+}
+
 /// Deliver proposal results to agents, at most three attempts each, with backoff.
 pub async fn delivery_loop(state: Arc<State>) {
     // The first pass comes one period after start, not immediately: delivery is retried on a

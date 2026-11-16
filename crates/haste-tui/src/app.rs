@@ -32,6 +32,49 @@ pub enum Key {
     Right,
     /// A control chord such as Ctrl-S, as the lowercase letter.
     Ctrl(char),
+    /// Ctrl-Enter (terminals that report it).
+    CtrlEnter,
+}
+
+/// What happens to a reply once it is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterSave {
+    /// Keep it as a draft in the Outbox.
+    Draft,
+    /// Send it after [`SEND_DELAY`], unless `U` undoes it.
+    Send,
+    /// Send it at this unix second.
+    Later(i64),
+}
+
+/// What the send-later popup schedules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendAtTarget {
+    /// The reply in the editor.
+    Compose,
+    /// A draft in the Outbox.
+    Proposal(String),
+}
+
+/// The text of a reply that is on its way, so an undo can open the editor with it again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Restore {
+    pub thread_id: String,
+    pub body: String,
+    pub attachments: Vec<std::path::PathBuf>,
+}
+
+/// A send that runs when its deadline passes; `U` undoes it before that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSend {
+    pub id: String,
+    pub recipients: Vec<String>,
+    pub subject: String,
+    pub source: String,
+    pub remaining: u32,
+    pub recipients_digest: String,
+    pub deadline: Instant,
+    pub restore: Option<Restore>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,7 +254,7 @@ pub enum GroupBy {
 pub const NO_PROJECT: &str = "no project";
 
 /// How long a send waits after `s` before it runs, during which any key cancels it.
-pub const SEND_DELAY: Duration = Duration::from_secs(5);
+pub const SEND_DELAY: Duration = Duration::from_secs(10);
 
 /// Something the key handler wants the daemon to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,6 +384,17 @@ pub enum Effect {
         thread_id: String,
         body: String,
         attachments: Vec<std::path::PathBuf>,
+        then: AfterSave,
+    },
+    /// Choose, change or clear the time a draft is sent.
+    Schedule {
+        id: String,
+        at: Option<i64>,
+    },
+    /// `U` while a send waits: withdraw the draft; the text opens in the editor again.
+    UndoSend {
+        id: String,
+        restore: Option<Restore>,
     },
     /// Append a note about a thread to the notes folder (no approval: the human wrote it).
     SaveNote {
@@ -403,17 +457,13 @@ pub enum Mode {
         thread_id: String,
         subject: String,
     },
-    /// A normal send is not confirmed with a key: it runs after [`SEND_DELAY`] unless the human
-    /// cancels with any key. The recipients shown are the ones the daemon resolved and the digest
-    /// binds the send to them.
-    SendCountdown {
-        id: String,
-        recipients: Vec<String>,
-        subject: String,
-        source: String,
-        remaining: u32,
-        recipients_digest: String,
-        deadline: Instant,
+    /// Esc in the editor with something written: save it as a draft?
+    ConfirmDiscardCompose,
+    /// Choosing when a reply goes out (the editor, or an Outbox draft).
+    SendAt {
+        target: SendAtTarget,
+        input: String,
+        pick: usize,
     },
     /// A send that still needs an explicit `y`: the thread changed since the draft was written
     /// (stale), or the recipients changed after the human last looked.
@@ -493,6 +543,12 @@ pub struct App {
     pub mode: Mode,
     pub threads: Vec<ThreadView>,
     pub proposals: Vec<Proposal>,
+    /// A send that goes out when its deadline passes; `U` undoes it.
+    pub pending_send: Option<PendingSend>,
+    /// The drafts that have a send time (proposal id to unix second).
+    pub scheduled: std::collections::HashMap<String, i64>,
+    /// The text of the reply being sent now, kept for an undo.
+    sending_text: Option<Restore>,
     /// Preset filters from the daemon (always at least the default).
     pub filters: Vec<FilterView>,
     /// Why `filters.json` was rejected, if it was.
@@ -663,6 +719,9 @@ impl App {
             mode: Mode::Normal,
             threads: Vec::new(),
             proposals: Vec::new(),
+            pending_send: None,
+            scheduled: std::collections::HashMap::new(),
+            sending_text: None,
             filters: vec![FilterView {
                 name: "all".into(),
                 ..FilterView::default()
@@ -1396,6 +1455,13 @@ impl App {
             };
             return None;
         }
+        // U withdraws a send that is waiting out its delay
+        if key == Key::Char('U')
+            && self.pending_send.is_some()
+            && matches!(self.mode, Mode::Normal | Mode::Read | Mode::Detail(_))
+        {
+            return self.undo_send();
+        }
         match self.mode.clone() {
             Mode::Filter => self.key_filter(key),
             Mode::Read => self.key_read(key),
@@ -1442,12 +1508,12 @@ impl App {
                     acknowledge_stale: true,
                 },
             ),
-            Mode::SendCountdown { .. } => {
-                // any key cancels; nothing was sent
-                self.mode = Mode::Normal;
-                self.status = "send cancelled".into();
-                None
-            }
+            Mode::ConfirmDiscardCompose => self.key_discard_compose(key),
+            Mode::SendAt {
+                target,
+                input,
+                pick,
+            } => self.key_send_at(key, target, input, pick),
             Mode::ConfirmSend {
                 id,
                 stale,
@@ -1611,6 +1677,7 @@ impl App {
             Key::Char('g') if !thread_view => self.jump(false),
             Key::Char('G') => self.jump(true),
             Key::Char('r') if self.view == View::Approvals => return self.reject_selected(),
+            Key::Char('u') if self.view == View::Approvals => return self.unschedule(),
             Key::Char('u') => return Some(Effect::Refresh),
             Key::Char('/') if self.view == View::Approvals => {
                 self.mode = Mode::Filter;
@@ -1622,6 +1689,7 @@ impl App {
             Key::Char('a') if self.view == View::Approvals => return self.approve_selected(),
             Key::Char('A') if self.view == View::Approvals => self.start_batch(),
             Key::Char('s') if self.view == View::Approvals => return self.start_send(),
+            Key::Char('t') if self.view == View::Approvals => self.start_schedule(),
             Key::Char('m') if self.view == View::Approvals => self.start_resolve(true),
             Key::Char('b') if self.view == View::Approvals => self.start_resolve(false),
             _ => {}
@@ -1789,7 +1857,7 @@ impl App {
             self.show_confirmed_send_preview(id, preview);
             return;
         }
-        self.mode = Mode::SendCountdown {
+        self.pending_send = Some(PendingSend {
             id: id.to_owned(),
             recipients: preview.recipients,
             subject: with_files(preview.subject, &preview.attachments),
@@ -1797,7 +1865,50 @@ impl App {
             remaining: preview.sends_remaining,
             recipients_digest: preview.recipients_digest,
             deadline: self.now + SEND_DELAY,
-        };
+            restore: self.sending_text.take(),
+        });
+        self.status.clear();
+    }
+
+    /// `U`: withdraw the send that is waiting. Nothing was sent.
+    fn undo_send(&mut self) -> Option<Effect> {
+        let p = self.pending_send.take()?;
+        self.status = "send undone: nothing was sent".into();
+        Some(Effect::UndoSend {
+            id: p.id,
+            restore: p.restore,
+        })
+    }
+
+    /// The warning for the footer while a send waits.
+    #[must_use]
+    pub fn send_warning(&self) -> Option<String> {
+        let p = self.pending_send.as_ref()?;
+        let secs = p
+            .deadline
+            .saturating_duration_since(self.now)
+            .as_millis()
+            .div_ceil(1000);
+        Some(format!(
+            "SENDING to {} via {}{} in {secs}s ({} left) · U undoes",
+            p.recipients.join(", "),
+            p.source,
+            if p.subject.is_empty() {
+                String::new()
+            } else {
+                format!(", subject '{}'", p.subject)
+            },
+            p.remaining
+        ))
+    }
+
+    /// The editor again, with the text of a reply that was undone.
+    pub fn restore_reply(&mut self, r: Restore) {
+        self.open_reply_form(&r.thread_id);
+        if let Some(c) = self.compose.as_mut() {
+            c.set_focused_text(&r.body);
+            c.attachments = r.attachments;
+        }
     }
 
     /// Show a send that must be confirmed with `y` (no countdown): used when the recipients changed
@@ -1831,24 +1942,16 @@ impl App {
             }
             return Some(Effect::CompleteReminders { ids: due });
         }
-        let Mode::SendCountdown {
-            deadline,
-            id,
-            recipients_digest,
-            ..
-        } = &self.mode
-        else {
-            return None;
-        };
-        if now < *deadline {
+        let p = self.pending_send.as_ref()?;
+        if now < p.deadline {
             return None;
         }
         let effect = Effect::Send {
-            id: id.clone(),
+            id: p.id.clone(),
             acknowledge_stale: false,
-            recipients_digest: recipients_digest.clone(),
+            recipients_digest: p.recipients_digest.clone(),
         };
-        self.mode = Mode::Normal;
+        self.pending_send = None;
         Some(effect)
     }
 
@@ -2453,9 +2556,13 @@ impl App {
         match c.handle(key) {
             ComposeOutcome::Continue => None,
             ComposeOutcome::Cancel => {
-                self.compose = None;
-                self.mode = self.back_mode();
-                self.status = "cancelled".into();
+                if c.has_content() {
+                    self.mode = Mode::ConfirmDiscardCompose;
+                } else {
+                    self.compose = None;
+                    self.mode = self.back_mode();
+                    self.status = "cancelled".into();
+                }
                 None
             }
             ComposeOutcome::Attach => {
@@ -2465,7 +2572,147 @@ impl App {
             ComposeOutcome::External => Some(Effect::ExternalEdit {
                 text: c.focused_text(),
             }),
-            ComposeOutcome::Save => self.finish_compose(),
+            ComposeOutcome::Save => self.finish_compose(AfterSave::Draft),
+            ComposeOutcome::Send => self.finish_compose(AfterSave::Send),
+            ComposeOutcome::Later => {
+                if !matches!(c.kind, ComposeKind::Reply { .. }) {
+                    self.status = "only a reply can be sent later".into();
+                } else if !c.has_content() {
+                    self.status = "the reply is empty".into();
+                } else {
+                    self.mode = Mode::SendAt {
+                        target: SendAtTarget::Compose,
+                        input: String::new(),
+                        pick: 0,
+                    };
+                }
+                None
+            }
+        }
+    }
+
+    /// The popup that picks the send time: quick choices, or a typed time.
+    fn key_send_at(
+        &mut self,
+        key: Key,
+        target: SendAtTarget,
+        mut input: String,
+        mut pick: usize,
+    ) -> Option<Effect> {
+        let back = if target == SendAtTarget::Compose {
+            Mode::Compose
+        } else {
+            Mode::Normal
+        };
+        match key {
+            Key::Esc => {
+                self.mode = back;
+                return None;
+            }
+            Key::Enter => {
+                let now = haste_core::time::now_secs();
+                let at = if input.trim().is_empty() && pick < 3 {
+                    Ok(inbox::send_presets(now, self.tz_offset)[pick].1)
+                } else {
+                    inbox::parse_send_time(&input, now, self.tz_offset)
+                };
+                match at {
+                    Ok(at) => {
+                        return match target {
+                            SendAtTarget::Compose => {
+                                self.mode = Mode::Compose;
+                                self.finish_compose(AfterSave::Later(at))
+                            }
+                            SendAtTarget::Proposal(id) => {
+                                self.mode = Mode::Normal;
+                                Some(Effect::Schedule { id, at: Some(at) })
+                            }
+                        };
+                    }
+                    Err(e) => self.status = e,
+                }
+            }
+            Key::Down | Key::Tab | Key::Char('j') if input.is_empty() => pick = (pick + 1).min(3),
+            Key::Up | Key::BackTab | Key::Char('k') if input.is_empty() => {
+                pick = pick.saturating_sub(1);
+            }
+            Key::Backspace => {
+                input.pop();
+            }
+            Key::Char(c) if !c.is_control() => {
+                input.push(c);
+                pick = 3;
+            }
+            _ => {}
+        }
+        self.mode = Mode::SendAt {
+            target,
+            input,
+            pick,
+        };
+        None
+    }
+
+    /// `t` in the Outbox: choose when the draft under the cursor is sent.
+    fn start_schedule(&mut self) {
+        let Some(p) = self.selected_proposal().cloned() else {
+            return;
+        };
+        if p.state != ProposalState::Approved || !matches!(p.payload, Payload::Draft { .. }) {
+            self.status = "only an approved draft can be sent later".into();
+            return;
+        }
+        self.mode = Mode::SendAt {
+            target: SendAtTarget::Proposal(p.id),
+            input: String::new(),
+            pick: 0,
+        };
+    }
+
+    /// `u` in the Outbox: take the send time off the draft under the cursor.
+    fn unschedule(&mut self) -> Option<Effect> {
+        let id = self.selected_proposal()?.id.clone();
+        if !self.scheduled.contains_key(&id) {
+            self.status = "this draft has no send time".into();
+            return None;
+        }
+        Some(Effect::Schedule { id, at: None })
+    }
+
+    /// The reply (or draft) the send-later popup is about, for its heading.
+    #[must_use]
+    pub fn send_at_title(&self) -> Option<String> {
+        let Mode::SendAt {
+            target: SendAtTarget::Proposal(id),
+            ..
+        } = &self.mode
+        else {
+            return None;
+        };
+        self.proposals.iter().find(|p| &p.id == id).map(summary)
+    }
+
+    pub fn set_scheduled(&mut self, items: Vec<(String, i64)>) {
+        self.scheduled = items.into_iter().collect();
+    }
+
+    /// The answer to "save the draft?" after Esc.
+    fn key_discard_compose(&mut self, key: Key) -> Option<Effect> {
+        match key {
+            Key::Char('y' | 'Y') => {
+                self.mode = Mode::Compose;
+                self.finish_compose(AfterSave::Draft)
+            }
+            Key::Char('n' | 'N') => {
+                self.compose = None;
+                self.mode = self.back_mode();
+                self.status = "discarded".into();
+                None
+            }
+            _ => {
+                self.mode = Mode::Compose;
+                None
+            }
         }
     }
 
@@ -2498,7 +2745,7 @@ impl App {
         }
     }
 
-    fn finish_compose(&mut self) -> Option<Effect> {
+    fn finish_compose(&mut self, then: AfterSave) -> Option<Effect> {
         let c = self.compose.as_ref()?;
         let attachments = c.attachments.clone();
         let effect = match &c.kind {
@@ -2520,10 +2767,18 @@ impl App {
                     self.status = "the reply is empty".into();
                     return None;
                 }
+                if then == AfterSave::Send {
+                    self.sending_text = Some(Restore {
+                        thread_id: thread_id.clone(),
+                        body: body.clone(),
+                        attachments: attachments.clone(),
+                    });
+                }
                 Effect::SaveReply {
                     thread_id: thread_id.clone(),
                     body,
                     attachments,
+                    then,
                 }
             }
             ComposeKind::Todo { reminder_id } => {
@@ -3071,27 +3326,8 @@ impl App {
             Mode::ConfirmStaleApprove(id) => {
                 Some(format!("Thread changed. Approve {id} anyway? [y/N]"))
             }
-            Mode::SendCountdown {
-                recipients,
-                subject,
-                source,
-                remaining,
-                deadline,
-                ..
-            } => {
-                let secs = deadline
-                    .saturating_duration_since(self.now)
-                    .as_millis()
-                    .div_ceil(1000);
-                Some(format!(
-                    "SENDING to {} via {source}{} in {secs}s ({remaining} left): any key cancels",
-                    recipients.join(", "),
-                    if subject.is_empty() {
-                        String::new()
-                    } else {
-                        format!(", subject '{subject}'")
-                    }
-                ))
+            Mode::ConfirmDiscardCompose => {
+                Some("Save the draft? y save · n discard · any other key keeps editing".into())
             }
             Mode::ConfirmSend {
                 recipients,
@@ -4237,6 +4473,137 @@ mod tests {
                 thread_id: "t1".into(),
                 body: "thanks".into(),
                 attachments: vec![std::path::PathBuf::from("/a/report.pdf")],
+                then: AfterSave::Draft,
+            })
+        );
+    }
+
+    #[test]
+    fn ctrl_enter_sends_esc_asks_to_save_and_u_undoes_with_the_text_back() {
+        let mut app = inbox_app();
+        app.open_reply_form("t1");
+        // Esc on an empty editor just closes it
+        assert!(app.handle_key(Key::Esc).is_none());
+        assert_eq!(app.mode, Mode::Normal);
+        app.open_reply_form("t1");
+        press(&mut app, "hello");
+        // Esc with text asks; any other key goes back to editing
+        app.handle_key(Key::Esc);
+        assert_eq!(app.mode, Mode::ConfirmDiscardCompose);
+        assert!(app.confirm_prompt().unwrap().contains("Save the draft?"));
+        app.handle_key(Key::Char('x'));
+        assert_eq!(app.mode, Mode::Compose);
+        // n discards
+        app.handle_key(Key::Esc);
+        app.handle_key(Key::Char('n'));
+        assert_eq!(
+            (app.mode.clone(), app.compose.is_none()),
+            (Mode::Normal, true)
+        );
+        // y keeps it as a draft
+        app.open_reply_form("t1");
+        press(&mut app, "hello");
+        app.handle_key(Key::Esc);
+        let Some(Effect::SaveReply { then, .. }) = app.handle_key(Key::Char('y')) else {
+            panic!("expected a save");
+        };
+        assert_eq!(then, AfterSave::Draft);
+        // Ctrl-Enter (or Ctrl-J) sends
+        app.open_reply_form("t1");
+        press(&mut app, "hello");
+        let Some(Effect::SaveReply { then, .. }) = app.handle_key(Key::CtrlEnter) else {
+            panic!("expected a send");
+        };
+        assert_eq!(then, AfterSave::Send);
+        // the daemon's preview starts the wait; U withdraws it and hands the text back
+        app.show_send_preview(
+            "p9",
+            SendPreviewView {
+                source: "gmail".into(),
+                recipients: vec!["ana@x.org".into()],
+                subject: "Re: plan".into(),
+                body_bytes: 5,
+                attachments: Vec::new(),
+                stale: false,
+                sends_remaining: 5,
+                recipients_digest: "d".into(),
+            },
+        );
+        let Some(Effect::UndoSend {
+            id,
+            restore: Some(r),
+        }) = app.handle_key(Key::Char('U'))
+        else {
+            panic!("expected an undo");
+        };
+        assert_eq!(
+            (id.as_str(), r.body.as_str(), r.thread_id.as_str()),
+            ("p9", "hello", "t1")
+        );
+        app.restore_reply(r);
+        assert_eq!(app.mode, Mode::Compose);
+        assert_eq!(app.compose.as_ref().unwrap().focused_text(), "hello");
+    }
+
+    #[test]
+    fn ctrl_l_picks_a_send_time_for_a_reply_and_t_for_an_outbox_draft() {
+        let now = haste_core::time::now_secs();
+        let mut app = inbox_app();
+        app.open_reply_form("t1");
+        // nothing written yet: no popup
+        app.handle_key(Key::Ctrl('l'));
+        assert_eq!(app.mode, Mode::Compose);
+        press(&mut app, "later");
+        app.handle_key(Key::Ctrl('l'));
+        assert!(matches!(app.mode, Mode::SendAt { .. }));
+        // Esc goes back to the editor
+        app.handle_key(Key::Esc);
+        assert_eq!(app.mode, Mode::Compose);
+        // the first quick choice is in an hour
+        app.handle_key(Key::Ctrl('l'));
+        let Some(Effect::SaveReply {
+            then: AfterSave::Later(at),
+            ..
+        }) = app.handle_key(Key::Enter)
+        else {
+            panic!("expected a scheduled reply");
+        };
+        assert!((at - now - 3_600).abs() < 5);
+        // a typed wait works too, and a bad one keeps the popup open
+        app.open_reply_form("t1");
+        press(&mut app, "later");
+        app.handle_key(Key::Ctrl('l'));
+        press(&mut app, "soon");
+        assert!(app.handle_key(Key::Enter).is_none());
+        assert!(matches!(app.mode, Mode::SendAt { .. }));
+        for _ in 0..4 {
+            app.handle_key(Key::Backspace);
+        }
+        press(&mut app, "2d");
+        let Some(Effect::SaveReply {
+            then: AfterSave::Later(at),
+            ..
+        }) = app.handle_key(Key::Enter)
+        else {
+            panic!("expected a scheduled reply");
+        };
+        assert!((at - now - 2 * 86_400).abs() < 5);
+        // in the Outbox: t on an approved draft, u takes the time off
+        let mut app = app_with(vec![proposal("p1", "me", ProposalState::Approved, false)]);
+        app.view = View::Approvals;
+        press(&mut app, "j");
+        press(&mut app, "t");
+        assert!(matches!(app.mode, Mode::SendAt { .. }), "{:?}", app.mode);
+        let Some(Effect::Schedule { id, at: Some(_) }) = app.handle_key(Key::Enter) else {
+            panic!("expected a schedule");
+        };
+        assert_eq!(id, "p1");
+        app.set_scheduled(vec![("p1".into(), now + 100)]);
+        assert_eq!(
+            app.handle_key(Key::Char('u')),
+            Some(Effect::Schedule {
+                id: "p1".into(),
+                at: None
             })
         );
     }
@@ -5070,26 +5437,36 @@ mod tests {
                 recipients_digest: "digest-1".into(),
             },
         );
-        // a normal send is a countdown, not a y prompt
-        let prompt = app.confirm_prompt().unwrap();
+        // a normal send is a countdown in the footer, not a y prompt
+        let prompt = app.send_warning().unwrap();
         for part in [
             "SENDING to ana@x.org",
             "gmail",
             "Re: plan",
             "7 left",
-            "in 5s",
-            "any key cancels",
+            "in 10s",
+            "U undoes",
         ] {
             assert!(prompt.contains(part), "{prompt}");
         }
+        assert!(app.confirm_prompt().is_none());
         let start = app.now;
         // nothing is sent before the delay has run out
-        assert_eq!(app.tick(start + Duration::from_secs(4)), None);
-        assert!(app.confirm_prompt().unwrap().contains("in 1s"));
-        // any key cancels, and nothing is sent afterwards
+        assert_eq!(app.tick(start + Duration::from_secs(9)), None);
+        app.now = start + Duration::from_secs(9);
+        assert!(app.send_warning().unwrap().contains("in 1s"));
+        app.now = start;
+        // other keys do not cancel; U does, and nothing is sent afterwards
         assert!(press(&mut app, "n").is_empty());
-        assert_eq!(app.mode, Mode::Normal);
-        assert!(app.status.contains("cancelled"));
+        assert!(app.pending_send.is_some());
+        assert_eq!(
+            app.handle_key(Key::Char('U')),
+            Some(Effect::UndoSend {
+                id: "p2".into(),
+                restore: None
+            })
+        );
+        assert!(app.status.contains("undone"));
         assert_eq!(app.tick(start + SEND_DELAY + Duration::from_secs(1)), None);
         // let it run: after the delay the send goes out once, with the displayed digest
         app.show_send_preview("p2", preview(false));
@@ -5179,7 +5556,7 @@ mod tests {
                 recipients_digest: "digest-chat".into(),
             },
         );
-        let prompt = app.confirm_prompt().unwrap();
+        let prompt = app.send_warning().unwrap();
         assert!(
             prompt.contains("SENDING to Family chat via whatsapp"),
             "{prompt}"

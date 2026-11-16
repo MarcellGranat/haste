@@ -328,6 +328,74 @@ async fn account_restriction_trips_the_breaker_and_release_then_trips_it_again()
 }
 
 #[tokio::test]
+async fn a_scheduled_reply_goes_out_once_at_its_time_and_only_the_human_schedules_it() {
+    let h = boot().await;
+    let thread = synced_thread(&h).await;
+    let agent = register(&h, "agent-a", PrincipalKind::Agent).await;
+    let id = draft_proposal(&h, &agent, &thread, "s1").await;
+    human(
+        &h,
+        RequestBody::Approve {
+            proposal_id: id.clone(),
+            acknowledge_stale: false,
+        },
+    )
+    .await;
+    let schedule = |at| RequestBody::ScheduleSend {
+        proposal_id: id.clone(),
+        at,
+    };
+    let far = haste_core::time::now_secs() + 86_400;
+    // an agent cannot schedule, and the time must be ahead
+    assert_eq!(
+        code(&call_with(&h, &agent, schedule(Some(far))).await),
+        Some(ErrorCode::Denied)
+    );
+    assert_eq!(
+        code(&human(&h, schedule(Some(1))).await),
+        Some(ErrorCode::Validation)
+    );
+    assert!(matches!(
+        human(&h, schedule(Some(far))).await,
+        Response::Done
+    ));
+    let Response::Scheduled { items } = human(&h, RequestBody::ScheduledList).await else {
+        panic!()
+    };
+    assert_eq!(items, vec![(id.clone(), far)]);
+    // not yet due: nothing goes out
+    assert_eq!(
+        hasted::scheduler::run_scheduled_sends(&h.daemon.state).await,
+        0
+    );
+    assert_eq!(h.google.count("/gmail/v1/users/me/messages/send"), 0);
+    // taking the time off clears it
+    assert!(matches!(human(&h, schedule(None)).await, Response::Done));
+    assert!(h.daemon.state.store.scheduled_sends().unwrap().is_empty());
+    // the time arrives: it is sent once, and the schedule is empty afterwards
+    h.daemon
+        .state
+        .store
+        .set_scheduled_send(&id, Some((1, "human")))
+        .unwrap();
+    assert_eq!(
+        hasted::scheduler::run_scheduled_sends(&h.daemon.state).await,
+        1
+    );
+    assert_eq!(h.google.count("/gmail/v1/users/me/messages/send"), 1);
+    assert_eq!(
+        h.daemon.state.store.get_proposal(&id).unwrap().state,
+        ProposalState::Sent
+    );
+    assert_eq!(
+        hasted::scheduler::run_scheduled_sends(&h.daemon.state).await,
+        0
+    );
+    assert_eq!(h.google.count("/gmail/v1/users/me/messages/send"), 1);
+    h.daemon.shutdown().await;
+}
+
+#[tokio::test]
 async fn only_an_approved_draft_reaches_gmail_and_only_the_human_can_send_it() {
     let h = boot().await;
     let thread = synced_thread(&h).await;

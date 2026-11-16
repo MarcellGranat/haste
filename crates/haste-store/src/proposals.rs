@@ -187,6 +187,67 @@ fn counts(
 }
 
 impl Store {
+    /// Choose, change or clear the time a draft is sent (`None` clears it).
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn set_scheduled_send(
+        &self,
+        proposal_id: &str,
+        at: Option<(i64, &str)>,
+    ) -> StoreResult<()> {
+        let id = proposal_id.to_owned();
+        let at = at.map(|(t, a)| (t, a.to_owned()));
+        self.write(move |conn| {
+            match at {
+                Some((t, actor)) => conn.execute(
+                    "INSERT INTO scheduled_sends (proposal_id, send_at, actor) VALUES (?1, ?2, ?3) \
+                     ON CONFLICT(proposal_id) DO UPDATE SET send_at = ?2, actor = ?3",
+                    params![id, t, actor],
+                )?,
+                None => conn.execute("DELETE FROM scheduled_sends WHERE proposal_id = ?1", [&id])?,
+            };
+            Ok(())
+        })
+    }
+
+    /// Every scheduled send: proposal id and the unix second it goes out.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn scheduled_sends(&self) -> StoreResult<Vec<(String, i64)>> {
+        self.read(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT proposal_id, send_at FROM scheduled_sends ORDER BY send_at")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// The sends whose time has come, removed from the schedule in the same step so each one is
+    /// taken exactly once: (proposal id, who scheduled it).
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn take_due_sends(&self, now: i64) -> StoreResult<Vec<(String, String)>> {
+        self.write(move |conn| {
+            let tx = conn.transaction()?;
+            let due: Vec<(String, String)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT proposal_id, actor FROM scheduled_sends WHERE send_at <= ?1 \
+                     ORDER BY send_at",
+                )?;
+                let rows = stmt.query_map([now], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                rows.collect::<Result<_, _>>()?
+            };
+            for (id, _) in &due {
+                tx.execute("DELETE FROM scheduled_sends WHERE proposal_id = ?1", [id])?;
+            }
+            tx.commit()?;
+            Ok(due)
+        })
+    }
+
     /// Create a proposal, or return the existing one for the same `(principal, key)`.
     /// Older `pending`/`approved` proposals with the same principal, action and thread are
     /// superseded. Returns `(proposal, created)` plus the ids superseded.

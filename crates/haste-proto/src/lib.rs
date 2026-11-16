@@ -134,6 +134,14 @@ pub enum RequestBody {
         acknowledge_stale: bool,
         recipients_digest: String,
     },
+    /// Human-only: send an approved draft at this unix second, or (`None`) take the time off.
+    ScheduleSend {
+        proposal_id: String,
+        #[serde(default)]
+        at: Option<i64>,
+    },
+    /// Human-only: the drafts that have a send time.
+    ScheduledList,
     /// Human-only, read-only: who a send would go to, before anything is sent.
     SendPreview {
         proposal_id: String,
@@ -682,6 +690,10 @@ pub enum Response {
     /// Result of a pending outcome: the proposal was created (or returned again).
     Proposal {
         proposal: Proposal,
+    },
+    /// The drafts with a send time: proposal id and unix second.
+    Scheduled {
+        items: Vec<(String, i64)>,
     },
     Proposals {
         proposals: Vec<Proposal>,

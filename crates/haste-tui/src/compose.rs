@@ -43,7 +43,12 @@ pub struct Compose {
 pub enum ComposeOutcome {
     Continue,
     Cancel,
+    /// `Ctrl-S`: keep it as a draft.
     Save,
+    /// `Ctrl-Enter`: send it (a reply goes out after a short delay that `U` can undo).
+    Send,
+    /// `Ctrl-L`: send it later, at a time chosen in a popup.
+    Later,
     /// `Ctrl-G`: edit the focused field in `$EDITOR`.
     External,
     /// `Ctrl-F`: the caller lists files and opens the picker.
@@ -138,6 +143,12 @@ impl Compose {
         self.fields[self.focus].area.text()
     }
 
+    /// Is there anything written or attached?
+    #[must_use]
+    pub fn has_content(&self) -> bool {
+        !self.attachments.is_empty() || self.fields.iter().any(|f| !f.area.text().trim().is_empty())
+    }
+
     pub fn open_picker(&mut self, files: Vec<PathBuf>) {
         self.picker = Some(FilePicker::new(files));
     }
@@ -159,6 +170,9 @@ impl Compose {
         match key {
             Key::Esc => return ComposeOutcome::Cancel,
             Key::Ctrl('s') => return ComposeOutcome::Save,
+            // many terminals send Ctrl-Enter as Ctrl-J
+            Key::CtrlEnter | Key::Ctrl('j') => return ComposeOutcome::Send,
+            Key::Ctrl('l') => return ComposeOutcome::Later,
             Key::Ctrl('g') => return ComposeOutcome::External,
             Key::Ctrl('f') => return ComposeOutcome::Attach,
             Key::Ctrl('x') => {

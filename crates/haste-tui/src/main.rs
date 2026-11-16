@@ -22,6 +22,7 @@ fn map_key(code: KeyCode, mods: KeyModifiers) -> Option<Key> {
         KeyCode::Tab if mods.contains(KeyModifiers::SHIFT) => Key::BackTab,
         KeyCode::Left => Key::Left,
         KeyCode::Right => Key::Right,
+        KeyCode::Enter if mods.contains(KeyModifiers::CONTROL) => Key::CtrlEnter,
         KeyCode::Enter => Key::Enter,
         KeyCode::Esc => Key::Esc,
         KeyCode::Tab => Key::Tab,
@@ -86,6 +87,9 @@ fn refresh(app: &mut App, client: &Client) {
                 .unwrap_or_else(|| "unexpected reply".into());
         }
         Err(e) => app.status = e,
+    }
+    if let Ok(Response::Scheduled { items }) = client.call(RequestBody::ScheduledList) {
+        app.set_scheduled(items);
     }
     match client.call(RequestBody::AgentList) {
         Ok(Response::Agents { machines }) => app.set_machines(machines),
@@ -926,7 +930,32 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
             thread_id,
             body,
             attachments,
-        } => save_reply(app, client, thread_id, body, &attachments),
+            then,
+        } => save_reply(app, client, thread_id, body, &attachments, then),
+        Effect::Schedule { id, at } => {
+            app.status = match describe(client.call(RequestBody::ScheduleSend {
+                proposal_id: id,
+                at,
+            })) {
+                Ok(()) if at.is_some() => "scheduled".into(),
+                Ok(()) => "the send time is off: it is a draft again".into(),
+                Err(e) => e,
+            };
+        }
+        Effect::UndoSend { id, restore } => {
+            // the draft is withdrawn; the text opens in the editor again
+            let withdrawn = describe(client.call(RequestBody::Reject {
+                proposal_id: id,
+                reason: Some("undone".into()),
+            }));
+            match (withdrawn, restore) {
+                (Ok(()), Some(r)) => app.restore_reply(r),
+                (Ok(()), None) => {}
+                (Err(e), _) => {
+                    app.status = format!("undone, but the draft stays in the Outbox: {e}")
+                }
+            }
+        }
         Effect::Resolve { id, done } => {
             app.status = match describe(client.call(RequestBody::ResolveExecuting {
                 proposal_id: id,
@@ -1035,12 +1064,14 @@ fn edit_external(terminal: &mut ratatui::DefaultTerminal, app: &mut App, text: &
         .unwrap_or_else(|_| default_editor().into());
     let mut parts = editor.split_whitespace();
     let program = parts.next().unwrap_or("vi").to_owned();
+    restore_keys();
     ratatui::restore();
     let ran = std::process::Command::new(program)
         .args(parts)
         .arg(&path)
         .status();
     *terminal = ratatui::init();
+    enhance_keys();
     let _ = terminal.clear();
     let edited = std::fs::read_to_string(&path).unwrap_or_default();
     let _ = std::fs::remove_file(&path);
@@ -1103,7 +1134,9 @@ fn save_reply(
     thread_id: String,
     body: String,
     attachments: &[std::path::PathBuf],
+    then: haste_tui::app::AfterSave,
 ) {
+    use haste_tui::app::AfterSave;
     // files are copied into the attachments folder first; the draft names them, the daemon reads
     // them at send time and the confirmation shows them
     let names = match store_for_send(attachments) {
@@ -1114,10 +1147,45 @@ fn save_reply(
         }
     };
     let key = format!("tui-reply-{thread_id}-{}", haste_core::time::now_secs());
-    app.status = match run_draft(client, thread_id, body, names, key) {
-        Ok(()) => "reply drafted and approved: 5 Approvals, then s to send".into(),
-        Err(e) => e,
+    let id = match run_draft(client, thread_id, body, names, key) {
+        Ok(id) => id,
+        Err(e) => {
+            app.status = e;
+            return;
+        }
     };
+    match then {
+        AfterSave::Draft => app.status = "draft saved in the Outbox (5)".into(),
+        AfterSave::Send => {
+            if app.pending_send.is_some() {
+                app.status = "another send is waiting: the reply is in the Outbox (5)".into();
+                return;
+            }
+            match client.call(RequestBody::SendPreview {
+                proposal_id: id.clone(),
+            }) {
+                Ok(Response::SendPreview { preview }) => app.show_send_preview(&id, preview),
+                other => {
+                    app.status = format!(
+                        "not sent, the draft is in the Outbox (5): {}",
+                        describe(other).err().unwrap_or_else(|| "no preview".into())
+                    );
+                }
+            }
+        }
+        AfterSave::Later(at) => {
+            app.status = match describe(client.call(RequestBody::ScheduleSend {
+                proposal_id: id,
+                at: Some(at),
+            })) {
+                Ok(()) => format!(
+                    "scheduled for {}: it waits in the Outbox (5)",
+                    haste_tui::inbox::stamp(at, app.tz_offset)
+                ),
+                Err(e) => format!("saved as a draft in the Outbox, not scheduled: {e}"),
+            };
+        }
+    }
 }
 
 /// Copy files into the attachments folder and return the stored file names.
@@ -1149,7 +1217,7 @@ fn run_draft(
     body: String,
     attachments: Vec<String>,
     key: String,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let proposal = match client.call(RequestBody::Propose {
         payload: haste_core::proposal::Payload::Draft {
             to: None,
@@ -1167,10 +1235,12 @@ fn run_draft(
                 .unwrap_or_else(|| "no proposal".into()))
         }
     };
+    let id = proposal.id;
     describe(client.call(RequestBody::Approve {
-        proposal_id: proposal.id,
+        proposal_id: id.clone(),
         acknowledge_stale: false,
     }))
+    .map(|()| id)
 }
 
 fn main() -> io::Result<()> {
@@ -1201,6 +1271,7 @@ fn main() -> io::Result<()> {
     let (react_jobs, react_done) = react_worker(client.clone());
 
     let mut terminal = ratatui::init();
+    enhance_keys();
     let result = (|| -> io::Result<()> {
         loop {
             let done = terminal.draw(|f| draw(f, &app))?;
@@ -1286,6 +1357,28 @@ fn main() -> io::Result<()> {
             }
         }
     })();
+    restore_keys();
     ratatui::restore();
     result
+}
+
+/// Ask the terminal to report Ctrl-Enter and the like apart from plain Enter, where it can.
+fn enhance_keys() {
+    use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
+    use std::sync::atomic::Ordering;
+    if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
+        KEYS_ENHANCED.store(true, Ordering::Relaxed);
+        let _ = crossterm::execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
+}
+
+static KEYS_ENHANCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn restore_keys() {
+    if KEYS_ENHANCED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        let _ = crossterm::execute!(io::stdout(), crossterm::event::PopKeyboardEnhancementFlags);
+    }
 }

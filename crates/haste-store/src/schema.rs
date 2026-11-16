@@ -225,6 +225,14 @@ const MIGRATIONS: &[&str] = &[
         due_at INTEGER
     );
     ",
+    // 16: a reply the human wrote and chose a time to send; the daemon sends it then.
+    "
+    CREATE TABLE scheduled_sends (
+        proposal_id TEXT PRIMARY KEY,
+        send_at INTEGER NOT NULL,
+        actor TEXT NOT NULL
+    );
+    ",
 ];
 
 /// Highest schema version this binary understands.

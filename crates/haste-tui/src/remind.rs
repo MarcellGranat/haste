@@ -22,6 +22,7 @@ pub enum Field {
     Title,
     Date,
     Duration,
+    Priority,
     Repeat,
     Notes,
     Labels,
@@ -29,10 +30,11 @@ pub enum Field {
 }
 
 impl Field {
-    const ORDER: [Self; 7] = [
+    const ORDER: [Self; 8] = [
         Self::Title,
         Self::Date,
         Self::Duration,
+        Self::Priority,
         Self::Repeat,
         Self::Notes,
         Self::Labels,
@@ -69,6 +71,10 @@ pub struct Task {
     pub minutes: u32,
     /// How long it took before an edit (the same as `minutes` for a new one).
     pub minutes_before: u32,
+    /// How important it is.
+    pub priority: haste_proto::TaskPriority,
+    /// How important it was before an edit (the same as `priority` for a new one).
+    pub priority_before: haste_proto::TaskPriority,
     pub notes: String,
     pub tags: Vec<String>,
     pub attachments: Vec<PathBuf>,
@@ -99,6 +105,9 @@ pub struct RemindForm {
     /// digits type it.
     pub duration: crate::durfield::DurationEdit,
     minutes_before: u32,
+    /// How important it is: Up, Down, Left and Right step, `l` `m` `h` `u` pick.
+    pub priority: haste_proto::TaskPriority,
+    priority_before: haste_proto::TaskPriority,
     /// The digits typed into the picked part of the date.
     date_typed: String,
     pub notes: String,
@@ -159,6 +168,8 @@ impl RemindForm {
                 true,
             ),
             minutes_before: haste_proto::DEFAULT_TASK_MINUTES,
+            priority: haste_proto::TaskPriority::Middle,
+            priority_before: haste_proto::TaskPriority::Middle,
             date_typed: String::new(),
             notes: String::new(),
             labels: labels.iter().map(|l| (l.clone(), on.contains(l))).collect(),
@@ -208,6 +219,8 @@ impl RemindForm {
             true,
         );
         form.minutes_before = todo.minutes;
+        form.priority = todo.priority;
+        form.priority_before = todo.priority;
         // the words of the title set the date and the repeat (also as it opens); without
         // words the TODO keeps what it has, until it is changed by hand
         form.reread();
@@ -278,6 +291,8 @@ impl RemindForm {
             repeat: self.repeat,
             minutes: self.duration.minutes,
             minutes_before: self.minutes_before,
+            priority: self.priority,
+            priority_before: self.priority_before,
             notes: self.notes.trim().to_owned(),
             tags: self
                 .labels
@@ -491,6 +506,17 @@ impl RemindForm {
             (Field::Date, Key::Char(c)) if c.is_ascii_digit() => self.type_into_date(c),
             (Field::Duration, k) => {
                 self.duration.handle(k);
+            }
+            (Field::Priority, Key::Up | Key::Right) => self.priority = self.priority.step(true),
+            (Field::Priority, Key::Down | Key::Left) => self.priority = self.priority.step(false),
+            // the first letter picks it
+            (Field::Priority, Key::Char(c)) => {
+                if let Some(p) = haste_proto::TaskPriority::ALL
+                    .into_iter()
+                    .find(|p| p.label().starts_with(c.to_ascii_lowercase()))
+                {
+                    self.priority = p;
+                }
             }
             (Field::Date, Key::Backspace) => {
                 self.due = None;
@@ -808,6 +834,7 @@ mod tests {
                 every: 1,
             }),
             minutes: 30,
+            priority: haste_proto::TaskPriority::Middle,
         };
         let mut f = RemindForm::editing(&todo, &["haste".into()], NOW, OFF);
         assert_eq!(f.title, "Pay rent");
@@ -865,6 +892,31 @@ mod tests {
         f.field = Field::Title;
         type_text(&mut f, " tomorrow");
         assert_eq!(f.date_parts().unwrap().1, "14");
+    }
+
+    #[test]
+    fn the_priority_is_stepped_or_picked_by_its_first_letter() {
+        use haste_proto::TaskPriority::{High, Low, Middle, Urgent};
+        let mut f = form("Mail");
+        f.handle(Key::Tab); // date
+        f.handle(Key::Tab); // length
+        f.handle(Key::Tab); // priority
+        assert_eq!(f.field, Field::Priority);
+        assert_eq!(f.priority, Middle, "middle by default");
+        f.handle(Key::Up);
+        f.handle(Key::Up);
+        f.handle(Key::Up);
+        assert_eq!(f.priority, Urgent, "urgent is the top");
+        f.handle(Key::Down);
+        assert_eq!(f.priority, High);
+        f.handle(Key::Char('l'));
+        assert_eq!(f.priority, Low);
+        f.handle(Key::Down);
+        assert_eq!(f.priority, Low, "low is the bottom");
+        let Outcome::Save(task) = f.handle(Key::Enter) else {
+            panic!("expected a task")
+        };
+        assert_eq!((task.priority, task.priority_before), (Low, Middle));
     }
 
     #[test]

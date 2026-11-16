@@ -224,6 +224,9 @@ pub enum RequestBody {
         /// How long it takes on the calendar (here only), when not the default.
         #[serde(default)]
         minutes: Option<u32>,
+        /// How important it is (here only), when not the middle one.
+        #[serde(default)]
+        priority: Option<TaskPriority>,
     },
     /// Human-only: set a reminder's title and due date and append to its notes.
     ReminderEdit {
@@ -323,6 +326,11 @@ pub enum RequestBody {
     ReminderDuration {
         reminder_id: String,
         minutes: u32,
+    },
+    /// Human-only: how important a task is (low, middle, high, urgent), here only.
+    ReminderPriority {
+        reminder_id: String,
+        priority: TaskPriority,
     },
     /// Human-only: move or resize a calendar event here only (`None` puts it back as Google
     /// has it). Nothing is sent to Google.
@@ -478,6 +486,60 @@ pub struct ReminderView {
     /// How long it takes on the calendar, in minutes.
     #[serde(default = "default_task_minutes")]
     pub minutes: u32,
+    /// How important it is (here only).
+    #[serde(default)]
+    pub priority: TaskPriority,
+}
+
+/// How important a task is. Reminders has no such scale for these four, so it is kept here only.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskPriority {
+    Low,
+    #[default]
+    Middle,
+    High,
+    Urgent,
+}
+
+impl TaskPriority {
+    pub const ALL: [TaskPriority; 4] = [Self::Low, Self::Middle, Self::High, Self::Urgent];
+
+    /// The word shown and typed.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Middle => "middle",
+            Self::High => "high",
+            Self::Urgent => "urgent",
+        }
+    }
+
+    /// The stored number: 0 low, 1 middle, 2 high, 3 urgent.
+    #[must_use]
+    pub fn rank(self) -> u8 {
+        self as u8
+    }
+
+    #[must_use]
+    pub fn from_rank(rank: u8) -> Option<Self> {
+        Self::ALL.get(usize::from(rank)).copied()
+    }
+
+    /// One step more (`up`) or less important, stopping at the ends.
+    #[must_use]
+    pub fn step(self, up: bool) -> Self {
+        let r = self.rank();
+        Self::from_rank(if up {
+            r.saturating_add(1)
+        } else {
+            r.saturating_sub(1)
+        })
+        .unwrap_or(self)
+    }
 }
 
 /// How long a task takes on the calendar until it is set.

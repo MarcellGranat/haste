@@ -954,7 +954,7 @@ fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(form) = &app.remind else {
         return;
     };
-    let rect = centered(area, 76.min(area.width.saturating_sub(4)), 13);
+    let rect = centered(area, 76.min(area.width.saturating_sub(4)), 14);
     frame.render_widget(Clear, rect);
     let block = theme::panel(" New reminder · Tab next · Enter saves · Esc cancels ")
         .border_style(pane_border(true));
@@ -1039,6 +1039,25 @@ fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
         length.push(Span::styled("  ↑↓ steps · ←→ unit · type a number", dim));
     }
     lines.push(Line::from(length));
+    let mut priority = vec![label("Priority", Field::Priority)];
+    for p in haste_proto::TaskPriority::ALL {
+        let on = p == form.priority;
+        priority.push(Span::styled(
+            format!(" {} ", p.label()),
+            if on {
+                Style::new()
+                    .fg(theme::BASE)
+                    .bg(priority_color(p))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                dim
+            },
+        ));
+    }
+    if form.field == Field::Priority {
+        priority.push(Span::styled("  ←→ change · l m h u", dim));
+    }
+    lines.push(Line::from(priority));
     let mut repeat = vec![label("Repeat", Field::Repeat)];
     repeat.push(match form.repeat {
         Some(r) => Span::styled(
@@ -1350,6 +1369,17 @@ fn draw_later(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
+/// The colour of a priority: grey, none, orange, red.
+fn priority_color(p: haste_proto::TaskPriority) -> ratatui::style::Color {
+    use haste_proto::TaskPriority::{High, Low, Middle, Urgent};
+    match p {
+        Low => theme::OVERLAY0,
+        Middle => theme::LAVENDER,
+        High => theme::PEACH,
+        Urgent => theme::DANGER,
+    }
+}
+
 /// TODO rows: the box, the title, the due time (red when overdue) and a `tomorrow` label.
 fn todo_items<'a>(app: &App, todos: &[&haste_proto::ReminderView], now: i64) -> Vec<ListItem<'a>> {
     let off = app.tz_offset;
@@ -1395,6 +1425,23 @@ fn todo_items<'a>(app: &App, todos: &[&haste_proto::ReminderView], now: i64) -> 
                     Style::new().fg(theme::TEXT),
                 ),
             ];
+            // middle is the usual and says nothing
+            match r.priority {
+                haste_proto::TaskPriority::Middle => {}
+                p => spans.push(Span::styled(
+                    format!(
+                        "  {}",
+                        match p {
+                            haste_proto::TaskPriority::Urgent => "‼ urgent",
+                            haste_proto::TaskPriority::High => "! high",
+                            _ => "↓ low",
+                        }
+                    ),
+                    Style::new()
+                        .fg(priority_color(p))
+                        .add_modifier(Modifier::BOLD),
+                )),
+            }
             if !r.tags.is_empty() {
                 spans.push(Span::styled(
                     format!("  #{}", r.tags.join(" #")),
@@ -2506,6 +2553,7 @@ mod tests {
             tags: vec![],
             repeat: None,
             minutes: 30,
+            priority: haste_proto::TaskPriority::Middle,
         };
         let now = haste_core::time::now_secs();
         let mut app = App::new();

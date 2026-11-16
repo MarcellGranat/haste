@@ -935,6 +935,7 @@ fn kind(body: &RequestBody) -> Kind {
         | RequestBody::SenderRules
         | RequestBody::EventShift { .. }
         | RequestBody::ReminderDuration { .. }
+        | RequestBody::ReminderPriority { .. }
         | RequestBody::MutedDelete { .. }
         | RequestBody::RuleChange { .. }
         | RequestBody::Execute { .. }

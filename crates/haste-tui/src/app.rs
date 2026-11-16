@@ -1021,7 +1021,12 @@ impl App {
                     && r.reminder.due_at.is_none_or(|d| d < end)
             })
             .collect();
-        out.sort_by_key(|r| r.reminder.due_at.unwrap_or(i64::MAX));
+        out.sort_by_key(|r| {
+            (
+                r.reminder.due_at.unwrap_or(i64::MAX),
+                std::cmp::Reverse(r.priority),
+            )
+        });
         out
     }
 
@@ -1038,7 +1043,12 @@ impl App {
                     && r.reminder.due_at.is_some_and(|d| d >= from)
             })
             .collect();
-        out.sort_by_key(|r| r.reminder.due_at.unwrap_or(i64::MAX));
+        out.sort_by_key(|r| {
+            (
+                r.reminder.due_at.unwrap_or(i64::MAX),
+                std::cmp::Reverse(r.priority),
+            )
+        });
         out
     }
 
@@ -3392,8 +3402,8 @@ mod tests {
     fn ctrl_g_in_the_notes_field_hands_the_notes_to_the_editor_and_takes_them_back() {
         let mut app = inbox_app();
         press(&mut app, "t");
-        // Tab: title -> date -> length -> repeat -> notes
-        for _ in 0..4 {
+        // Tab: title -> date -> length -> priority -> repeat -> notes
+        for _ in 0..5 {
             app.handle_key(Key::Tab);
         }
         press(&mut app, "first");
@@ -3672,6 +3682,7 @@ mod tests {
             tags: vec![],
             repeat: None,
             minutes: 30,
+            priority: haste_proto::TaskPriority::Middle,
         }
     }
 
@@ -4384,6 +4395,7 @@ mod tests {
             tags: vec![],
             repeat: None,
             minutes: 30,
+            priority: haste_proto::TaskPriority::Middle,
         };
         app.set_reminder_list(vec![
             r("undated", None, false),

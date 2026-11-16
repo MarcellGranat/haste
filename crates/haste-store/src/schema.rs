@@ -202,6 +202,13 @@ const MIGRATIONS: &[&str] = &[
         minutes INTEGER NOT NULL
     );
     ",
+    // 13: how important a task is (0 low, 2 high, 3 urgent; middle has no row), here only.
+    "
+    CREATE TABLE reminder_priorities (
+        external_id TEXT PRIMARY KEY,
+        priority INTEGER NOT NULL
+    );
+    ",
 ];
 
 /// Highest schema version this binary understands.

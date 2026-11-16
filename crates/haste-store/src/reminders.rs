@@ -633,6 +633,40 @@ impl Store {
         })
     }
 
+    /// How important a task is, here only (`None` goes back to middle).
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn set_reminder_priority(&self, external_id: &str, rank: Option<u8>) -> StoreResult<()> {
+        let external_id = external_id.to_owned();
+        self.write(move |conn| {
+            match rank {
+                Some(r) => conn.execute(
+                    "INSERT INTO reminder_priorities (external_id, priority) VALUES (?1, ?2) \
+                     ON CONFLICT(external_id) DO UPDATE SET priority = ?2",
+                    params![external_id, r],
+                )?,
+                None => conn.execute(
+                    "DELETE FROM reminder_priorities WHERE external_id = ?1",
+                    [&external_id],
+                )?,
+            };
+            Ok(())
+        })
+    }
+
+    /// The set priorities (ranks) by the Reminders item's external id.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn reminder_priorities(&self) -> StoreResult<std::collections::HashMap<String, u8>> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare("SELECT external_id, priority FROM reminder_priorities")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u8>(1)?)))?;
+            Ok(rows.collect::<Result<std::collections::HashMap<_, _>, _>>()?)
+        })
+    }
+
     /// The complete succeeded: mark the mirrored row done (version moves) and the proposal sent.
     ///
     /// # Errors

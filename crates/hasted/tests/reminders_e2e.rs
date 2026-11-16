@@ -579,6 +579,7 @@ async fn a_new_reminder_carries_its_repeat_rule_thread_link_and_shows_at_once() 
                 tags: vec![],
                 thread_id: Some(thread.id.clone()),
                 minutes: Some(45),
+                priority: None,
             }
         )
         .await,
@@ -636,6 +637,7 @@ async fn labels_set_in_the_popup_are_saved_for_a_new_todo_and_for_an_edit() {
                 tags: vec!["work".into()],
                 thread_id: None,
                 minutes: None,
+                priority: None,
             }
         )
         .await,
@@ -665,6 +667,52 @@ async fn labels_set_in_the_popup_are_saved_for_a_new_todo_and_for_an_edit() {
     }
     let all = rig.daemon.state.store.all_reminder_tags().unwrap();
     assert_eq!(all.get(&made.id), Some(&vec!["haste".to_owned()]));
+    rig.daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_task_has_a_priority_set_only_by_the_human() {
+    use haste_proto::TaskPriority::{High, Low, Middle, Urgent};
+    let rig = boot().await;
+    release_and_sync(&rig).await;
+    let id = rig.daemon.state.store.list_reminders(false).unwrap()[0]
+        .id
+        .clone();
+    async fn priority_of(rig: &Rig) -> haste_proto::TaskPriority {
+        let Response::Reminders { reminders } = human(
+            rig,
+            RequestBody::RemindersList {
+                include_completed: false,
+            },
+        )
+        .await
+        else {
+            panic!()
+        };
+        reminders[0].priority
+    }
+    let set = |priority| RequestBody::ReminderPriority {
+        reminder_id: id.clone(),
+        priority,
+    };
+    assert_eq!(priority_of(&rig).await, Middle, "middle until set");
+    for p in [Urgent, High, Low, Middle] {
+        assert!(matches!(human(&rig, set(p)).await, Response::Done));
+        assert_eq!(priority_of(&rig).await, p);
+    }
+    // middle is stored as no row at all
+    assert!(rig
+        .daemon
+        .state
+        .store
+        .reminder_priorities()
+        .unwrap()
+        .is_empty());
+    let token = agent(&rig).await;
+    assert_eq!(
+        code(&call(&rig, &token, set(Urgent)).await),
+        Some(ErrorCode::Denied)
+    );
     rig.daemon.shutdown().await;
 }
 
@@ -825,6 +873,7 @@ async fn the_human_creates_and_edits_reminders_directly_and_an_agent_cannot() {
                 tags: vec![],
                 thread_id: None,
                 minutes: None,
+                priority: None,
             }
         )
         .await,
@@ -853,6 +902,7 @@ async fn the_human_creates_and_edits_reminders_directly_and_an_agent_cannot() {
                     tags: vec![],
                     thread_id: None,
                     minutes: None,
+                    priority: None,
                 }
             )
             .await

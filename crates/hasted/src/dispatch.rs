@@ -104,6 +104,7 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::SenderRules
         | RequestBody::EventShift { .. }
         | RequestBody::ReminderDuration { .. }
+        | RequestBody::ReminderPriority { .. }
         | RequestBody::MutedDelete { .. }
         | RequestBody::RuleChange { .. }
         | RequestBody::ResolveExecuting { .. }
@@ -154,6 +155,7 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::SenderRules => "sender_rules",
         RequestBody::EventShift { .. } => "event_shift",
         RequestBody::ReminderDuration { .. } => "reminder_duration",
+        RequestBody::ReminderPriority { .. } => "reminder_priority",
         RequestBody::MutedDelete { .. } => "muted_delete",
         RequestBody::RuleChange { .. } => "rule_change",
         _ => "request",
@@ -683,6 +685,7 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             tags,
             thread_id,
             minutes,
+            priority,
         } => reminder_write(
             state,
             principal,
@@ -694,6 +697,7 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
                 tags,
                 thread_id,
                 minutes,
+                priority,
             },
         ),
         RequestBody::ReminderEdit {
@@ -746,6 +750,10 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             reminder_id,
             minutes,
         } => reminder_duration(state, principal, &reminder_id, minutes),
+        RequestBody::ReminderPriority {
+            reminder_id,
+            priority,
+        } => reminder_priority(state, principal, &reminder_id, priority),
         RequestBody::EventShift { event_id, times } => {
             event_shift(state, principal, &event_id, times)
         }
@@ -827,6 +835,7 @@ fn reminders_list(state: &State, principal: &Principal, include_completed: bool)
     let tags = state.store.all_reminder_tags().unwrap_or_default();
     let repeats = state.store.reminder_repeats().unwrap_or_default();
     let durations = state.store.reminder_durations().unwrap_or_default();
+    let priorities = state.store.reminder_priorities().unwrap_or_default();
     let machine_labels = machine_labels_for(state, principal);
     match state.store.list_reminders(include_completed) {
         Ok(rows) => Response::Reminders {
@@ -840,6 +849,10 @@ fn reminders_list(state: &State, principal: &Principal, include_completed: bool)
                             .get(&reminder.external_id)
                             .copied()
                             .unwrap_or(haste_proto::DEFAULT_TASK_MINUTES),
+                        priority: priorities
+                            .get(&reminder.external_id)
+                            .and_then(|r| haste_proto::TaskPriority::from_rank(*r))
+                            .unwrap_or_default(),
                         reminder,
                         tags: own,
                     })
@@ -859,6 +872,7 @@ enum ReminderWrite {
         tags: Vec<String>,
         thread_id: Option<String>,
         minutes: Option<u32>,
+        priority: Option<haste_proto::TaskPriority>,
     },
     Edit {
         reminder_id: String,
@@ -918,6 +932,7 @@ fn reminder_write(state: &State, actor: &Principal, write: ReminderWrite) -> Res
             tags,
             thread_id,
             minutes,
+            priority,
         } => handle
             .block_on(guard.create_reminder(&NewReminder {
                 title: title.clone(),
@@ -951,6 +966,11 @@ fn reminder_write(state: &State, actor: &Principal, write: ReminderWrite) -> Res
                     let _ = state
                         .store
                         .set_reminder_duration(&created.external_id, Some(m));
+                }
+                if let Some(p) = priority.filter(|p| *p != haste_proto::TaskPriority::Middle) {
+                    let _ = state
+                        .store
+                        .set_reminder_priority(&created.external_id, Some(p.rank()));
                 }
             }),
         ReminderWrite::Edit {
@@ -1071,6 +1091,32 @@ fn reminder_duration(
     state.audit(
         &actor.id,
         "reminder.duration",
+        "set",
+        Some(reminder_id),
+        None,
+    );
+    Response::Done
+}
+
+/// How important a task is, here only. Middle is the default and has no row.
+fn reminder_priority(
+    state: &State,
+    actor: &Principal,
+    reminder_id: &str,
+    priority: haste_proto::TaskPriority,
+) -> Response {
+    let external = match state.store.get_reminder(reminder_id) {
+        Ok(Some(r)) => r.external_id,
+        Ok(None) => return err(ErrorCode::NotFound, "reminder not found"),
+        Err(e) => return map_store(&e),
+    };
+    let stored = (priority != haste_proto::TaskPriority::Middle).then_some(priority.rank());
+    if let Err(e) = state.store.set_reminder_priority(&external, stored) {
+        return map_store(&e);
+    }
+    state.audit(
+        &actor.id,
+        "reminder.priority",
         "set",
         Some(reminder_id),
         None,

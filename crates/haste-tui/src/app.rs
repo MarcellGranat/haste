@@ -279,6 +279,12 @@ pub enum Effect {
         thread_id: String,
         read: bool,
     },
+    /// Set a task aside, snooze it or bring it back, here only (Reminders is untouched).
+    TodoLater {
+        reminder_id: String,
+        set_aside: bool,
+        until: Option<i64>,
+    },
     /// How long a task takes on the calendar, here only.
     SetDuration {
         reminder_id: String,
@@ -442,8 +448,10 @@ pub enum Mode {
     Preview,
     /// Typing a snooze (`3h`, `2d`).
     Snooze {
+        /// A thread id, or a reminder id when `todo` is set.
         thread_id: String,
         input: String,
+        todo: bool,
     },
     /// The reminder popup (`app.remind` holds it).
     RemindForm,
@@ -1028,6 +1036,7 @@ impl App {
             .iter()
             .filter(|r| {
                 !r.reminder.completed
+                    && !r.set_aside
                     && !self.completing.contains(&r.reminder.id)
                     && r.reminder.due_at.is_none_or(|d| d < end)
             })
@@ -1051,7 +1060,7 @@ impl App {
             .filter(|r| {
                 !r.reminder.completed
                     && !self.completing.contains(&r.reminder.id)
-                    && r.reminder.due_at.is_some_and(|d| d >= from)
+                    && (r.set_aside || r.reminder.due_at.is_some_and(|d| d >= from))
             })
             .collect();
         out.sort_by_key(|r| {
@@ -1393,7 +1402,11 @@ impl App {
             Mode::React { message_id } => self.key_react(key, &message_id),
             Mode::Attachments => self.key_attachments(key),
             Mode::Preview => self.key_preview(key),
-            Mode::Snooze { thread_id, input } => self.key_snooze(key, thread_id, input),
+            Mode::Snooze {
+                thread_id,
+                input,
+                todo,
+            } => self.key_snooze(key, thread_id, input, todo),
             Mode::RemindForm => self.key_remind_form(key),
             Mode::EventEdit => self.key_event_edit(key),
             Mode::TaskDuration => self.key_task_duration(key),
@@ -1568,6 +1581,7 @@ impl App {
             Key::Char('x') if thread_view => return self.mute_selected(),
             Key::Char(' ') if self.on_todos() => self.toggle_todo_mark(),
             Key::Char('e') if self.on_todos() => self.mark_done(),
+            Key::Char('g') if self.on_todos() => return self.todo_aside(),
             Key::Char('g') if self.view == View::Later => return self.bring_back(),
             Key::Char('g') if thread_view => return self.triage_aside(),
             Key::Char('p') if thread_view => return self.triage_priority(),
@@ -1579,6 +1593,7 @@ impl App {
             Key::Char('d') if thread_view => return self.start_delete_thread(),
             Key::Ctrl('r') => return Some(Effect::Refresh),
             Key::Char('s') if thread_view => self.start_snooze(),
+            Key::Char('s') if self.on_todos() => self.start_todo_snooze(),
             Key::Char('t') if thread_view => self.start_remind(),
             Key::Char('r') if thread_view => return self.start_reply(),
             Key::Char('0') => self.jump(false),
@@ -2709,8 +2724,32 @@ impl App {
             self.mode = Mode::Snooze {
                 thread_id,
                 input: String::new(),
+                todo: false,
             };
         }
+    }
+
+    /// `s` on a TODO: the same prompt; the answer becomes the task's due time, here only.
+    fn start_todo_snooze(&mut self) {
+        if let Some(id) = self.todo_under_cursor().map(|r| r.reminder.id.clone()) {
+            self.mode = Mode::Snooze {
+                thread_id: id,
+                input: String::new(),
+                todo: true,
+            };
+        }
+    }
+
+    /// `g` on a TODO: set it aside (it waits on the Later tab), or bring it back when it is
+    /// already aside or snoozed. Here only: Reminders keeps its own date.
+    fn todo_aside(&mut self) -> Option<Effect> {
+        let r = self.todo_under_cursor()?;
+        let back = r.set_aside || r.snoozed;
+        Some(Effect::TodoLater {
+            reminder_id: r.reminder.id.clone(),
+            set_aside: !back,
+            until: None,
+        })
     }
 
     /// `t`: the reminder popup for the thread under the cursor. The suggested title is its
@@ -2924,26 +2963,48 @@ impl App {
         }
     }
 
-    fn key_snooze(&mut self, key: Key, thread_id: String, mut input: String) -> Option<Effect> {
+    fn key_snooze(
+        &mut self,
+        key: Key,
+        thread_id: String,
+        mut input: String,
+        todo: bool,
+    ) -> Option<Effect> {
         match key {
             Key::Esc => self.mode = Mode::Normal,
             Key::Enter => match inbox::parse_snooze(&input) {
                 Ok(secs) => {
                     self.mode = Mode::Normal;
+                    let until = haste_core::time::now_secs() + secs;
+                    if todo {
+                        return Some(Effect::TodoLater {
+                            reminder_id: thread_id,
+                            set_aside: false,
+                            until: Some(until),
+                        });
+                    }
                     return Some(Effect::Triage {
                         thread_id,
-                        change: TriageChange::SnoozeUntil(haste_core::time::now_secs() + secs),
+                        change: TriageChange::SnoozeUntil(until),
                     });
                 }
                 Err(e) => self.status = e,
             },
             Key::Backspace => {
                 input.pop();
-                self.mode = Mode::Snooze { thread_id, input };
+                self.mode = Mode::Snooze {
+                    thread_id,
+                    input,
+                    todo,
+                };
             }
             Key::Char(c) => {
                 input.push(c);
-                self.mode = Mode::Snooze { thread_id, input };
+                self.mode = Mode::Snooze {
+                    thread_id,
+                    input,
+                    todo,
+                };
             }
             _ => {}
         }
@@ -3275,6 +3336,62 @@ mod tests {
             }]
         ));
         assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn g_and_s_on_a_todo_set_it_aside_or_snooze_it_here_only() {
+        let now = haste_core::time::now_secs();
+        let mut app = inbox_app();
+        app.set_reminder_list(vec![reminder_view("r1", Some(now + 3_600))]);
+        app.today_focus = TodayFocus::Todo;
+        // g: set aside
+        assert_eq!(
+            app.handle_key(Key::Char('g')),
+            Some(Effect::TodoLater {
+                reminder_id: "r1".into(),
+                set_aside: true,
+                until: None
+            })
+        );
+        // aside: it leaves Today and waits on Later; g again brings it back
+        app.reminder_list[0].set_aside = true;
+        assert!(app.todos().is_empty());
+        assert_eq!(app.later_todos().len(), 1);
+        app.view = View::Later;
+        app.later_focus = TodayFocus::Todo;
+        assert_eq!(
+            app.handle_key(Key::Char('g')),
+            Some(Effect::TodoLater {
+                reminder_id: "r1".into(),
+                set_aside: false,
+                until: None
+            })
+        );
+        // s: the snooze prompt; 3h sets the shown due time that far ahead
+        app.reminder_list[0].set_aside = false;
+        app.view = View::Today;
+        press(&mut app, "s");
+        assert!(matches!(app.mode, Mode::Snooze { todo: true, .. }));
+        press(&mut app, "3h");
+        let Some(Effect::TodoLater {
+            set_aside: false,
+            until: Some(until),
+            ..
+        }) = app.handle_key(Key::Enter)
+        else {
+            panic!("expected a snooze");
+        };
+        assert!((until - now - 3 * 3_600).abs() < 5);
+        // a snoozed task shows its snooze time and g puts it back
+        app.reminder_list[0].snoozed = true;
+        assert!(matches!(
+            app.handle_key(Key::Char('g')),
+            Some(Effect::TodoLater {
+                set_aside: false,
+                until: None,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -3736,6 +3853,8 @@ mod tests {
             minutes: 30,
             priority: haste_proto::TaskPriority::Middle,
             early: None,
+            set_aside: false,
+            snoozed: false,
         }
     }
 
@@ -4450,6 +4569,8 @@ mod tests {
             minutes: 30,
             priority: haste_proto::TaskPriority::Middle,
             early: None,
+            set_aside: false,
+            snoozed: false,
         };
         app.set_reminder_list(vec![
             r("undated", None, false),

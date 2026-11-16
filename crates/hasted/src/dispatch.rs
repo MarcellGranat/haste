@@ -104,6 +104,7 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::SenderRules
         | RequestBody::EventShift { .. }
         | RequestBody::ReminderDuration { .. }
+        | RequestBody::ReminderLater { .. }
         | RequestBody::ReminderPriority { .. }
         | RequestBody::ReminderEarly { .. }
         | RequestBody::MutedDelete { .. }
@@ -157,6 +158,7 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::SenderRules => "sender_rules",
         RequestBody::EventShift { .. } => "event_shift",
         RequestBody::ReminderDuration { .. } => "reminder_duration",
+        RequestBody::ReminderLater { .. } => "reminder_later",
         RequestBody::ReminderPriority { .. } => "reminder_priority",
         RequestBody::ReminderEarly { .. } => "reminder_early",
         RequestBody::MutedDelete { .. } => "muted_delete",
@@ -759,6 +761,11 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             reminder_id,
             minutes,
         } => reminder_duration(state, principal, &reminder_id, minutes),
+        RequestBody::ReminderLater {
+            reminder_id,
+            set_aside,
+            until,
+        } => reminder_later(state, principal, &reminder_id, set_aside, until),
         RequestBody::ReminderPriority {
             reminder_id,
             priority,
@@ -850,6 +857,7 @@ fn reminders_list(state: &State, principal: &Principal, include_completed: bool)
     let durations = state.store.reminder_durations().unwrap_or_default();
     let priorities = state.store.reminder_priorities().unwrap_or_default();
     let earlies = state.store.reminder_earlies().unwrap_or_default();
+    let laters = state.store.reminder_laters().unwrap_or_default();
     let machine_labels = machine_labels_for(state, principal);
     match state.store.list_reminders(include_completed) {
         Ok(rows) => Response::Reminders {
@@ -857,7 +865,17 @@ fn reminders_list(state: &State, principal: &Principal, include_completed: bool)
                 .into_iter()
                 .filter_map(|reminder| {
                     let own = tags.get(&reminder.id).cloned().unwrap_or_default();
+                    let (set_aside, shown) = laters
+                        .get(&reminder.external_id)
+                        .copied()
+                        .unwrap_or((false, None));
+                    let mut reminder = reminder;
+                    if let Some(due) = shown {
+                        reminder.due_at = Some(due);
+                    }
                     visible_to(principal, &own, machine_labels.as_ref()).then_some(ReminderView {
+                        set_aside,
+                        snoozed: shown.is_some(),
                         repeat: repeats.get(&reminder.external_id).copied(),
                         minutes: durations
                             .get(&reminder.external_id)
@@ -1028,6 +1046,12 @@ fn reminder_write(state: &State, actor: &Principal, write: ReminderWrite) -> Res
                 let _ = state
                     .store
                     .apply_reminder_edit(&reminder_id, &patch_title, due);
+                // the edit wrote its own due time: a snooze no longer overrides it
+                if let Ok(laters) = state.store.reminder_laters() {
+                    if let Some((aside, Some(_))) = laters.get(&external) {
+                        let _ = state.store.set_reminder_later(&external, *aside, None);
+                    }
+                }
                 if set_repeat {
                     let _ = state.store.set_reminder_repeats(&[(external, repeat)]);
                 }
@@ -1121,6 +1145,37 @@ fn reminder_duration(
         Some(reminder_id),
         None,
     );
+    Response::Done
+}
+
+/// Set a task aside or snooze it, here only: nothing is written to Reminders.
+fn reminder_later(
+    state: &State,
+    actor: &Principal,
+    reminder_id: &str,
+    set_aside: bool,
+    until: Option<i64>,
+) -> Response {
+    if set_aside && until.is_some() {
+        return err(
+            ErrorCode::Validation,
+            "a task is set aside or snoozed, not both",
+        );
+    }
+    let external = match state.store.get_reminder(reminder_id) {
+        Ok(Some(r)) => r.external_id,
+        Ok(None) => return err(ErrorCode::NotFound, "reminder not found"),
+        Err(e) => return map_store(&e),
+    };
+    if let Err(e) = state.store.set_reminder_later(&external, set_aside, until) {
+        return map_store(&e);
+    }
+    let label = match (set_aside, until) {
+        (true, _) => "aside",
+        (_, Some(_)) => "snooze",
+        _ => "back",
+    };
+    state.audit(&actor.id, "reminder.later", label, Some(reminder_id), None);
     Response::Done
 }
 

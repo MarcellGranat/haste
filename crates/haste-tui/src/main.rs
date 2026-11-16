@@ -527,6 +527,26 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
             };
             load_rules(app, client);
         }
+        Effect::TodoLater {
+            reminder_id,
+            set_aside,
+            until,
+        } => {
+            app.status = match describe(client.call(RequestBody::ReminderLater {
+                reminder_id,
+                set_aside,
+                until,
+            })) {
+                Ok(()) if set_aside => {
+                    "set aside on the Later tab (here only); g brings it back".into()
+                }
+                Ok(()) if until.is_some() => {
+                    "snoozed: its date here is now when it returns (Reminders keeps its own)".into()
+                }
+                Ok(()) => "back in the inbox".into(),
+                Err(e) => e,
+            };
+        }
         Effect::SetDuration {
             reminder_id,
             minutes,

@@ -916,6 +916,69 @@ async fn a_task_takes_5_minutes_to_4_hours_on_the_calendar_set_only_by_the_human
 }
 
 #[tokio::test]
+async fn a_task_set_aside_or_snoozed_changes_only_what_haste_shows() {
+    let rig = boot().await;
+    release_and_sync(&rig).await;
+    let id = rig.daemon.state.store.list_reminders(false).unwrap()[0]
+        .id
+        .clone();
+    let own_due = rig.daemon.state.store.list_reminders(false).unwrap()[0].due_at;
+    let shown = |r: Response| {
+        let Response::Reminders { reminders } = r else {
+            panic!()
+        };
+        reminders.into_iter().next().unwrap()
+    };
+    let list = RequestBody::RemindersList {
+        include_completed: false,
+    };
+    let later = |set_aside, until| RequestBody::ReminderLater {
+        reminder_id: id.clone(),
+        set_aside,
+        until,
+    };
+    assert!(matches!(
+        human(&rig, later(true, None)).await,
+        Response::Done
+    ));
+    let r = shown(human(&rig, list.clone()).await);
+    assert!(r.set_aside && !r.snoozed);
+    // a snooze shows its time as the due time; the stored (Reminders) one is untouched
+    assert!(matches!(
+        human(&rig, later(false, Some(4_000_000_000))).await,
+        Response::Done
+    ));
+    let r = shown(human(&rig, list.clone()).await);
+    assert!(!r.set_aside && r.snoozed);
+    assert_eq!(r.reminder.due_at, Some(4_000_000_000));
+    assert_eq!(
+        rig.daemon.state.store.list_reminders(false).unwrap()[0].due_at,
+        own_due
+    );
+    // both at once is refused
+    assert_eq!(
+        code(&human(&rig, later(true, Some(5))).await),
+        Some(ErrorCode::Validation)
+    );
+    // back
+    assert!(matches!(
+        human(&rig, later(false, None)).await,
+        Response::Done
+    ));
+    let r = shown(human(&rig, list).await);
+    assert!(!r.set_aside && !r.snoozed);
+    assert_eq!(r.reminder.due_at, own_due);
+    assert!(rig.daemon.state.store.reminder_laters().unwrap().is_empty());
+    // an agent cannot
+    let token = agent(&rig).await;
+    assert_eq!(
+        code(&call(&rig, &token, later(true, None)).await),
+        Some(ErrorCode::Denied)
+    );
+    rig.daemon.shutdown().await;
+}
+
+#[tokio::test]
 async fn editing_a_reminder_can_set_and_clear_how_it_repeats() {
     use haste_core::model::{RepeatFreq, RepeatRule};
     let rig = boot().await;

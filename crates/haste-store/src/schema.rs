@@ -216,6 +216,15 @@ const MIGRATIONS: &[&str] = &[
         minutes INTEGER NOT NULL
     );
     ",
+    // 15: a task set aside or snoozed here only: the flag, and the due time shown instead of
+    // the one Reminders has (null keeps Reminders' own).
+    "
+    CREATE TABLE reminder_later (
+        external_id TEXT PRIMARY KEY,
+        set_aside INTEGER NOT NULL,
+        due_at INTEGER
+    );
+    ",
 ];
 
 /// Highest schema version this binary understands.

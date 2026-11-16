@@ -1465,6 +1465,13 @@ fn todo_items<'a>(app: &App, todos: &[&haste_proto::ReminderView], now: i64) -> 
                 ]));
             }
             let marked = app.todo_marked.contains(&r.reminder.id);
+            let due = if r.set_aside {
+                format!("◌ set aside · {due}")
+            } else if r.snoozed {
+                format!("⏰ back {due}")
+            } else {
+                due
+            };
             let mut spans = vec![
                 Span::styled(
                     if marked { "▣ " } else { "☐ " },
@@ -2682,6 +2689,8 @@ mod tests {
             minutes: 30,
             priority: haste_proto::TaskPriority::Middle,
             early: None,
+            set_aside: false,
+            snoozed: false,
         };
         let now = haste_core::time::now_secs();
         let mut app = App::new();

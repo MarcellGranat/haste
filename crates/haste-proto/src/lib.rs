@@ -329,6 +329,14 @@ pub enum RequestBody {
     ThreadDelete {
         thread_id: String,
     },
+    /// Human-only: set a task aside or snooze it, here only (Reminders is untouched). `until`
+    /// is the new due time shown; no flag and no time puts it back.
+    ReminderLater {
+        reminder_id: String,
+        set_aside: bool,
+        #[serde(default)]
+        until: Option<i64>,
+    },
     /// Human-only: how long a task takes on the calendar (30 minutes, 1, 2, 3 or 4 hours),
     /// here only.
     ReminderDuration {
@@ -507,6 +515,12 @@ pub struct ReminderView {
     /// Minutes before it is due of its early reminder, when it has one.
     #[serde(default)]
     pub early: Option<u32>,
+    /// Set aside here only: it waits on the Later tab.
+    #[serde(default)]
+    pub set_aside: bool,
+    /// Snoozed here only: `reminder.due_at` is the snooze time, not the one Reminders has.
+    #[serde(default)]
+    pub snoozed: bool,
 }
 
 /// The longest early reminder: a week, in minutes.

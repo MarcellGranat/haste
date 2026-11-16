@@ -633,6 +633,56 @@ impl Store {
         })
     }
 
+    /// A task set aside and/or snoozed, here only. `due_at` is the time shown instead of
+    /// Reminders' own; no flag and no time removes the row.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn set_reminder_later(
+        &self,
+        external_id: &str,
+        set_aside: bool,
+        due_at: Option<i64>,
+    ) -> StoreResult<()> {
+        let external_id = external_id.to_owned();
+        self.write(move |conn| {
+            if set_aside || due_at.is_some() {
+                conn.execute(
+                    "INSERT INTO reminder_later (external_id, set_aside, due_at) \
+                     VALUES (?1, ?2, ?3) ON CONFLICT(external_id) \
+                     DO UPDATE SET set_aside = ?2, due_at = ?3",
+                    params![external_id, set_aside, due_at],
+                )?;
+            } else {
+                conn.execute(
+                    "DELETE FROM reminder_later WHERE external_id = ?1",
+                    [&external_id],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    /// The tasks set aside or snoozed: (set aside, shown due time) by external id.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn reminder_laters(
+        &self,
+    ) -> StoreResult<std::collections::HashMap<String, (bool, Option<i64>)>> {
+        self.read(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT external_id, set_aside, due_at FROM reminder_later")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    (r.get::<_, bool>(1)?, r.get::<_, Option<i64>>(2)?),
+                ))
+            })?;
+            Ok(rows.collect::<Result<std::collections::HashMap<_, _>, _>>()?)
+        })
+    }
+
     /// How important a task is, here only (`None` goes back to middle).
     ///
     /// # Errors

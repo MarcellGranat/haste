@@ -960,6 +960,8 @@ mod tests {
             minutes: 30,
             priority: haste_proto::TaskPriority::Middle,
             early: None,
+            set_aside: false,
+            snoozed: false,
         };
         let mut f = RemindForm::editing(&todo, &["haste".into()], NOW, OFF);
         assert_eq!(f.title, "Pay rent");

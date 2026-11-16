@@ -385,6 +385,8 @@ pub enum Effect {
         body: String,
         attachments: Vec<std::path::PathBuf>,
         then: AfterSave,
+        /// The saved draft this reply continues; it is withdrawn once the new one is kept.
+        replaces: Option<String>,
     },
     /// Choose, change or clear the time a draft is sent.
     Schedule {
@@ -551,6 +553,8 @@ pub struct App {
     pub scheduled: std::collections::HashMap<String, i64>,
     /// The text of the reply being sent now, kept for an undo.
     sending_text: Option<Restore>,
+    /// The saved draft that is open in the editor.
+    editing_draft: Option<String>,
     /// Preset filters from the daemon (always at least the default).
     pub filters: Vec<FilterView>,
     /// Why `filters.json` was rejected, if it was.
@@ -725,6 +729,7 @@ impl App {
             pending_send: None,
             scheduled: std::collections::HashMap::new(),
             sending_text: None,
+            editing_draft: None,
             filters: vec![FilterView {
                 name: "all".into(),
                 ..FilterView::default()
@@ -1717,9 +1722,23 @@ impl App {
         ))
     }
 
+    /// The draft kept for a thread, if there is one (the newest).
+    #[must_use]
+    pub fn draft_for(&self, thread_id: &str) -> Option<&Proposal> {
+        self.proposals
+            .iter()
+            .filter(|p| {
+                p.state == ProposalState::Approved
+                    && matches!(p.payload, Payload::Draft { .. })
+                    && p.source_thread_id.as_deref() == Some(thread_id)
+            })
+            .max_by_key(|p| p.created_at)
+    }
+
     /// The editor again, with the text of a reply that was undone.
     pub fn restore_reply(&mut self, r: Restore) {
         self.open_reply_form(&r.thread_id);
+        self.editing_draft = None;
         if let Some(c) = self.compose.as_mut() {
             c.set_focused_text(&r.body);
             c.attachments = r.attachments;
@@ -2500,6 +2519,7 @@ impl App {
                 self.finish_compose(AfterSave::Draft)
             }
             Key::Char('n' | 'N') => {
+                self.editing_draft = None;
                 self.compose = None;
                 self.mode = self.back_mode();
                 self.status = "discarded".into();
@@ -2516,7 +2536,21 @@ impl App {
     pub fn open_reply_form(&mut self, thread_id: &str) {
         let (subject, _) = self.thread_facts(thread_id);
         let subject = inbox::sanitize(&subject).replace('\n', " ");
-        self.compose = Some(Box::new(Compose::reply(thread_id, &subject)));
+        let mut compose = Compose::reply(thread_id, &subject);
+        // a draft kept earlier for this thread is there again
+        self.editing_draft = None;
+        if let Some(d) = self.draft_for(thread_id).cloned() {
+            if let Payload::Draft {
+                body, attachments, ..
+            } = &d.payload
+            {
+                compose.set_focused_text(body);
+                let dir = crate::client::base_dir().join("attachments");
+                compose.attachments = attachments.iter().map(|n| dir.join(n)).collect();
+                self.editing_draft = Some(d.id.clone());
+            }
+        }
+        self.compose = Some(Box::new(compose));
         // the thread stays above the editor, on its newest message
         if let Some(r) = self
             .reader
@@ -2575,6 +2609,7 @@ impl App {
                     body,
                     attachments,
                     then,
+                    replaces: self.editing_draft.take(),
                 }
             }
             ComposeKind::Todo { reminder_id } => {
@@ -4239,7 +4274,8 @@ mod tests {
                 thread_id: "t1".into(),
                 body: "thanks".into(),
                 attachments: vec![std::path::PathBuf::from("/a/report.pdf")],
-                then: AfterSave::Draft,
+                then: AfterSave::Send,
+                replaces: None,
             })
         );
     }
@@ -4372,6 +4408,33 @@ mod tests {
                 at: None
             })
         );
+    }
+
+    #[test]
+    fn a_kept_draft_is_there_when_the_reply_box_opens_again_and_the_thread_is_marked() {
+        let mut app = inbox_app();
+        assert!(app.draft_for("t1").is_none());
+        let mut p = proposal("d1", "me", ProposalState::Approved, false);
+        p.payload = Payload::Draft {
+            to: None,
+            body: "half written".into(),
+            attachments: Vec::new(),
+        };
+        app.set_proposals(vec![p]);
+        assert!(app.draft_for("t1").is_some());
+        assert!(app.draft_for("t2").is_none());
+        // the reply box starts with the text, and saving it replaces that draft
+        app.open_reply_form("t1");
+        assert_eq!(app.compose.as_ref().unwrap().focused_text(), "half written");
+        press(&mut app, "!");
+        let Some(Effect::SaveReply { body, replaces, .. }) = app.handle_key(Key::Ctrl('s')) else {
+            panic!("expected a send");
+        };
+        assert_eq!(body, "half written!");
+        assert_eq!(replaces.as_deref(), Some("d1"));
+        // another thread's box is empty
+        app.open_reply_form("t2");
+        assert_eq!(app.compose.as_ref().unwrap().focused_text(), "");
     }
 
     #[test]

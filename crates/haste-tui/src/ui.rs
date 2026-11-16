@@ -822,6 +822,7 @@ fn thread_line(
     priority: bool,
     blocked: bool,
     tag: Option<String>,
+    draft: bool,
 ) -> ListItem<'static> {
     let source = t.thread.source.as_name();
     let star = if priority { "★" } else { " " };
@@ -856,6 +857,12 @@ fn thread_line(
     ];
     // why it is on the Later tab (back at ..., set aside) comes first, where a long row
     // cannot cut it off
+    if draft {
+        spans.push(Span::styled(
+            "✎ draft  ",
+            Style::new().fg(theme::GREEN).add_modifier(Modifier::BOLD),
+        ));
+    }
     if let Some(tag) = tag {
         spans.push(Span::styled(
             format!("{tag}  "),
@@ -1362,7 +1369,7 @@ fn draw_muted(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
     let items: Vec<ListItem<'_>> = threads
         .iter()
-        .map(|t| thread_line(t, now, false, true, None))
+        .map(|t| thread_line(t, now, false, true, None, false))
         .collect();
     draw_scrolling(
         frame,
@@ -1391,7 +1398,14 @@ fn draw_later(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 }
                 _ => Some("◌ set aside".to_owned()),
             };
-            thread_line(t, now, app.is_priority(t), app.is_blocked(t), tag)
+            thread_line(
+                t,
+                now,
+                app.is_priority(t),
+                app.is_blocked(t),
+                tag,
+                app.draft_for(&t.thread.id).is_some(),
+            )
         })
         .collect();
     let title = format!(
@@ -1588,7 +1602,16 @@ fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
     let items: Vec<ListItem<'_>> = threads
         .iter()
-        .map(|t| thread_line(t, now, app.is_priority(t), app.is_blocked(t), None))
+        .map(|t| {
+            thread_line(
+                t,
+                now,
+                app.is_priority(t),
+                app.is_blocked(t),
+                None,
+                app.draft_for(&t.thread.id).is_some(),
+            )
+        })
         .collect();
     draw_scrolling(
         frame,
@@ -1662,7 +1685,16 @@ fn draw_channels(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let threads = app.channel_threads(app.channels_selected);
     let items: Vec<ListItem<'_>> = threads
         .iter()
-        .map(|t| thread_line(t, now, app.is_priority(t), app.is_blocked(t), None))
+        .map(|t| {
+            thread_line(
+                t,
+                now,
+                app.is_priority(t),
+                app.is_blocked(t),
+                None,
+                app.draft_for(&t.thread.id).is_some(),
+            )
+        })
         .collect();
     let title = CHANNELS.get(app.channels_selected).copied().unwrap_or("");
     draw_scrolling(
@@ -2861,6 +2893,52 @@ mod tests {
         ] {
             assert!(text.contains(needle), "{needle}: {text}");
         }
+    }
+
+    #[test]
+    fn a_thread_with_a_kept_draft_is_marked_in_the_inbox() {
+        let t = haste_proto::ThreadView {
+            thread: haste_core::model::Thread {
+                id: "a".into(),
+                source: haste_core::model::Source::Gmail,
+                external_id: "a".into(),
+                subject: "plan".into(),
+                participants: vec![],
+                last_activity_at: 1,
+                version: 1,
+            },
+            triage: haste_core::model::Triage::new("a", haste_core::model::ObjectKind::Thread),
+            tags: vec![],
+            last: None,
+            unread: false,
+            replied: false,
+            sender_known: true,
+            sender: None,
+        };
+        let mut app = App::new();
+        app.set_threads(vec![t]);
+        assert!(!render(&app).contains("✎ draft"));
+        app.set_proposals(vec![haste_core::proposal::Proposal {
+            id: "d1".into(),
+            idempotency_key: "k".into(),
+            principal_id: "me".into(),
+            payload: haste_core::proposal::Payload::Draft {
+                to: None,
+                body: "hi".into(),
+                attachments: Vec::new(),
+            },
+            source_thread_id: Some("a".into()),
+            source_thread_version: Some(1),
+            state: ProposalState::Approved,
+            stale: false,
+            created_at: 0,
+            updated_at: 0,
+            expires_at: 100,
+            result: None,
+            project: None,
+            origin_machine: None,
+        }]);
+        assert!(render(&app).contains("✎ draft"));
     }
 
     #[test]

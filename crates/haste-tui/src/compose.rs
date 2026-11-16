@@ -82,7 +82,7 @@ impl Compose {
             heading: format!("Reply · {subject}"),
             fields: vec![Field {
                 label:
-                    "Reply · Ctrl-Enter or Alt-Enter sends in 10 s · Ctrl-L later · Ctrl-S draft",
+                    "Reply · Ctrl-S or Ctrl-Enter sends in 10 s · Ctrl-L later · Esc keeps a draft",
                 area: TextArea::new("", true),
             }],
             focus: 0,
@@ -170,9 +170,9 @@ impl Compose {
         }
         match key {
             Key::Esc => return ComposeOutcome::Cancel,
-            Key::Ctrl('s') => return ComposeOutcome::Save,
-            // many terminals send Ctrl-Enter as Ctrl-J
-            Key::CtrlEnter | Key::Ctrl('j') => return ComposeOutcome::Send,
+            // Ctrl-Enter is not reported by every terminal (Herdr sends it as a plain Enter), so
+            // Ctrl-S, Ctrl-J and Alt-Enter send too
+            Key::Ctrl('s') | Key::CtrlEnter | Key::Ctrl('j') => return ComposeOutcome::Send,
             Key::Ctrl('l') => return ComposeOutcome::Later,
             Key::Ctrl('g') => return ComposeOutcome::External,
             Key::Ctrl('f') => return ComposeOutcome::Attach,
@@ -425,7 +425,7 @@ mod tests {
         press(&mut c, &[Key::Tab]);
         assert_eq!(c.focus, 2);
         assert_eq!(c.handle(Key::Enter), ComposeOutcome::Continue); // newline in the notes
-        assert_eq!(c.handle(Key::Ctrl('s')), ComposeOutcome::Save);
+        assert_eq!(c.handle(Key::Ctrl('s')), ComposeOutcome::Send);
         assert_eq!(c.field("Title").unwrap().text(), "a");
     }
 

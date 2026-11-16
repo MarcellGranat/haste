@@ -934,7 +934,8 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
             body,
             attachments,
             then,
-        } => save_reply(app, client, thread_id, body, &attachments, then),
+            replaces,
+        } => save_reply(app, client, thread_id, body, &attachments, then, replaces),
         Effect::Schedule { id, at } => {
             app.status = match describe(client.call(RequestBody::ScheduleSend {
                 proposal_id: id,
@@ -1138,6 +1139,7 @@ fn save_reply(
     body: String,
     attachments: &[std::path::PathBuf],
     then: haste_tui::app::AfterSave,
+    replaces: Option<String>,
 ) {
     use haste_tui::app::AfterSave;
     // files are copied into the attachments folder first; the draft names them, the daemon reads
@@ -1157,8 +1159,17 @@ fn save_reply(
             return;
         }
     };
+    // the new copy is kept; the draft it continues is withdrawn
+    if let Some(old) = replaces {
+        let _ = client.call(RequestBody::Reject {
+            proposal_id: old,
+            reason: Some("replaced".into()),
+        });
+    }
     match then {
-        AfterSave::Draft => app.status = "draft saved in the Outbox (5)".into(),
+        AfterSave::Draft => {
+            app.status = "draft kept: it is there when you reply again (Outbox: 5)".into()
+        }
         AfterSave::Send => {
             if app.pending_send.is_some() {
                 app.status = "another send is waiting: the reply is in the Outbox (5)".into();

@@ -210,8 +210,18 @@ fn run_cycle(
         .iter()
         .map(|w| (w.external_id.clone(), w.repeat))
         .collect();
+    let priorities = reminders
+        .iter()
+        .map(|w| {
+            (
+                w.external_id.clone(),
+                haste_core::model::TaskPriority::from_apple(w.priority.unwrap_or(0)),
+            )
+        })
+        .collect();
     Ok(Batch {
         repeats,
+        priorities,
         reminders: reminders
             .into_iter()
             .map(crate::protocol::WireReminder::into_reminder)
@@ -280,6 +290,7 @@ impl Connector for RemindersConnector {
                 list: reminder.list.clone(),
                 notes: reminder.notes.clone(),
                 repeat: reminder.repeat,
+                priority: reminder.priority.map(|p| p.to_apple()).filter(|n| *n != 0),
             };
             let reply = tokio::task::spawn_blocking(move || helper.call(&request))
                 .await
@@ -289,6 +300,29 @@ impl Connector for RemindersConnector {
                 RemindersResponse::CreateReminder { reminder } => Ok(ReminderReceipt {
                     external_id: reminder.external_id,
                 }),
+                RemindersResponse::Error { kind, .. } => Err(reply_error(&kind)),
+                _ => Err(unexpected()),
+            }
+        })
+    }
+
+    fn set_reminder_priority<'a>(
+        &'a self,
+        external_id: &'a str,
+        priority: haste_core::model::TaskPriority,
+    ) -> BoxFuture<'a, Result<(), ConnectorError>> {
+        Box::pin(async move {
+            let helper = Arc::clone(&self.helper);
+            let request = RemindersRequest::SetPriority {
+                external_id: external_id.to_owned(),
+                priority: priority.to_apple(),
+            };
+            let reply = tokio::task::spawn_blocking(move || helper.call(&request))
+                .await
+                .map_err(|_| ConnectorError::Other("reminder task failed".into()))?
+                .map_err(helper_error)?;
+            match reply {
+                RemindersResponse::SetPriority {} => Ok(()),
                 RemindersResponse::Error { kind, .. } => Err(reply_error(&kind)),
                 _ => Err(unexpected()),
             }
@@ -387,6 +421,7 @@ mod tests {
             list: "SECRET LIST".into(),
             modified,
             repeat: None,
+            priority: None,
         }
     }
 
@@ -542,6 +577,7 @@ mod tests {
                 list: None,
                 notes: Some("haste:thread/x".into()),
                 repeat: None,
+                priority: None,
             })
             .await
             .unwrap();

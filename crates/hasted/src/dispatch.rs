@@ -945,6 +945,7 @@ fn reminder_write(state: &State, actor: &Principal, write: ReminderWrite) -> Res
                 list: None,
                 notes: notes.clone(),
                 repeat,
+                priority,
             }))
             .map(|receipt| {
                 // show it at once, with its tags, its thread and its repeat rule
@@ -1115,6 +1116,26 @@ fn reminder_priority(
         Ok(None) => return err(ErrorCode::NotFound, "reminder not found"),
         Err(e) => return map_store(&e),
     };
+    // Reminders first: a change it refuses is not kept here (the next sync would undo it)
+    let Some(connector) = state.connector_for(&Source::Reminders) else {
+        return err(ErrorCode::NotFound, "no reminders connector");
+    };
+    let guard = Guarded {
+        connector: connector.as_ref(),
+        hooks: state,
+    };
+    let done = tokio::runtime::Handle::current()
+        .block_on(guard.set_reminder_priority(&external, priority));
+    if let Err(e) = done {
+        state.audit(
+            &actor.id,
+            "reminder.priority",
+            "error",
+            Some(reminder_id),
+            None,
+        );
+        return err(ErrorCode::Internal, &format!("{e:?}"));
+    }
     let stored = (priority != haste_proto::TaskPriority::Middle).then_some(priority.rank());
     if let Err(e) = state.store.set_reminder_priority(&external, stored) {
         return map_store(&e);
@@ -1386,6 +1407,7 @@ fn execute_reminder(
                 list: list.clone(),
                 notes: notes.clone(),
                 repeat: None,
+                priority: None,
             };
             match handle.block_on(guard.create_reminder(&new)) {
                 Ok(receipt) => {

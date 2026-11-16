@@ -32,7 +32,12 @@ pub enum RemindersRequest {
         notes: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repeat: Option<haste_core::model::RepeatRule>,
+        /// Reminders' own number (1 to 9), left out for none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<u8>,
     },
+    /// Set the priority number (0 for none) and nothing else.
+    SetPriority { external_id: String, priority: u8 },
     /// Fails when the target is missing or already completed.
     CompleteReminder { external_id: String },
     /// The human's edit: sets the title and due date (`null` clears it) and appends text to the
@@ -88,6 +93,9 @@ pub struct WireReminder {
     /// How it repeats, when it does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat: Option<haste_core::model::RepeatRule>,
+    /// Reminders' own priority number (0 none, 1 to 9), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
 }
 
 impl WireReminder {
@@ -127,6 +135,7 @@ pub enum RemindersResponse {
     },
     CompleteReminder {},
     UpdateReminder {},
+    SetPriority {},
     /// `kind`: `not_authorized`, `not_found`, `already_completed`, `list_not_found`, `failed`.
     Error {
         kind: String,
@@ -197,6 +206,7 @@ mod tests {
             list: "L".into(),
             modified: 7,
             repeat: None,
+            priority: None,
         };
         let r = wire.into_reminder();
         assert!(r.notes_snippet.chars().count() <= haste_core::model::NOTES_SNIPPET_MAX);

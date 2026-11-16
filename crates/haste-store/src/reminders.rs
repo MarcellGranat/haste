@@ -655,6 +655,34 @@ impl Store {
         })
     }
 
+    /// Take the priorities Reminders reports: middle is no row, the others are stored.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn set_reminder_priorities(
+        &self,
+        priorities: &[(String, haste_core::model::TaskPriority)],
+    ) -> StoreResult<()> {
+        let priorities = priorities.to_vec();
+        self.write(move |conn| {
+            for (external_id, p) in &priorities {
+                if *p == haste_core::model::TaskPriority::Middle {
+                    conn.execute(
+                        "DELETE FROM reminder_priorities WHERE external_id = ?1",
+                        [external_id],
+                    )?;
+                } else {
+                    conn.execute(
+                        "INSERT INTO reminder_priorities (external_id, priority) VALUES (?1, ?2) \
+                         ON CONFLICT(external_id) DO UPDATE SET priority = ?2",
+                        params![external_id, p.rank()],
+                    )?;
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// The set priorities (ranks) by the Reminders item's external id.
     ///
     /// # Errors

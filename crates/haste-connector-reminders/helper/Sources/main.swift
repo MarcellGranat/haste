@@ -39,6 +39,7 @@ func wire(_ r: EKReminder) -> [String: Any] {
         "list": r.calendar?.title ?? "",
         "modified": Int((r.lastModifiedDate ?? Date(timeIntervalSince1970: 0)).timeIntervalSince1970),
     ]
+    if r.priority != 0 { out["priority"] = r.priority }
     if let comps = r.dueDateComponents, let date = Calendar.current.date(from: comps) {
         out["due"] = Int(date.timeIntervalSince1970)
     }
@@ -159,6 +160,7 @@ case "create_reminder":
             reminder.addRecurrenceRule(EKRecurrenceRule(recurrenceWith: freq, interval: every, end: nil))
         }
     }
+    if let priority = request["priority"] as? Int, (1...9).contains(priority) { reminder.priority = priority }
     do { try store.save(reminder, commit: true) } catch { fail("failed", "save failed") }
     emit(["op": "create_reminder", "reminder": wire(reminder)])
 
@@ -170,6 +172,15 @@ case "complete_reminder":
     reminder.isCompleted = true
     do { try store.save(reminder, commit: true) } catch { fail("failed", "save failed") }
     emit(["op": "complete_reminder"])
+
+case "set_priority":
+    guard authorized() else { fail("not_authorized") }
+    guard let id = request["external_id"] as? String,
+          let priority = request["priority"] as? Int, (0...9).contains(priority) else { fail("bad_request") }
+    guard let reminder = store.calendarItem(withIdentifier: id) as? EKReminder else { fail("not_found") }
+    reminder.priority = priority
+    do { try store.save(reminder, commit: true) } catch { fail("failed", "save failed") }
+    emit(["op": "set_priority"])
 
 case "update_reminder":
     guard authorized() else { fail("not_authorized") }

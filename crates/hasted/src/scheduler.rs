@@ -296,6 +296,9 @@ fn store_batch(
             .collect();
         state.store.set_unread(&flags, now_secs())?;
     }
+    if !batch.priorities.is_empty() {
+        state.store.set_reminder_priorities(&batch.priorities)?;
+    }
     if !batch.repeats.is_empty() {
         state.store.set_reminder_repeats(&batch.repeats)?;
     }

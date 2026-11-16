@@ -409,3 +409,105 @@ mod tests {
         assert_eq!(LinkType::parse("friend_of"), None);
     }
 }
+
+/// How important a task is. Reminders keeps it as a number 0 to 9 (1 to 4 high, 5 medium, 6 to 9
+/// low, 0 none); the four levels map onto it and back.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskPriority {
+    Low,
+    #[default]
+    Middle,
+    High,
+    Urgent,
+}
+
+impl TaskPriority {
+    pub const ALL: [TaskPriority; 4] = [Self::Low, Self::Middle, Self::High, Self::Urgent];
+
+    /// The word shown and typed.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Middle => "middle",
+            Self::High => "high",
+            Self::Urgent => "urgent",
+        }
+    }
+
+    /// The stored number: 0 low, 1 middle, 2 high, 3 urgent.
+    #[must_use]
+    pub fn rank(self) -> u8 {
+        self as u8
+    }
+
+    #[must_use]
+    pub fn from_rank(rank: u8) -> Option<Self> {
+        Self::ALL.get(usize::from(rank)).copied()
+    }
+
+    /// One step more (`up`) or less important, stopping at the ends.
+    #[must_use]
+    pub fn step(self, up: bool) -> Self {
+        let r = self.rank();
+        Self::from_rank(if up {
+            r.saturating_add(1)
+        } else {
+            r.saturating_sub(1)
+        })
+        .unwrap_or(self)
+    }
+
+    /// The number Reminders gets: urgent 1, high 3, middle none (0), low 9.
+    #[must_use]
+    pub fn to_apple(self) -> u8 {
+        match self {
+            Self::Urgent => 1,
+            Self::High => 3,
+            Self::Middle => 0,
+            Self::Low => 9,
+        }
+    }
+
+    /// The level for a number Reminders reports: 1 to 2 urgent, 3 to 4 high, none or medium
+    /// (0, 5) middle, 6 to 9 low.
+    #[must_use]
+    pub fn from_apple(n: u8) -> Self {
+        match n {
+            1..=2 => Self::Urgent,
+            3..=4 => Self::High,
+            6..=9 => Self::Low,
+            _ => Self::Middle,
+        }
+    }
+}
+
+#[cfg(test)]
+mod priority_tests {
+    use super::TaskPriority;
+
+    #[test]
+    fn the_four_levels_survive_a_trip_through_reminders() {
+        for p in TaskPriority::ALL {
+            assert_eq!(TaskPriority::from_apple(p.to_apple()), p);
+        }
+        // numbers set in the Reminders app itself
+        assert_eq!(TaskPriority::from_apple(5), TaskPriority::Middle);
+        assert_eq!(TaskPriority::from_apple(0), TaskPriority::Middle);
+        assert_eq!(TaskPriority::from_apple(4), TaskPriority::High);
+        assert_eq!(TaskPriority::from_apple(7), TaskPriority::Low);
+    }
+}

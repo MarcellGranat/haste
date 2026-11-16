@@ -44,6 +44,7 @@ fn wire(id: &str, title: &str) -> WireReminder {
         list: "SECRET LIST".into(),
         modified: 10,
         repeat: None,
+        priority: None,
     }
 }
 
@@ -77,6 +78,7 @@ impl Helper for FakeHelper {
                 notes,
                 repeat,
                 due,
+                priority,
                 ..
             } => {
                 if mode == Mode::TimeOutOnWrite {
@@ -89,6 +91,7 @@ impl Helper for FakeHelper {
                 r.notes = notes.clone().unwrap_or_default();
                 r.repeat = *repeat;
                 r.due = *due;
+                r.priority = priority.filter(|p| *p != 0);
                 list.push(r.clone());
                 Ok(RemindersResponse::CreateReminder { reminder: r })
             }
@@ -127,6 +130,19 @@ impl Helper for FakeHelper {
                         r.notes = format!("{}{extra}", r.notes);
                     }
                     Ok(RemindersResponse::UpdateReminder {})
+                }
+                None => Ok(RemindersResponse::Error {
+                    kind: "not_found".into(),
+                    message: String::new(),
+                }),
+            },
+            RemindersRequest::SetPriority {
+                external_id,
+                priority,
+            } => match list.iter_mut().find(|r| &r.external_id == external_id) {
+                Some(r) => {
+                    r.priority = (*priority != 0).then_some(*priority);
+                    Ok(RemindersResponse::SetPriority {})
                 }
                 None => Ok(RemindersResponse::Error {
                     kind: "not_found".into(),
@@ -699,7 +715,29 @@ async fn a_task_has_a_priority_set_only_by_the_human() {
     for p in [Urgent, High, Low, Middle] {
         assert!(matches!(human(&rig, set(p)).await, Response::Done));
         assert_eq!(priority_of(&rig).await, p);
+        // Reminders was told the number it keeps for that level
+        let told = rig
+            .helper
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|c| match c {
+                RemindersRequest::SetPriority { priority, .. } => Some(*priority),
+                _ => None,
+            });
+        assert_eq!(told, Some(p.to_apple()));
     }
+    // a priority set in the Reminders app itself comes in with the next sync
+    {
+        let mut list = rig.helper.reminders.lock().unwrap();
+        list[0].priority = Some(1);
+        list[0].modified = 99;
+    }
+    sync_once(&rig.daemon.state, &rig.connector).await.unwrap();
+    assert_eq!(priority_of(&rig).await, Urgent);
+    assert!(matches!(human(&rig, set(Middle)).await, Response::Done));
     // middle is stored as no row at all
     assert!(rig
         .daemon

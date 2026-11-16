@@ -63,6 +63,8 @@ pub struct Batch {
     pub unread: Vec<(String, bool)>,
     /// Reminders: `(external id, repeat rule)` as the Reminders app reports it.
     pub repeats: Vec<(String, Option<crate::model::RepeatRule>)>,
+    /// Reminders: `(external id, priority)` as the Reminders app reports it.
+    pub priorities: Vec<(String, crate::model::TaskPriority)>,
 }
 
 /// What an upstream read or unread mark acts on: the provider's thread id and the provider ids
@@ -196,6 +198,7 @@ pub struct NewReminder {
     pub list: Option<String>,
     pub notes: Option<String>,
     pub repeat: Option<crate::model::RepeatRule>,
+    pub priority: Option<crate::model::TaskPriority>,
 }
 
 /// A human's change to a reminder: the title and due date are set, text is only ever appended to
@@ -365,6 +368,20 @@ pub trait Connector: Send + Sync {
         Box::pin(async {
             Err(ConnectorError::Unsupported(
                 "reminders cannot be edited".into(),
+            ))
+        })
+    }
+
+    /// Set a reminder's priority in the app. Default: unsupported. Only the human's own TUI
+    /// change calls it.
+    fn set_reminder_priority<'a>(
+        &'a self,
+        _external_id: &'a str,
+        _priority: crate::model::TaskPriority,
+    ) -> BoxFuture<'a, Result<(), ConnectorError>> {
+        Box::pin(async {
+            Err(ConnectorError::Unsupported(
+                "reminders have no priority here".into(),
             ))
         })
     }
@@ -770,6 +787,39 @@ impl Guarded<'_> {
         }
     }
 
+    /// Set a reminder's priority in the app. Never retried.
+    ///
+    /// # Errors
+    /// See [`CallError`].
+    pub async fn set_reminder_priority(
+        &self,
+        external_id: &str,
+        priority: crate::model::TaskPriority,
+    ) -> Result<(), CallError> {
+        self.precheck(
+            self.connector.capabilities().reminders_create,
+            "reminder.priority",
+        )?;
+        let source = self.connector.source();
+        match self
+            .connector
+            .set_reminder_priority(external_id, priority)
+            .await
+        {
+            Ok(()) => {
+                self.hooks.audit("reminder.priority", &source, "ok");
+                Ok(())
+            }
+            Err(e @ (ConnectorError::Challenge(_) | ConnectorError::Checkpoint(_))) => {
+                Err(self.trip("reminder.priority", e))
+            }
+            Err(e) => {
+                self.hooks.audit("reminder.priority", &source, "error");
+                Err(CallError::Connector(e))
+            }
+        }
+    }
+
     /// Mark a reminder completed after a human approved the proposal. Never retried.
     ///
     /// # Errors
@@ -1045,6 +1095,7 @@ mod tests {
             list: None,
             notes: None,
             repeat: None,
+            priority: None,
         };
         assert_eq!(
             block_on(g.create_reminder(&new)),

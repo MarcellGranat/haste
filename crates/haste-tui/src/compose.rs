@@ -82,7 +82,7 @@ impl Compose {
             heading: format!("Reply · {subject}"),
             fields: vec![Field {
                 label:
-                    "Reply · Ctrl-S or Ctrl-Enter sends in 10 s · Ctrl-L later · Esc keeps a draft",
+                    "Reply · Ctrl-S or Ctrl-Enter sends (chat 3 s, mail 10 s) · Ctrl-L later · Esc keeps a draft",
                 area: TextArea::new("", true),
             }],
             focus: 0,

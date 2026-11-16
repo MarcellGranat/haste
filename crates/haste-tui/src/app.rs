@@ -253,8 +253,20 @@ pub enum GroupBy {
 /// Group name for proposals that carry no project.
 pub const NO_PROJECT: &str = "no project";
 
-/// How long a send waits after `s` before it runs, during which any key cancels it.
+/// How long a mail send waits before it runs; `U` undoes it meanwhile.
 pub const SEND_DELAY: Duration = Duration::from_secs(10);
+
+/// How long a chat send (WhatsApp, Messenger, iMessage) waits: chats are quick, so the window is short.
+pub const CHAT_SEND_DELAY: Duration = Duration::from_secs(3);
+
+/// The undo window for a send from `source`: short for the chat networks, long for mail.
+#[must_use]
+pub fn send_delay(source: &str) -> Duration {
+    match source {
+        "imessage" | "whatsapp" | "messenger" => CHAT_SEND_DELAY,
+        _ => SEND_DELAY,
+    }
+}
 
 /// Something the key handler wants the daemon to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1683,10 +1695,10 @@ impl App {
             id: id.to_owned(),
             recipients: preview.recipients,
             subject: with_files(preview.subject, &preview.attachments),
+            deadline: self.now + send_delay(&preview.source),
             source: preview.source,
             remaining: preview.sends_remaining,
             recipients_digest: preview.recipients_digest,
-            deadline: self.now + SEND_DELAY,
             restore: self.sending_text.take(),
         });
         self.status.clear();
@@ -5516,5 +5528,15 @@ mod tests {
         app.set_proposals(vec![proposal("p1", "agent-a", ProposalState::Sent, false)]);
         assert!(app.proposals.is_empty());
         assert!(app.marked.is_empty());
+    }
+
+    #[test]
+    fn chat_sends_wait_three_seconds_and_mail_ten() {
+        for chat in ["imessage", "whatsapp", "messenger"] {
+            assert_eq!(send_delay(chat), Duration::from_secs(3), "{chat}");
+        }
+        for mail in ["gmail", "icloud", "email"] {
+            assert_eq!(send_delay(mail), Duration::from_secs(10), "{mail}");
+        }
     }
 }

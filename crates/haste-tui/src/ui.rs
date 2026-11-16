@@ -859,7 +859,7 @@ fn thread_line(
     // cannot cut it off
     if draft {
         spans.push(Span::styled(
-            "✎ draft  ",
+            "[draft]  ",
             Style::new().fg(theme::GREEN).add_modifier(Modifier::BOLD),
         ));
     }
@@ -2917,7 +2917,7 @@ mod tests {
         };
         let mut app = App::new();
         app.set_threads(vec![t]);
-        assert!(!render(&app).contains("✎ draft"));
+        assert!(!render(&app).contains("[draft]"));
         app.set_proposals(vec![haste_core::proposal::Proposal {
             id: "d1".into(),
             idempotency_key: "k".into(),
@@ -2938,7 +2938,7 @@ mod tests {
             project: None,
             origin_machine: None,
         }]);
-        assert!(render(&app).contains("✎ draft"));
+        assert!(render(&app).contains("[draft]"));
     }
 
     #[test]

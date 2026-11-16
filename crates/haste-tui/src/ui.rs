@@ -9,7 +9,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::app::{summary, App, Mode, Row, TodayFocus, View};
+use crate::app::{summary, App, Mode, TodayFocus, View};
 use crate::inbox::{self, CHANNELS};
 use crate::theme;
 use haste_core::proposal::ProposalState;
@@ -715,11 +715,9 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         View::Approvals => vec![
             ("s", "send now"),
             ("t", "send later"),
-            ("u", "unschedule"),
-            ("a", "approve agent proposal"),
-            ("r", "reject"),
-            ("x", "mark"),
-            ("/", "filter"),
+            ("u", "no send time"),
+            ("d", "discard"),
+            ("m/b", "settle NEEDS CHECK"),
             ("Esc", "back"),
         ],
         View::Connectors => vec![("R", "release"), ("E", "engage"), ("Esc", "back")],
@@ -2344,79 +2342,72 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 fn draw_approvals(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let items: Vec<ListItem<'_>> = app
-        .rows()
+        .proposals
         .iter()
-        .map(|row| match row {
-            Row::Group {
-                principal,
-                count,
-                collapsed,
-            } => ListItem::new(Line::from(Span::styled(
-                format!(
-                    "{} {principal} ({count})",
-                    if *collapsed { "▸" } else { "▾" }
-                ),
-                Style::new().add_modifier(Modifier::BOLD),
-            ))),
-            Row::BlockedGroup { count, collapsed } => ListItem::new(Line::from(Span::styled(
-                format!(
-                    "{} Blocked agents ({count}) · read-only",
-                    if *collapsed { "▸" } else { "▾" }
-                ),
-                Style::new().fg(theme::WARNING).add_modifier(Modifier::BOLD),
-            ))),
-            Row::Blocked(i) => {
-                let blocked = app.blocked();
-                match blocked.get(*i) {
-                    Some(a) => ListItem::new(format!(
-                        "    ! {} · {} · {}",
-                        a.machine,
-                        a.workspace_label,
-                        a.agent.as_deref().unwrap_or("agent")
-                    )),
-                    None => ListItem::new(""),
+        .map(|p| {
+            let state = match p.state {
+                ProposalState::Executing => "NEEDS CHECK",
+                _ => "draft",
+            };
+            let when = app
+                .scheduled
+                .get(&p.id)
+                .map(|at| format!("  ⏰ sends {}", inbox::stamp(*at, app.tz_offset)))
+                .unwrap_or_default();
+            let stale = if p.stale {
+                "  STALE: the thread changed"
+            } else {
+                ""
+            };
+            let (to, body) = match &p.payload {
+                haste_core::proposal::Payload::Draft { body, .. } => {
+                    let to = p
+                        .source_thread_id
+                        .as_deref()
+                        .and_then(|id| app.threads.iter().find(|t| t.thread.id == id))
+                        .map_or_else(
+                            || "a thread".to_owned(),
+                            |t| inbox::sanitize(&t.thread.subject).replace('\n', " "),
+                        );
+                    (to, inbox::sanitize(body).replace('\n', " "))
                 }
-            }
-            Row::Item(i) => {
-                let p = &app.proposals[*i];
-                let mark = if app.marked.contains(&p.id) {
-                    "[x]"
-                } else {
-                    "[ ]"
-                };
-                let state = match p.state {
-                    ProposalState::Approved => "approved",
-                    ProposalState::Executing => "NEEDS CHECK",
-                    _ => "pending ",
-                };
-                let stale = if p.stale { " STALE" } else { "" };
-                let project = p
-                    .project
-                    .as_deref()
-                    .map(|x| format!(" [{x}]"))
-                    .unwrap_or_default();
-                let when = app
-                    .scheduled
-                    .get(&p.id)
-                    .map(|at| format!(" ⏰ {}", inbox::stamp(*at, app.tz_offset)))
-                    .unwrap_or_default();
-                ListItem::new(format!(
-                    "  {mark} {state}{stale}{when}{project} {}",
-                    summary(p)
-                ))
-            }
+                _ => (String::new(), String::new()),
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!(" {state:<11}"),
+                    Style::new().fg(theme::PEACH).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("{to}  "), Style::new().fg(theme::TEXT)),
+                Span::styled(body, Style::new().fg(theme::SUBTEXT0)),
+                Span::styled(when, Style::new().fg(theme::GREEN)),
+                Span::styled(stale, Style::new().fg(theme::WARNING)),
+            ]))
         })
         .collect();
-    let mut state = ListState::default().with_selected(Some(app.approvals_selected));
-    let help =
-        "s send now · t send later · u unschedule · a approve an agent's · r discard/reject · x mark · m/b settle NEEDS CHECK · / filter";
-    frame.render_stateful_widget(
-        List::new(items)
-            .block(theme::panel(help))
-            .highlight_style(theme::selected())
-            .highlight_symbol("▌ "),
+    let title = format!(
+        " Outbox · {} · s send now · t send later · u no send time · d discard ",
+        app.proposals.len()
+    );
+    if items.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "nothing waits here: Ctrl-Enter sends a reply, Ctrl-S keeps it as a draft, Ctrl-L sends it later",
+                theme::muted(),
+            )))
+            .block(theme::panel(&title)),
+            area,
+        );
+        return;
+    }
+    draw_scrolling(
+        frame,
         area,
-        &mut state,
+        theme::panel(&title),
+        items,
+        Some(app.approvals_selected),
+        &app.approvals_offset,
+        &app.list_rows,
     );
 }
 

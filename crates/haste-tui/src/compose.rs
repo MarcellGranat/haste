@@ -81,7 +81,8 @@ impl Compose {
             },
             heading: format!("Reply · {subject}"),
             fields: vec![Field {
-                label: "Note: your reply (nothing is sent until you send it from Approvals)",
+                label:
+                    "Reply · Ctrl-Enter or Alt-Enter sends in 10 s · Ctrl-L later · Ctrl-S draft",
                 area: TextArea::new("", true),
             }],
             focus: 0,

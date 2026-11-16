@@ -457,6 +457,8 @@ pub enum Mode {
         thread_id: String,
         subject: String,
     },
+    /// `d` in the Outbox: discard this draft?
+    ConfirmDiscardDraft(String),
     /// Esc in the editor with something written: save it as a draft?
     ConfirmDiscardCompose,
     /// Choosing when a reply goes out (the editor, or an Outbox draft).
@@ -604,6 +606,7 @@ pub struct App {
     pub reactions_pending: std::collections::HashMap<String, (usize, String)>,
     pub muted_offset: Cell<usize>,
     pub logs_offset: Cell<usize>,
+    pub approvals_offset: Cell<usize>,
     pub logs: Vec<crate::logs::LogLine>,
     pub logs_selected: usize,
     /// Show only warnings and errors.
@@ -704,11 +707,11 @@ pub fn summary(p: &Proposal) -> String {
     }
 }
 
-fn is_open(p: &Proposal) -> bool {
-    matches!(
-        p.state,
-        ProposalState::Pending | ProposalState::Approved | ProposalState::Executing
-    )
+/// A draft that waits to be sent, or whose send needs a check: what the Outbox lists. Agents'
+/// proposals are approved in the `haste` command, not here.
+fn is_outbox(p: &Proposal) -> bool {
+    matches!(p.payload, Payload::Draft { .. })
+        && matches!(p.state, ProposalState::Approved | ProposalState::Executing)
 }
 
 impl App {
@@ -760,6 +763,7 @@ impl App {
             reactions_pending: std::collections::HashMap::new(),
             muted_offset: Cell::new(0),
             logs_offset: Cell::new(0),
+            approvals_offset: Cell::new(0),
             logs: Vec::new(),
             logs_selected: 0,
             logs_problems: false,
@@ -791,7 +795,7 @@ impl App {
 
     /// Replace proposals with the daemon's pending/approved list.
     pub fn set_proposals(&mut self, proposals: Vec<Proposal>) {
-        self.proposals = proposals.into_iter().filter(is_open).collect();
+        self.proposals = proposals.into_iter().filter(is_outbox).collect();
         let live: BTreeSet<&String> = self.proposals.iter().map(|p| &p.id).collect();
         self.marked.retain(|id| live.contains(id));
         self.clamp();
@@ -949,35 +953,6 @@ impl App {
         }
     }
 
-    fn matches_filter(&self, p: &Proposal) -> bool {
-        if self.filter.is_empty() {
-            return true;
-        }
-        let needle = self.filter.to_lowercase();
-        p.principal_id.to_lowercase().contains(&needle)
-            || p.id.to_lowercase().contains(&needle)
-            || summary(p).to_lowercase().contains(&needle)
-            || p.project
-                .as_deref()
-                .is_some_and(|x| x.to_lowercase().contains(&needle))
-    }
-
-    /// The group a proposal falls in for the current grouping mode.
-    fn group_key(&self, p: &Proposal) -> String {
-        match self.group_by {
-            GroupBy::Agent => p.principal_id.clone(),
-            GroupBy::Project => p.project.clone().unwrap_or_else(|| NO_PROJECT.to_owned()),
-        }
-    }
-
-    /// Key under which a group's collapsed state is stored (separate per grouping mode).
-    fn collapse_key(&self, group: &str) -> String {
-        match self.group_by {
-            GroupBy::Agent => format!("a:{group}"),
-            GroupBy::Project => format!("p:{group}"),
-        }
-    }
-
     /// Agents that herdr reports as blocked, oldest first. Only connected machines contribute.
     #[must_use]
     pub fn blocked(&self) -> Vec<AgentStatusRecord> {
@@ -994,46 +969,10 @@ impl App {
         out
     }
 
-    /// Visible rows of the Approvals view: proposal groups (by agent or by project) with their
-    /// items, then the read-only Blocked agents group.
+    /// The Outbox rows: your drafts that wait to be sent, and the ones with a send time.
     #[must_use]
     pub fn rows(&self) -> Vec<Row> {
-        let mut groups: Vec<String> = self
-            .proposals
-            .iter()
-            .filter(|p| self.matches_filter(p))
-            .map(|p| self.group_key(p))
-            .collect();
-        groups.sort_unstable();
-        groups.dedup();
-        let mut rows = Vec::new();
-        for group in groups {
-            let items: Vec<usize> = self
-                .proposals
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| self.group_key(p) == group && self.matches_filter(p))
-                .map(|(i, _)| i)
-                .collect();
-            let collapsed = self.collapsed.contains(&self.collapse_key(&group));
-            rows.push(Row::Group {
-                principal: group,
-                count: items.len(),
-                collapsed,
-            });
-            if !collapsed {
-                rows.extend(items.into_iter().map(Row::Item));
-            }
-        }
-        let blocked = self.blocked();
-        rows.push(Row::BlockedGroup {
-            count: blocked.len(),
-            collapsed: self.blocked_collapsed,
-        });
-        if !self.blocked_collapsed {
-            rows.extend((0..blocked.len()).map(Row::Blocked));
-        }
-        rows
+        (0..self.proposals.len()).map(Row::Item).collect()
     }
 
     /// Threads passing the active filter, best first: priority, then newest activity.
@@ -1416,23 +1355,6 @@ impl App {
         self.filter_error = error;
     }
 
-    fn toggle_group(&mut self) {
-        match self.rows().get(self.approvals_selected).cloned() {
-            Some(Row::Group { principal, .. }) => {
-                let key = self.collapse_key(&principal);
-                if !self.collapsed.remove(&key) {
-                    self.collapsed.insert(key);
-                }
-                self.clamp();
-            }
-            Some(Row::BlockedGroup { .. }) => {
-                self.blocked_collapsed = !self.blocked_collapsed;
-                self.clamp();
-            }
-            _ => {}
-        }
-    }
-
     /// Handle one key press; returns an effect for the caller to run against the daemon.
     pub fn handle_key(&mut self, key: Key) -> Option<Effect> {
         // Ctrl-e in a text field opens the emoji keyboard
@@ -1496,6 +1418,7 @@ impl App {
                 },
             ),
             Mode::ConfirmDiscardCompose => self.key_discard_compose(key),
+            Mode::ConfirmDiscardDraft(id) => self.confirm(key, Effect::Reject { id }),
             Mode::SendAt {
                 target,
                 input,
@@ -1662,17 +1585,9 @@ impl App {
             Key::Ctrl('u') => self.move_selection(-self.half_page()),
             Key::Char('g') if !thread_view => self.jump(false),
             Key::Char('G') => self.jump(true),
-            Key::Char('r') if self.view == View::Approvals => return self.reject_selected(),
             Key::Char('u') if self.view == View::Approvals => return self.unschedule(),
             Key::Char('u') => return Some(Effect::Refresh),
-            Key::Char('/') if self.view == View::Approvals => {
-                self.mode = Mode::Filter;
-                self.filter.clear();
-            }
-            Key::Char('x' | ' ') if self.view == View::Approvals => self.toggle_mark(),
-            Key::Enter if self.view == View::Approvals => self.enter(),
-            Key::Char('a') if self.view == View::Approvals => return self.approve_selected(),
-            Key::Char('A') if self.view == View::Approvals => self.start_batch(),
+            Key::Char('d') if self.view == View::Approvals => self.start_discard_draft(),
             Key::Char('s') if self.view == View::Approvals => return self.start_send(),
             Key::Char('t') if self.view == View::Approvals => self.start_schedule(),
             Key::Char('m') if self.view == View::Approvals => self.start_resolve(true),
@@ -1680,102 +1595,6 @@ impl App {
             _ => {}
         }
         None
-    }
-
-    fn enter(&mut self) {
-        match self.rows().get(self.approvals_selected).cloned() {
-            Some(Row::Group { .. } | Row::BlockedGroup { .. }) => self.toggle_group(),
-            Some(Row::Item(i)) => {
-                if let Some(p) = self.proposals.get(i) {
-                    self.mode = Mode::Detail(p.id.clone());
-                }
-            }
-            // Blocked agents are read-only: only where they are is shown, no action is offered.
-            Some(Row::Blocked(i)) => {
-                if let Some(a) = self.blocked().get(i) {
-                    self.status = format!(
-                        "blocked agent: {} · workspace '{}' · {} (read-only)",
-                        a.machine,
-                        a.workspace_label,
-                        a.agent.as_deref().unwrap_or("agent")
-                    );
-                }
-            }
-            None => {}
-        }
-    }
-
-    fn toggle_mark(&mut self) {
-        let Some(p) = self.selected_proposal() else {
-            return;
-        };
-        let id = p.id.clone();
-        if !self.marked.remove(&id) {
-            self.marked.insert(id);
-        }
-    }
-
-    fn reject_selected(&mut self) -> Option<Effect> {
-        let (id, state) = {
-            let p = self.selected_proposal()?;
-            (p.id.clone(), p.state)
-        };
-        if state != ProposalState::Pending {
-            self.status = "only pending proposals can be rejected".into();
-            return None;
-        }
-        Some(Effect::Reject { id })
-    }
-
-    fn approve_selected(&mut self) -> Option<Effect> {
-        let (id, state, stale) = {
-            let p = self.selected_proposal()?;
-            (p.id.clone(), p.state, p.stale)
-        };
-        if state != ProposalState::Pending {
-            self.status = "already approved".into();
-            return None;
-        }
-        if stale {
-            self.status =
-                "thread changed since this proposal; press y to acknowledge and approve".into();
-            self.mode = Mode::ConfirmStaleApprove(id);
-            return None;
-        }
-        Some(Effect::Approve {
-            ids: vec![id],
-            acknowledge_stale: false,
-        })
-    }
-
-    /// Batch approval: marked, pending, non-stale proposals only, after one confirmation.
-    fn start_batch(&mut self) {
-        let mut ids = Vec::new();
-        let mut stale = 0;
-        for p in self
-            .proposals
-            .iter()
-            .filter(|p| self.marked.contains(&p.id))
-        {
-            if p.state != ProposalState::Pending {
-                continue;
-            }
-            if p.stale {
-                stale += 1;
-            } else {
-                ids.push(p.id.clone());
-            }
-        }
-        if stale > 0 {
-            self.status = format!("{stale} stale proposal(s) excluded; approve them individually");
-        }
-        if ids.is_empty() {
-            if stale == 0 {
-                self.status = "nothing marked to approve".into();
-            }
-            return;
-        }
-        self.mode = Mode::ConfirmBatch(ids);
     }
 
     /// Releasing needs a `y`: the connector starts talking to the provider again.
@@ -1806,19 +1625,30 @@ impl App {
     /// answer arrives and names every recipient the daemon resolved.
     fn start_send(&mut self) -> Option<Effect> {
         let p = self.selected_proposal().cloned()?;
-        if p.payload.is_reminder() || p.payload.is_calendar() {
-            self.start_execute(&p);
-            return None;
-        }
         if p.state != ProposalState::Approved {
-            self.status = "send is only available for approved proposals".into();
+            self.status =
+                "outcome unknown: check the mailbox or app, then m (it is there) or b (it is not)"
+                    .into();
             return None;
         }
-        if !matches!(p.payload, Payload::Draft { .. }) {
-            self.status = "only drafts can be sent".into();
+        if self.pending_send.is_some() {
+            self.status = "another send is waiting: U undoes it".into();
             return None;
         }
+        self.sending_text = None;
         Some(Effect::PreviewSend { id: p.id })
+    }
+
+    /// `d` in the Outbox: throw the draft away, after a yes.
+    fn start_discard_draft(&mut self) {
+        let Some(p) = self.selected_proposal() else {
+            return;
+        };
+        if p.state != ProposalState::Approved {
+            self.status = "only a draft that has not been sent can be discarded".into();
+            return;
+        }
+        self.mode = Mode::ConfirmDiscardDraft(p.id.clone());
     }
 
     /// `m` / `b` on a proposal that needs a check: mark it done (it is in the mailbox or app) or
@@ -1938,25 +1768,6 @@ impl App {
         };
         self.pending_send = None;
         Some(effect)
-    }
-
-    /// `s` on a reminder or calendar proposal: run it after one confirmation.
-    fn start_execute(&mut self, p: &Proposal) {
-        match p.state {
-            ProposalState::Approved => {
-                self.mode = Mode::ConfirmExecute {
-                    id: p.id.clone(),
-                    what: summary(p),
-                    stale: p.stale,
-                };
-            }
-            ProposalState::Executing => {
-                self.status =
-                    "outcome unknown: check the mailbox or app, then m (it is there) or b (it is not)"
-                        .into();
-            }
-            _ => self.status = "approve it first (a), then run it (s)".into(),
-        }
     }
 
     /// The id and subject of the thread under the cursor, or a status line saying why not.
@@ -3311,6 +3122,7 @@ impl App {
             Mode::ConfirmStaleApprove(id) => {
                 Some(format!("Thread changed. Approve {id} anyway? [y/N]"))
             }
+            Mode::ConfirmDiscardDraft(_) => Some("Discard this draft? [y/N]".into()),
             Mode::ConfirmDiscardCompose => {
                 Some("Save the draft? y save · n discard · any other key keeps editing".into())
             }
@@ -3405,9 +3217,9 @@ mod tests {
 
     fn three() -> App {
         app_with(vec![
-            proposal("p1", "agent-a", ProposalState::Pending, false),
-            proposal("p2", "agent-a", ProposalState::Pending, false),
-            proposal("p3", "agent-b", ProposalState::Pending, false),
+            proposal("p1", "me", ProposalState::Approved, false),
+            proposal("p2", "me", ProposalState::Approved, false),
+            proposal("p3", "me", ProposalState::Approved, false),
         ])
     }
 
@@ -3423,40 +3235,9 @@ mod tests {
             .collect()
     }
 
-    fn reminder_proposal(id: &str, state: ProposalState) -> Proposal {
-        let mut p = proposal(id, "agent-a", state, false);
-        p.payload = Payload::ReminderCreate {
-            title: "Call Ana".into(),
-            due: None,
-            list: None,
-            project: Some("haste".into()),
-            thread_id: Some("t1".into()),
-        };
-        p
-    }
-
-    #[test]
-    fn s_on_an_approved_reminder_asks_then_executes_and_never_sends() {
-        let mut app = app_with(vec![reminder_proposal("r1", ProposalState::Approved)]);
-        press(&mut app, "j"); // onto the item
-        assert!(press(&mut app, "s").is_empty());
-        assert!(matches!(app.mode, Mode::ConfirmExecute { .. }));
-        assert!(app.confirm_prompt().unwrap().contains("Run:"));
-        assert!(press(&mut app, "n").is_empty(), "anything but y cancels");
-        press(&mut app, "s");
-        assert_eq!(
-            press(&mut app, "y"),
-            vec![Effect::Execute {
-                id: "r1".into(),
-                acknowledge_stale: false
-            }]
-        );
-    }
-
     #[test]
     fn an_executing_proposal_offers_no_rerun_only_a_hint_to_check() {
-        let mut app = app_with(vec![reminder_proposal("r1", ProposalState::Executing)]);
-        press(&mut app, "j");
+        let mut app = app_with(vec![proposal("r1", "me", ProposalState::Executing, false)]);
         assert!(press(&mut app, "s").is_empty());
         assert_eq!(app.mode, Mode::Normal);
         assert!(
@@ -3464,7 +3245,7 @@ mod tests {
             "{}",
             app.status
         );
-        assert_eq!(app.rows().len(), 3, "it stays listed as open");
+        assert_eq!(app.rows().len(), 1, "it stays listed as open");
     }
 
     fn mail_thread(id: &str, subject: &str, who: &[&str], t: i64) -> ThreadView {
@@ -4665,9 +4446,7 @@ mod tests {
         assert!(app.handle_key(Key::Ctrl('e')).is_none());
         assert_eq!(app.mode, Mode::Normal);
         // the filter line is a text field
-        press(&mut app, "5");
-        press(&mut app, "/");
-        assert_eq!(app.mode, Mode::Filter);
+        app.mode = Mode::Filter;
         press(&mut app, "ab");
         app.handle_key(Key::Ctrl('e'));
         assert!(matches!(app.mode, Mode::Emoji { .. }));
@@ -5273,14 +5052,14 @@ mod tests {
 
     #[test]
     fn j_k_g_big_g_move_selection() {
-        let mut app = three(); // rows: A-header, p1, p2, B-header, p3, Blocked-header
-        assert_eq!(app.rows().len(), 6);
+        let mut app = three(); // rows: p1, p2, p3
+        assert_eq!(app.rows().len(), 3);
         press(&mut app, "j");
         assert_eq!(app.approvals_selected, 1);
         press(&mut app, "G");
-        assert_eq!(app.approvals_selected, 5);
+        assert_eq!(app.approvals_selected, 2);
         press(&mut app, "j"); // clamps at the end
-        assert_eq!(app.approvals_selected, 5);
+        assert_eq!(app.approvals_selected, 2);
         press(&mut app, "g");
         assert_eq!(app.approvals_selected, 0);
         press(&mut app, "k");
@@ -5288,124 +5067,18 @@ mod tests {
     }
 
     #[test]
-    fn collapsing_a_group_hides_items_but_keeps_count() {
-        let mut app = three();
-        app.handle_key(Key::Enter); // on group header: toggle
-        let rows = app.rows();
-        assert_eq!(
-            rows[0],
-            Row::Group {
-                principal: "agent-a".into(),
-                count: 2,
-                collapsed: true
-            }
-        );
-        assert_eq!(rows.len(), 4);
-        app.handle_key(Key::Enter);
-        assert_eq!(app.rows().len(), 6);
-    }
-
-    #[test]
-    fn slash_filters_and_escape_clears() {
-        let mut app = three();
-        press(&mut app, "/agent-b");
-        app.handle_key(Key::Enter);
-        assert_eq!(app.rows().len(), 3); // agent-b's header and item, plus the Blocked header
-        press(&mut app, "/");
-        app.handle_key(Key::Esc);
-        assert_eq!(app.rows().len(), 6);
-    }
-
-    #[test]
-    fn enter_on_item_opens_detail() {
-        let mut app = three();
-        press(&mut app, "j");
-        app.handle_key(Key::Enter);
-        assert_eq!(app.mode, Mode::Detail("p1".into()));
-        app.handle_key(Key::Esc);
-        assert_eq!(app.mode, Mode::Normal);
-    }
-
-    #[test]
-    fn batch_approve_needs_one_confirmation_showing_the_count() {
-        let mut app = three();
-        for _ in 0..3 {
-            // mark p1, p2, p3 (skipping group headers)
-            app.handle_key(Key::Char('j'));
-            app.handle_key(Key::Char('x'));
-            if app.approvals_selected == 2 {
-                app.handle_key(Key::Char('j'));
-            }
-        }
-        assert_eq!(app.marked.len(), 3);
-        assert!(app.handle_key(Key::Char('A')).is_none());
-        assert_eq!(
-            app.confirm_prompt().unwrap(),
-            "Approve 3 proposal(s)? [y/N]"
-        );
-        let effect = app.handle_key(Key::Char('y')).unwrap();
-        assert!(
-            matches!(effect, Effect::Approve { ids, acknowledge_stale: false } if ids.len() == 3)
-        );
-    }
-
-    #[test]
-    fn declining_the_batch_confirmation_does_nothing() {
-        let mut app = three();
-        press(&mut app, "jx");
-        press(&mut app, "A");
-        assert!(app.handle_key(Key::Char('n')).is_none());
-        assert_eq!(app.mode, Mode::Normal);
-    }
-
-    #[test]
-    fn stale_proposals_are_excluded_from_batch_with_a_reason() {
-        let mut app = app_with(vec![
-            proposal("p1", "agent-a", ProposalState::Pending, false),
-            proposal("p2", "agent-a", ProposalState::Pending, true),
-        ]);
-        press(&mut app, "jx");
-        press(&mut app, "jx");
-        press(&mut app, "A");
-        let Mode::ConfirmBatch(ids) = app.mode.clone() else {
-            panic!("{:?}", app.mode)
-        };
-        assert_eq!(ids, vec!["p1".to_owned()]);
-        assert!(app.status.contains("1 stale"));
-    }
-
-    #[test]
-    fn stale_single_approval_requires_acknowledgement() {
-        let mut app = app_with(vec![proposal(
-            "p1",
-            "agent-a",
-            ProposalState::Pending,
-            true,
-        )]);
-        press(&mut app, "j");
-        assert!(app.handle_key(Key::Char('a')).is_none());
-        assert!(matches!(app.mode, Mode::ConfirmStaleApprove(_)));
-        let effect = app.handle_key(Key::Char('y')).unwrap();
-        assert_eq!(
-            effect,
-            Effect::Approve {
-                ids: vec!["p1".into()],
-                acknowledge_stale: true
-            }
-        );
-    }
-
-    #[test]
     fn send_is_only_offered_for_approved_drafts_and_confirms_the_daemons_recipients() {
         let mut app = app_with(vec![
-            proposal("p1", "agent-a", ProposalState::Pending, false),
-            proposal("p2", "agent-a", ProposalState::Approved, false),
+            proposal("p1", "me", ProposalState::Executing, false),
+            proposal("p2", "me", ProposalState::Approved, false),
         ]);
-        press(&mut app, "j"); // p1 pending
-        assert!(press(&mut app, "s").is_empty());
+        assert!(
+            press(&mut app, "s").is_empty(),
+            "one that is on its way is not sent again"
+        );
         assert_eq!(app.mode, Mode::Normal);
-        assert!(app.status.contains("approved"));
-        // on the approved draft `s` asks for a preview and changes nothing yet
+        assert!(app.status.contains("outcome unknown"), "{}", app.status);
+        // on the waiting draft `s` asks for a preview and changes nothing yet
         press(&mut app, "j");
         assert_eq!(
             app.handle_key(Key::Char('s')),
@@ -5557,10 +5230,9 @@ mod tests {
     #[test]
     fn a_proposal_that_needs_a_check_is_settled_only_after_a_confirmation_each_way() {
         let mut app = app_with(vec![
-            reminder_proposal("e1", ProposalState::Executing),
-            proposal("a1", "agent-a", ProposalState::Approved, false),
+            proposal("e1", "me", ProposalState::Executing, false),
+            proposal("a1", "me", ProposalState::Approved, false),
         ]);
-        press(&mut app, "j"); // e1
         assert!(press(&mut app, "m").is_empty());
         assert!(app.confirm_prompt().unwrap().contains("IS in the mailbox"));
         assert_eq!(
@@ -5590,21 +5262,6 @@ mod tests {
         assert!(press(&mut app, "m").is_empty());
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.status.contains("NEEDS CHECK"));
-    }
-
-    #[test]
-    fn reject_applies_to_pending_only() {
-        let mut app = app_with(vec![
-            proposal("p1", "agent-a", ProposalState::Pending, false),
-            proposal("p2", "agent-a", ProposalState::Approved, false),
-        ]);
-        press(&mut app, "j");
-        assert_eq!(
-            app.handle_key(Key::Char('r')),
-            Some(Effect::Reject { id: "p1".into() })
-        );
-        press(&mut app, "j");
-        assert!(app.handle_key(Key::Char('r')).is_none());
     }
 
     #[test]
@@ -5640,263 +5297,6 @@ mod tests {
                 message: "[herdr:local] protocol mismatch: expected 22, saw 23".into()
             })
             .is_some());
-    }
-
-    fn agent(
-        machine: &str,
-        label: &str,
-        pane: &str,
-        status: AgentStatus,
-        since: i64,
-    ) -> AgentStatusRecord {
-        AgentStatusRecord {
-            machine: machine.into(),
-            workspace_id: "w1".into(),
-            workspace_label: label.into(),
-            pane_id: pane.into(),
-            agent: Some("claude".into()),
-            status,
-            status_since: since,
-        }
-    }
-
-    fn machine(name: &str, state: MachineState, agents: Vec<AgentStatusRecord>) -> MachineView {
-        MachineView {
-            machine: name.into(),
-            state,
-            agents,
-        }
-    }
-
-    fn with_project(mut p: Proposal, project: Option<&str>) -> Proposal {
-        p.project = project.map(str::to_owned);
-        p
-    }
-
-    #[test]
-    fn blocked_agents_appear_in_their_own_group_oldest_first_and_vanish_with_the_state() {
-        let mut app = three();
-        // an empty group still shows its header with a zero count
-        assert_eq!(
-            app.rows().last(),
-            Some(&Row::BlockedGroup {
-                count: 0,
-                collapsed: false
-            })
-        );
-        app.set_machines(vec![
-            machine(
-                "local",
-                MachineState::Connected,
-                vec![agent("local", "haste", "w1:p1", AgentStatus::Blocked, 200)],
-            ),
-            machine(
-                "m1",
-                MachineState::Connected,
-                vec![
-                    agent("m1", "notes", "w1:p1", AgentStatus::Blocked, 100),
-                    agent("m1", "notes", "w1:p2", AgentStatus::Working, 50),
-                ],
-            ),
-        ]);
-        let blocked = app.blocked();
-        assert_eq!(
-            blocked
-                .iter()
-                .map(|a| a.machine.as_str())
-                .collect::<Vec<_>>(),
-            ["m1", "local"],
-            "oldest first"
-        );
-        let rows = app.rows();
-        assert_eq!(
-            rows[rows.len() - 3],
-            Row::BlockedGroup {
-                count: 2,
-                collapsed: false
-            }
-        );
-        assert_eq!(&rows[rows.len() - 2..], [Row::Blocked(0), Row::Blocked(1)]);
-        // the agent recovers: the group empties without any user action
-        app.set_machines(vec![machine(
-            "m1",
-            MachineState::Connected,
-            vec![agent("m1", "notes", "w1:p1", AgentStatus::Working, 300)],
-        )]);
-        assert_eq!(
-            app.rows().last(),
-            Some(&Row::BlockedGroup {
-                count: 0,
-                collapsed: false
-            })
-        );
-    }
-
-    #[test]
-    fn an_unreachable_machine_contributes_no_blocked_agents() {
-        let mut app = three();
-        app.set_machines(vec![machine(
-            "m1",
-            MachineState::Unreachable,
-            vec![agent("m1", "x", "w1:p1", AgentStatus::Blocked, 1)],
-        )]);
-        assert!(app.blocked().is_empty());
-    }
-
-    #[test]
-    fn the_blocked_group_is_read_only_and_never_part_of_a_batch() {
-        let mut app = three();
-        app.set_machines(vec![machine(
-            "m1",
-            MachineState::Connected,
-            vec![agent("m1", "notes", "w1:p1", AgentStatus::Blocked, 1)],
-        )]);
-        // go to the blocked entry (last row) and try every action key
-        press(&mut app, "G");
-        assert!(matches!(
-            app.rows()[app.approvals_selected],
-            Row::Blocked(0)
-        ));
-        for keys in ["a", "A", "x", "s", "r", " "] {
-            assert!(
-                press(&mut app, keys).is_empty(),
-                "{keys:?} must not act on a blocked agent"
-            );
-        }
-        assert!(app.marked.is_empty(), "a blocked agent cannot be marked");
-        assert_eq!(app.mode, Mode::Normal);
-        // Enter only says where it is
-        app.handle_key(Key::Enter);
-        assert!(
-            app.status.contains("m1")
-                && app.status.contains("notes")
-                && app.status.contains("read-only"),
-            "{}",
-            app.status
-        );
-        // a batch of one proposal plus the blocked entry confirms exactly one
-        press(&mut app, "g");
-        press(&mut app, "jx");
-        press(&mut app, "G");
-        press(&mut app, "x");
-        press(&mut app, "A");
-        assert_eq!(
-            app.confirm_prompt().as_deref(),
-            Some("Approve 1 proposal(s)? [y/N]")
-        );
-    }
-
-    #[test]
-    fn the_blocked_group_collapses_like_the_others() {
-        let mut app = three();
-        app.set_machines(vec![machine(
-            "m1",
-            MachineState::Connected,
-            vec![agent("m1", "n", "w1:p1", AgentStatus::Blocked, 1)],
-        )]);
-        press(&mut app, "G");
-        press(&mut app, "k"); // the Blocked header
-        app.handle_key(Key::Enter);
-        assert_eq!(
-            app.rows().last(),
-            Some(&Row::BlockedGroup {
-                count: 1,
-                collapsed: true
-            })
-        );
-    }
-
-    #[test]
-    fn proposals_group_by_project_with_a_no_project_group() {
-        let mut app = app_with(vec![
-            with_project(
-                proposal("p1", "agent-a", ProposalState::Pending, false),
-                Some("haste"),
-            ),
-            with_project(
-                proposal("p2", "agent-b", ProposalState::Pending, false),
-                Some("haste"),
-            ),
-            with_project(
-                proposal("p3", "agent-a", ProposalState::Pending, false),
-                Some("notes"),
-            ),
-            proposal("p4", "agent-a", ProposalState::Pending, false),
-        ]);
-        let by_agent: Vec<String> = app
-            .rows()
-            .iter()
-            .filter_map(|r| match r {
-                Row::Group { principal, .. } => Some(principal.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(by_agent, ["agent-a", "agent-b"]);
-        app.group_by = GroupBy::Project;
-        let groups: Vec<(String, usize)> = app
-            .rows()
-            .iter()
-            .filter_map(|r| match r {
-                Row::Group {
-                    principal, count, ..
-                } => Some((principal.clone(), *count)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            groups,
-            [
-                ("haste".into(), 2),
-                ("no project".into(), 1),
-                ("notes".into(), 1)
-            ]
-        );
-    }
-
-    #[test]
-    fn collapsing_in_one_grouping_mode_does_not_collapse_the_same_name_in_the_other() {
-        let mut app = app_with(vec![with_project(
-            proposal("p1", "haste", ProposalState::Pending, false),
-            Some("haste"),
-        )]);
-        app.handle_key(Key::Enter); // collapse the agent group named "haste"
-        assert!(matches!(
-            app.rows()[0],
-            Row::Group {
-                collapsed: true,
-                ..
-            }
-        ));
-        app.group_by = GroupBy::Project; // the project group named "haste" is separate
-        assert!(matches!(
-            app.rows()[0],
-            Row::Group {
-                collapsed: false,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn the_filter_matches_a_proposals_project() {
-        let mut app = app_with(vec![
-            with_project(
-                proposal("p1", "agent-a", ProposalState::Pending, false),
-                Some("haste"),
-            ),
-            with_project(
-                proposal("p2", "agent-a", ProposalState::Pending, false),
-                Some("notes"),
-            ),
-        ]);
-        press(&mut app, "/haste");
-        app.handle_key(Key::Enter);
-        let items = app
-            .rows()
-            .iter()
-            .filter(|r| matches!(r, Row::Item(_)))
-            .count();
-        assert_eq!(items, 1);
     }
 
     #[test]

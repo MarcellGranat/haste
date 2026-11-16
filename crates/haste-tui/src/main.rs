@@ -22,7 +22,10 @@ fn map_key(code: KeyCode, mods: KeyModifiers) -> Option<Key> {
         KeyCode::Tab if mods.contains(KeyModifiers::SHIFT) => Key::BackTab,
         KeyCode::Left => Key::Left,
         KeyCode::Right => Key::Right,
-        KeyCode::Enter if mods.contains(KeyModifiers::CONTROL) => Key::CtrlEnter,
+        // Alt-Enter reaches every terminal, so it works where Ctrl-Enter is not reported
+        KeyCode::Enter if mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            Key::CtrlEnter
+        }
         KeyCode::Enter => Key::Enter,
         KeyCode::Esc => Key::Esc,
         KeyCode::Tab => Key::Tab,

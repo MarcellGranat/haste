@@ -2409,7 +2409,7 @@ fn draw_approvals(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .collect();
     let mut state = ListState::default().with_selected(Some(app.approvals_selected));
     let help =
-        "s send now · t send later · u unschedule · a approve an agent's · r discard/reject · x mark · m/b settle NEEDS CHECK · c collapse · P group · / filter";
+        "s send now · t send later · u unschedule · a approve an agent's · r discard/reject · x mark · m/b settle NEEDS CHECK · / filter";
     frame.render_stateful_widget(
         List::new(items)
             .block(theme::panel(help))

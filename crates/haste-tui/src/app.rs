@@ -1433,19 +1433,6 @@ impl App {
         }
     }
 
-    /// Switch between grouping proposals by agent and by project.
-    fn toggle_group_by(&mut self) {
-        self.group_by = match self.group_by {
-            GroupBy::Agent => GroupBy::Project,
-            GroupBy::Project => GroupBy::Agent,
-        };
-        self.approvals_selected = 0;
-        self.status = match self.group_by {
-            GroupBy::Agent => "grouped by agent".into(),
-            GroupBy::Project => "grouped by project".into(),
-        };
-    }
-
     /// Handle one key press; returns an effect for the caller to run against the daemon.
     pub fn handle_key(&mut self, key: Key) -> Option<Effect> {
         // Ctrl-e in a text field opens the emoji keyboard
@@ -1666,7 +1653,6 @@ impl App {
             Key::Char('t') if thread_view => self.start_remind(),
             Key::Char('r') if thread_view => return self.start_reply(),
             Key::Char('0') => self.jump(false),
-            Key::Char('P') if self.view == View::Approvals => self.toggle_group_by(),
             Key::Char('R') if self.view == View::Connectors => self.start_release(),
             Key::Char('E') if self.view == View::Connectors => return self.engage_selected(),
             Key::Char('j') | Key::Down => self.move_selection(1),
@@ -1684,7 +1670,6 @@ impl App {
                 self.filter.clear();
             }
             Key::Char('x' | ' ') if self.view == View::Approvals => self.toggle_mark(),
-            Key::Char('c') if self.view == View::Approvals => self.toggle_group(),
             Key::Enter if self.view == View::Approvals => self.enter(),
             Key::Char('a') if self.view == View::Approvals => return self.approve_selected(),
             Key::Char('A') if self.view == View::Approvals => self.start_batch(),
@@ -5203,7 +5188,8 @@ mod tests {
     fn left_and_right_go_to_the_next_day_on_the_item_nearest_the_same_hour() {
         let mut app = App::new();
         let now = haste_core::time::now_secs();
-        let day1 = on_a_weekday(now, 3_600);
+        // from tomorrow on, so no event is already past whatever the time of day is
+        let day1 = on_a_weekday(now + 86_400, 3_600);
         let day1 = day1 - day1.rem_euclid(86_400);
         let day2 = on_a_weekday(day1 + 86_400 + 1, 0);
         let day2 = day2 - day2.rem_euclid(86_400);
@@ -5221,7 +5207,10 @@ mod tests {
             AgendaItem::Task { .. } => String::new(),
         };
         // from the first item of the first day
-        while id_at(&app) != "a-14" {
+        for _ in 0..20 {
+            if id_at(&app) == "a-14" {
+                break;
+            }
             press(&mut app, "j");
         }
         // 14:00 is nearest 13:30 on the next day
@@ -5843,8 +5832,7 @@ mod tests {
             })
             .collect();
         assert_eq!(by_agent, ["agent-a", "agent-b"]);
-        press(&mut app, "P");
-        assert_eq!(app.group_by, GroupBy::Project);
+        app.group_by = GroupBy::Project;
         let groups: Vec<(String, usize)> = app
             .rows()
             .iter()
@@ -5863,8 +5851,6 @@ mod tests {
                 ("notes".into(), 1)
             ]
         );
-        press(&mut app, "P");
-        assert_eq!(app.group_by, GroupBy::Agent);
     }
 
     #[test]
@@ -5881,7 +5867,7 @@ mod tests {
                 ..
             }
         ));
-        press(&mut app, "P"); // the project group named "haste" is separate
+        app.group_by = GroupBy::Project; // the project group named "haste" is separate
         assert!(matches!(
             app.rows()[0],
             Row::Group {

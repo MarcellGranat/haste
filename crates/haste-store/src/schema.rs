@@ -233,6 +233,15 @@ const MIGRATIONS: &[&str] = &[
         actor TEXT NOT NULL
     );
     ",
+    // 17: threads archived before a newer message from the other side came in are back in the
+    // lists (archive used to hide a thread for good).
+    "
+    UPDATE triage SET archived = 0
+    WHERE object_kind = 'thread' AND archived = 1 AND EXISTS (
+        SELECT 1 FROM messages m
+        WHERE m.thread_id = triage.object_id AND m.is_own = 0 AND m.sent_at > triage.updated_at
+    );
+    ",
 ];
 
 /// Highest schema version this binary understands.

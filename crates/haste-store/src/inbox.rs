@@ -206,6 +206,16 @@ impl Store {
                     "UPDATE threads SET version = version + 1, last_activity_at = MAX(last_activity_at, ?2) WHERE id = ?1",
                     params![message.thread_id, message.sent_at],
                 )?;
+                // archive keeps a thread out of the lists only until someone writes again: a new
+                // message from the other side (newer than the archive) brings it back
+                if !message.is_own {
+                    tx.execute(
+                        "UPDATE triage SET archived = 0, updated_at = ?2 \
+                         WHERE object_id = ?1 AND object_kind = 'thread' AND archived = 1 \
+                         AND ?2 > updated_at",
+                        params![message.thread_id, message.sent_at],
+                    )?;
+                }
             }
             tx.commit()?;
             Ok(message)
@@ -809,6 +819,41 @@ mod tests {
             })
             .unwrap();
         assert_eq!(later.len(), 2);
+    }
+
+    #[test]
+    fn a_new_message_from_the_other_side_brings_an_archived_thread_back() {
+        let (_d, s) = test_store();
+        let t = thread(&s, "e1", Source::Whatsapp, "chat", 10);
+        s.set_triage(
+            &t.id,
+            ObjectKind::Thread,
+            &TriageUpdate {
+                archived: Some(true),
+                ..Default::default()
+            },
+            100,
+        )
+        .unwrap();
+        let msg = |ext: &str, at: i64, own: bool| Message {
+            id: String::new(),
+            thread_id: t.id.clone(),
+            source: Source::Whatsapp,
+            external_id: ext.into(),
+            sender_person_id: None,
+            sender_identifier: None,
+            body_text: "hi".into(),
+            sent_at: at,
+            is_own: own,
+        };
+        let archived = |s: &Store| s.get_thread(&t.id).unwrap().unwrap().1.archived;
+        // history from before the archive, and my own later message, change nothing
+        s.upsert_message(&msg("m1", 50, false)).unwrap();
+        s.upsert_message(&msg("m2", 150, true)).unwrap();
+        assert!(archived(&s));
+        // a newer message from the other side reopens it
+        s.upsert_message(&msg("m3", 200, false)).unwrap();
+        assert!(!archived(&s));
     }
 
     #[test]

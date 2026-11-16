@@ -496,6 +496,11 @@ impl BeeperConnector {
                 haste_core::log::n("body_bytes", draft.body.len()),
             ],
         );
+        // Beeper sends an iMessage by driving the Messages app, so start it first if it is closed
+        if network == "imessage" && ensure_messages_running() {
+            // give the app a moment to open its window
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
         // the file goes to the local Beeper service first: that delivers nothing, so a failure
         // here is a plain refusal and nothing was sent
         let upload = match draft.attachments.first() {
@@ -623,6 +628,28 @@ impl Connector for BeeperConnector {
                 .await
         })
     }
+}
+
+/// Start the Messages app when it is not running; true when it had to be started.
+///
+/// Beeper delivers an iMessage by driving that app's window, so a closed app makes the send fail
+/// with an unknown outcome. Does nothing off macOS and in unit tests.
+fn ensure_messages_running() -> bool {
+    if cfg!(any(test, not(target_os = "macos"))) {
+        return false;
+    }
+    let running = std::process::Command::new("pgrep")
+        .args(["-x", "Messages"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if running {
+        return false;
+    }
+    open_messages_app();
+    true
 }
 
 /// Open the Messages app (it comes to the front), so Beeper has a window to drive on the next

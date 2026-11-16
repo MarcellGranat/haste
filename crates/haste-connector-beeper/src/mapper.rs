@@ -174,8 +174,19 @@ pub fn map_message(chat_id: &str, source: &Source, wire: &WireMessage) -> Option
                     .is_some_and(|m| m.to_ascii_lowercase().starts_with("image/")))
         })
         .collect();
+    // a photo or file sent with a caption keeps the caption; a text that is only the file's own
+    // name is not one
+    let caption = text.filter(|t| {
+        !shown.is_empty()
+            && !wire
+                .attachments
+                .iter()
+                .any(|a| a.file_name.as_deref().is_some_and(|n| n == t.trim()))
+    });
     let mut body = match text {
-        Some(t) if is_text || has_link => truncate_body(t, BEEPER_BODY_MAX_BYTES),
+        Some(t) if is_text || has_link || caption.is_some() => {
+            truncate_body(t, BEEPER_BODY_MAX_BYTES)
+        }
         _ if !wire.attachments.is_empty() => String::new(),
         _ => ATTACHMENT_LABEL.to_owned(),
     };
@@ -432,6 +443,34 @@ mod tests {
             .message
             .body_text;
         assert!(body.contains("[attachment: p.jpg"), "{body}");
+    }
+
+    #[test]
+    fn a_photo_keeps_the_caption_it_was_sent_with() {
+        let wire: WireMessage = serde_json::from_str(
+            r#"{"id":"m","type":"IMAGE","text":"Szánalmas kakifejek","timestamp":"2026-11-09T10:00:00Z",
+                "sortKey":"1","attachments":[{"id":"mxc://x/2","fileName":"p.jpg","mimeType":"image/jpeg"}]}"#,
+        )
+        .unwrap();
+        let body = map_message("c", &Source::Whatsapp, &wire)
+            .unwrap()
+            .message
+            .body_text;
+        assert!(
+            body.starts_with("Szánalmas kakifejek\n[attachment: p.jpg"),
+            "{body}"
+        );
+        // a text that is just the file's name is not a caption
+        let named: WireMessage = serde_json::from_str(
+            r#"{"id":"m","type":"IMAGE","text":"p.jpg","timestamp":"2026-11-09T10:00:00Z",
+                "sortKey":"1","attachments":[{"id":"mxc://x/2","fileName":"p.jpg","mimeType":"image/jpeg"}]}"#,
+        )
+        .unwrap();
+        let body = map_message("c", &Source::Whatsapp, &named)
+            .unwrap()
+            .message
+            .body_text;
+        assert!(body.starts_with("[attachment: p.jpg"), "{body}");
     }
 
     #[test]

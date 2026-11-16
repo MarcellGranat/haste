@@ -1190,14 +1190,21 @@ fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
     lines.push(Line::from(files));
     frame.render_widget(Paragraph::new(lines), inner);
-    // the cursor sits at the end of the typed title or notes
+    // the cursor sits at the end of the typed title or notes, after the 10 columns of the label
+    // (marker, space, name padded to 8) and as wide as the words are drawn
     let (row, typed) = match form.field {
-        Field::Title => (0, Some(form.title.chars().count())),
-        Field::Notes => (3, Some(form.notes.chars().count())),
+        Field::Title => (0, Some(inbox::width(&inbox::sanitize(&form.title)))),
+        Field::Notes => (
+            6,
+            Some(inbox::width(
+                &inbox::sanitize(&form.notes).replace('\n', " ⏎ "),
+            )),
+        ),
         _ => (0, None),
     };
     if let Some(n) = typed {
-        frame.set_cursor_position((inner.x + 11 + u16::try_from(n).unwrap_or(0), inner.y + row));
+        let x = (inner.x + 10 + u16::try_from(n).unwrap_or(0)).min(inner.right().saturating_sub(1));
+        frame.set_cursor_position((x, inner.y + row));
     }
     if let Some(picker) = &form.picker {
         let prect = centered(area, 80, area.height.saturating_sub(8).max(8));
@@ -2591,6 +2598,26 @@ mod tests {
             app.handle_key(Key::Ctrl('u'));
         }
         assert_eq!(app.today_selected, 0, "stops at the top");
+    }
+
+    #[test]
+    fn the_cursor_sits_right_after_the_typed_title_not_a_cell_further() {
+        let mut app = App::new();
+        app.handle_key(Key::Char('c')); // not a thread view: opens nothing
+        app.view = crate::app::View::Today;
+        app.today_focus = crate::app::TodayFocus::Todo;
+        app.handle_key(Key::Char('c'));
+        for c in "abc".chars() {
+            app.handle_key(Key::Char(c));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let pos = terminal.get_cursor_position().unwrap();
+        // the cell under the cursor is the first one after "abc"; the cell before it holds "c"
+        assert_eq!(buf.cell((pos.x - 1, pos.y)).unwrap().symbol(), "c");
+        assert_eq!(buf.cell((pos.x - 3, pos.y)).unwrap().symbol(), "a");
+        assert_eq!(buf.cell((pos.x, pos.y)).unwrap().symbol(), " ");
     }
 
     #[test]

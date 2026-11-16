@@ -452,6 +452,8 @@ pub enum Mode {
         thread_id: String,
         input: String,
         todo: bool,
+        /// The highlighted quick choice; the last row (3) is the typed answer.
+        pick: usize,
     },
     /// The reminder popup (`app.remind` holds it).
     RemindForm,
@@ -1406,7 +1408,8 @@ impl App {
                 thread_id,
                 input,
                 todo,
-            } => self.key_snooze(key, thread_id, input, todo),
+                pick,
+            } => self.key_snooze(key, thread_id, input, todo, pick),
             Mode::RemindForm => self.key_remind_form(key),
             Mode::EventEdit => self.key_event_edit(key),
             Mode::TaskDuration => self.key_task_duration(key),
@@ -2725,6 +2728,7 @@ impl App {
                 thread_id,
                 input: String::new(),
                 todo: false,
+                pick: 0,
             };
         }
     }
@@ -2736,6 +2740,7 @@ impl App {
                 thread_id: id,
                 input: String::new(),
                 todo: true,
+                pick: 0,
             };
         }
     }
@@ -2969,45 +2974,57 @@ impl App {
         thread_id: String,
         mut input: String,
         todo: bool,
+        mut pick: usize,
     ) -> Option<Effect> {
         match key {
-            Key::Esc => self.mode = Mode::Normal,
-            Key::Enter => match inbox::parse_snooze(&input) {
-                Ok(secs) => {
-                    self.mode = Mode::Normal;
-                    let until = haste_core::time::now_secs() + secs;
-                    if todo {
-                        return Some(Effect::TodoLater {
-                            reminder_id: thread_id,
-                            set_aside: false,
-                            until: Some(until),
+            Key::Esc => {
+                self.mode = Mode::Normal;
+                return None;
+            }
+            Key::Enter => {
+                let now = haste_core::time::now_secs();
+                let until = if input.trim().is_empty() && pick < 3 {
+                    Ok(inbox::snooze_presets(now, self.tz_offset)[pick].1)
+                } else {
+                    inbox::parse_snooze(&input).map(|secs| now + secs)
+                };
+                match until {
+                    Ok(until) => {
+                        self.mode = Mode::Normal;
+                        if todo {
+                            return Some(Effect::TodoLater {
+                                reminder_id: thread_id,
+                                set_aside: false,
+                                until: Some(until),
+                            });
+                        }
+                        return Some(Effect::Triage {
+                            thread_id,
+                            change: TriageChange::SnoozeUntil(until),
                         });
                     }
-                    return Some(Effect::Triage {
-                        thread_id,
-                        change: TriageChange::SnoozeUntil(until),
-                    });
+                    Err(e) => self.status = e,
                 }
-                Err(e) => self.status = e,
-            },
+            }
+            Key::Down | Key::Tab | Key::Char('j') if input.is_empty() => pick = (pick + 1).min(3),
+            Key::Up | Key::BackTab | Key::Char('k') if input.is_empty() => {
+                pick = pick.saturating_sub(1);
+            }
             Key::Backspace => {
                 input.pop();
-                self.mode = Mode::Snooze {
-                    thread_id,
-                    input,
-                    todo,
-                };
             }
-            Key::Char(c) => {
+            Key::Char(c) if !c.is_control() => {
                 input.push(c);
-                self.mode = Mode::Snooze {
-                    thread_id,
-                    input,
-                    todo,
-                };
+                pick = 3;
             }
             _ => {}
         }
+        self.mode = Mode::Snooze {
+            thread_id,
+            input,
+            todo,
+            pick,
+        };
         None
     }
 
@@ -3039,9 +3056,6 @@ impl App {
     pub fn confirm_prompt(&self) -> Option<String> {
         match &self.mode {
             Mode::ConfirmBatch(ids) => Some(format!("Approve {} proposal(s)? [y/N]", ids.len())),
-            Mode::Snooze { input, .. } => Some(format!(
-                "Snooze for (whole hours or days, e.g. 3h or 2d; Enter to set, Esc to cancel): {input}"
-            )),
             Mode::ReplyChoice { .. } => {
                 Some("Several people on this thread: r reply to sender · a reply to all · Esc".into())
             }

@@ -185,16 +185,18 @@ pub fn step_repeat(t: i64, rule: haste_core::model::RepeatRule, n: i64, off: i64
 /// # Errors
 /// A short message for anything else (fractions, zero, other units, too long).
 pub fn parse_snooze(input: &str) -> Result<i64, String> {
+    const HINT: &str = "snooze takes whole hours, days or weeks, like 3h, 2d or 1w";
     let s = input.trim().to_lowercase();
-    let (digits, unit) = s.split_at(s.len().saturating_sub(1));
-    let n: i64 = digits
-        .parse()
-        .map_err(|_| "snooze takes whole hours or days, like 3h or 2d".to_owned())?;
+    let unit = s.chars().last().ok_or_else(|| HINT.to_owned())?;
+    let digits = &s[..s.len() - unit.len_utf8()];
+    let n: i64 = digits.parse().map_err(|_| HINT.to_owned())?;
     let secs = match unit {
-        "h" => n * HOUR,
-        "d" => n * DAY,
-        _ => return Err("snooze takes whole hours or days, like 3h or 2d".to_owned()),
-    };
+        'h' => n.checked_mul(HOUR),
+        'd' => n.checked_mul(DAY),
+        'w' => n.checked_mul(7 * DAY),
+        _ => return Err(HINT.to_owned()),
+    }
+    .ok_or_else(|| HINT.to_owned())?;
     if n < 1 || secs > MAX_SNOOZE_DAYS * DAY {
         return Err(format!("snooze must be 1 to {MAX_SNOOZE_DAYS} days"));
     }
@@ -226,6 +228,16 @@ pub fn next_week(now: i64, off: i64) -> i64 {
 #[must_use]
 pub fn later(now: i64) -> i64 {
     now + LATER_SECS
+}
+
+/// The quick choices of the snooze popup: a label and the time each one wakes at.
+#[must_use]
+pub fn snooze_presets(now: i64, off: i64) -> [(&'static str, i64); 3] {
+    [
+        ("In 3 hours", later(now)),
+        ("Tomorrow morning", tomorrow_morning(now, off)),
+        ("Next Monday", next_week(now, off)),
+    ]
 }
 
 /// A due date from the custom prompt (local time). Empty means no date. Accepts `today`,

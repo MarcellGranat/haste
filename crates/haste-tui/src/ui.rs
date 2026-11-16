@@ -67,6 +67,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     if *base == Mode::TaskDuration {
         draw_task_duration(frame, app, frame.area());
     }
+    if let Mode::Snooze {
+        thread_id,
+        input,
+        todo,
+        pick,
+    } = base
+    {
+        draw_snooze(frame, app, frame.area(), (thread_id, input, *todo, *pick));
+    }
     if *base == Mode::Compose {
         let replying = app
             .compose
@@ -2006,6 +2015,86 @@ fn duration_spans(edit: &crate::durfield::DurationEdit, focused: bool) -> Vec<Sp
 }
 
 /// The popup that sets how long a task takes: 5 minutes up to 4 hours.
+/// The snooze popup: quick choices with the time each wakes at, and a typed answer.
+fn draw_snooze(frame: &mut Frame<'_>, app: &App, area: Rect, state: (&str, &str, bool, usize)) {
+    let (id, input, todo, pick) = state;
+    let title = if todo {
+        app.reminder_list
+            .iter()
+            .find(|r| r.reminder.id == id)
+            .map(|r| r.reminder.title.clone())
+    } else {
+        app.threads
+            .iter()
+            .find(|t| t.thread.id == id)
+            .map(|t| t.thread.subject.clone())
+    }
+    .unwrap_or_default();
+    let rect = centered(area, 62.min(area.width.saturating_sub(4)), 12);
+    frame.render_widget(Clear, rect);
+    let heading = if todo {
+        " Snooze · the task's date here becomes when it returns "
+    } else {
+        " Snooze · back in the inbox at "
+    };
+    let block = theme::panel(heading).border_style(pane_border(true));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let dim = Style::new().fg(theme::OVERLAY0);
+    let on = Style::new()
+        .fg(theme::BASE)
+        .bg(theme::MAUVE)
+        .add_modifier(Modifier::BOLD);
+    let now = haste_core::time::now_secs();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("  {}", inbox::sanitize(&title).replace('\n', " ").trim()),
+            Style::new().fg(theme::PEACH).add_modifier(Modifier::BOLD),
+        )),
+        Line::default(),
+    ];
+    for (i, (label, at)) in inbox::snooze_presets(now, app.tz_offset)
+        .into_iter()
+        .enumerate()
+    {
+        let row = format!(" {label:<20}{}", inbox::stamp(at, app.tz_offset));
+        let style = if pick == i && input.is_empty() {
+            on
+        } else {
+            Style::new().fg(theme::TEXT)
+        };
+        lines.push(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(format!("{row:<56}"), style),
+        ]));
+    }
+    let typed = pick == 3 || !input.is_empty();
+    lines.push(Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            format!(
+                " {:<56}",
+                format!("Your own: {input}{}", if typed { "▏" } else { "" })
+            ),
+            if typed {
+                on
+            } else {
+                Style::new().fg(theme::TEXT)
+            },
+        ),
+    ]));
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "  ↑↓ choose · or type 3h, 2d, 1w (hours, days, weeks)",
+        dim,
+    )));
+    lines.push(Line::from(Span::styled(
+        "  Enter snoozes · Esc cancels",
+        dim,
+    )));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 fn draw_task_duration(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some((_, title, edit)) = &app.task_duration else {
         return;
@@ -2667,6 +2756,43 @@ mod tests {
             app.handle_key(Key::Char(c));
         }
         assert!(render(&app).contains("every 1 week"));
+    }
+
+    #[test]
+    fn a_bad_snooze_answer_on_a_todo_only_says_so() {
+        let now = haste_core::time::now_secs();
+        let mut app = App::new();
+        let mut r = haste_proto::ReminderView {
+            reminder: haste_core::model::Reminder {
+                id: "r1".into(),
+                external_id: "r1".into(),
+                title: "task".into(),
+                notes_snippet: String::new(),
+                due_at: Some(now + 60),
+                completed: false,
+                list_name: "L".into(),
+                remote_modified_at: 0,
+                missing_since: None,
+                version: 1,
+            },
+            tags: vec![],
+            repeat: None,
+            minutes: 30,
+            priority: haste_proto::TaskPriority::Middle,
+            early: None,
+            set_aside: false,
+            snoozed: false,
+        };
+        r.reminder.title = "task".into();
+        app.set_reminder_list(vec![r]);
+        app.today_focus = crate::app::TodayFocus::Todo;
+        for c in "s1x".chars() {
+            app.handle_key(Key::Char(c));
+        }
+        assert!(app.handle_key(Key::Enter).is_none());
+        let text = render(&app);
+        assert!(text.contains("Your own: 1x"), "{text}");
+        assert!(matches!(app.mode, crate::app::Mode::Snooze { .. }));
     }
 
     #[test]

@@ -1931,16 +1931,25 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         let row_start = first * 60 + i64::try_from(r * per_row).unwrap_or(0);
         let row_end = row_start + i64::try_from(per_row).unwrap_or(60);
         let on_hour = row_start % 60 == 0;
+        // the row that holds the current time, drawn as a line across today's column
+        let now_min = (now - today) / 60;
+        let now_row = now_min >= row_start && now_min < row_end;
         let mut spans = vec![Span::styled(
             fit(
-                &if on_hour {
+                &if now_row {
+                    format!("{:02}:{:02}", now_min / 60, now_min % 60)
+                } else if on_hour {
                     format!("{:02}:00", row_start / 60)
                 } else {
                     String::new()
                 },
                 gutter,
             ),
-            theme::muted(),
+            if now_row {
+                Style::new().fg(theme::RED).add_modifier(Modifier::BOLD)
+            } else {
+                theme::muted()
+            },
         )];
         for (d, _) in days.iter().enumerate() {
             let inner_w = col_w.saturating_sub(1);
@@ -1950,14 +1959,30 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
             } else {
                 Style::new()
             };
-            spans.push(Span::styled(
-                "│",
-                Style::new().fg(if days[d] == today {
-                    theme::MAUVE
+            let now_here = now_row && days[d] == today;
+            spans.push(if now_here {
+                Span::styled("▶", Style::new().fg(theme::RED))
+            } else {
+                Span::styled(
+                    "│",
+                    Style::new().fg(if days[d] == today {
+                        theme::MAUVE
+                    } else {
+                        theme::SURFACE1
+                    }),
+                )
+            });
+            // empty space in the column: the time line on the current row, else the tint
+            let fill = |n: usize| {
+                if now_here {
+                    Span::styled(
+                        "─".repeat(n),
+                        Style::new().fg(theme::RED).bg(theme::UNREAD_BG),
+                    )
                 } else {
-                    theme::SURFACE1
-                }),
-            ));
+                    Span::styled(" ".repeat(n), tint)
+                }
+            };
             // the items on this row, left to right
             let mut hits: Vec<(usize, usize, &Placed)> = placed
                 .iter()
@@ -1979,7 +2004,7 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
             let mut at = 0;
             for (x, w, p) in hits {
                 if x > at {
-                    spans.push(Span::styled(" ".repeat(x - at), tint));
+                    spans.push(fill(x - at));
                 }
                 let selected = p.index == app.calendar_selected;
                 let begins = minute_of(p.start, d) >= row_start || r == 0;
@@ -2008,7 +2033,7 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 at = x + w;
             }
             if at < inner_w {
-                spans.push(Span::styled(" ".repeat(inner_w - at), tint));
+                spans.push(fill(inner_w - at));
             }
         }
         lines.push(Line::from(spans));
@@ -3235,6 +3260,15 @@ mod tests {
             "{text}"
         );
         // ] goes to the next week (no dot there), [ back, T returns to this one
+        // the current time is a line across today's column, when it is inside the hours drawn
+        let (h, m) = (
+            (now.rem_euclid(86_400)) / 3_600,
+            (now.rem_euclid(86_400)) / 60 % 60,
+        );
+        if weekday < 5 && (8..18).contains(&h) {
+            assert!(text.contains('▶') && text.contains("──"), "{text}");
+            assert!(text.contains(&format!("{h:02}:{m:02}")), "{text}");
+        }
         app.handle_key(crate::app::Key::Char(']'));
         let next = render(&app);
         assert!(next.contains("next week") && !next.contains('●'), "{next}");

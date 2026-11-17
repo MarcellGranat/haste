@@ -141,6 +141,33 @@ async fn steady_state_delta_fetches_only_changed_threads_in_full() {
 }
 
 #[tokio::test]
+async fn a_thread_gmail_keeps_refusing_does_not_stop_the_others_and_is_asked_for_again() {
+    let refused = r#"{"error":{"errors":[{"reason":"rateLimitExceeded"}]}}"#;
+    let server = spawn(move |r: &Recorded| match (r.method.as_str(), r.path.as_str()) {
+        ("GET", "/gmail/v1/users/me/history") => (
+            200,
+            r#"{"history":[{"messages":[{"id":"m1","threadId":"stuck"}]},{"messages":[{"id":"m2","threadId":"t100"}]}],"historyId":"950"}"#.into(),
+        ),
+        ("GET", "/gmail/v1/users/me/threads/stuck") => (403, refused.into()),
+        ("GET", "/gmail/v1/users/me/threads/t100") => (200, THREAD_FULL.into()),
+        _ => routes(|| (404, "{}".into()))(r),
+    })
+    .await;
+    let c = connector(&server, store_with_refresh());
+    let batch = c.fetch(Some(Cursor("900".into()))).await.unwrap();
+    assert_eq!(batch.threads.len(), 1, "the readable thread is stored");
+    assert_eq!(
+        batch.next_cursor,
+        Some(Cursor("950;stuck".into())),
+        "history moves on; the refused thread is kept to try again"
+    );
+    // next cycle: the refused id is asked for again alongside what changed since
+    let again = c.fetch(batch.next_cursor).await.unwrap();
+    assert_eq!(again.threads.len(), 1);
+    assert!(server.count("/gmail/v1/users/me/threads/stuck") > 4);
+}
+
+#[tokio::test]
 async fn empty_delta_returns_an_empty_batch_with_the_same_cursor() {
     let server = spawn(routes(|| (200, r#"{"historyId":"999"}"#.into()))).await;
     let c = connector(&server, store_with_refresh());

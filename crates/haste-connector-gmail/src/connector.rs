@@ -64,6 +64,39 @@ impl GmailConfig {
     }
 }
 
+/// How many threads in a row may be refused before the rest of a cycle is left for later.
+const MAX_SKIPPED_IN_A_ROW: u32 = 3;
+/// How many unread-able threads the cursor remembers.
+const MAX_PENDING_THREADS: usize = 100;
+
+/// The cursor is the history id, then (after a `;`) the ids of the threads that could not be
+/// read and are asked for again, separated by commas.
+fn split_cursor(cursor: &str) -> (String, Vec<String>) {
+    match cursor.split_once(';') {
+        Some((history, rest)) => (
+            history.to_owned(),
+            rest.split(',')
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        ),
+        None => (cursor.to_owned(), Vec::new()),
+    }
+}
+
+fn join_cursor(history: &str, pending: &[String]) -> String {
+    if pending.is_empty() {
+        history.to_owned()
+    } else {
+        let kept: Vec<&str> = pending
+            .iter()
+            .take(MAX_PENDING_THREADS)
+            .map(String::as_str)
+            .collect();
+        format!("{history};{}", kept.join(","))
+    }
+}
+
 pub struct GmailConnector {
     client: GmailClient,
     /// The connector's own address: the From of a send, and never a reply target.
@@ -182,12 +215,51 @@ impl GmailConnector {
         Ok((batch, true))
     }
 
+    /// Like [`Self::fetch_threads`], but a thread Gmail keeps refusing does not stop the others:
+    /// it is left out and returned for a later cycle. After [`MAX_SKIPPED_IN_A_ROW`] refusals in
+    /// a row the rest is left for later too, so a real throttle is not hammered.
+    async fn fetch_threads_skipping<'a>(
+        &self,
+        ids: impl Iterator<Item = &'a str>,
+    ) -> Result<(Batch, Vec<String>), ConnectorError> {
+        let mut batch = Batch::default();
+        let mut later: Vec<String> = Vec::new();
+        let mut in_a_row = 0;
+        for id in ids {
+            if in_a_row >= MAX_SKIPPED_IN_A_ROW {
+                later.push(id.to_owned());
+                continue;
+            }
+            tokio::time::sleep(THREAD_GET_PACING).await;
+            let read = match self.get_thread_patiently(id).await {
+                Err(ConnectorError::Transient(_)) => {
+                    in_a_row += 1;
+                    later.push(id.to_owned());
+                    continue;
+                }
+                other => other?,
+            };
+            in_a_row = 0;
+            if let Some(api) = read.filter(crate::mapper::is_primary_inbox) {
+                let mapped = map_thread(&api);
+                batch
+                    .unread
+                    .push((mapped.thread.external_id.clone(), mapped.labels.unread));
+                batch.threads.push(mapped.thread);
+                batch.messages.extend(mapped.messages);
+            }
+        }
+        Ok((batch, later))
+    }
+
     async fn delta(&self, cursor: Cursor) -> Result<Batch, ConnectorError> {
-        let mut changed: BTreeSet<String> = BTreeSet::new();
+        let (start, pending) = split_cursor(&cursor.0);
+        // threads that could not be read last time are asked for again
+        let mut changed: BTreeSet<String> = pending.into_iter().collect();
         let mut latest: Option<String> = None;
         let mut page: Option<String> = None;
         loop {
-            let Some(list) = self.client.list_history(&cursor.0, page.as_deref()).await? else {
+            let Some(list) = self.client.list_history(&start, page.as_deref()).await? else {
                 // History expired: one bounded backfill resets the cursor. No loop.
                 return self.backfill().await;
             };
@@ -214,10 +286,11 @@ impl GmailConnector {
                 ..Batch::default()
             });
         }
-        let (mut batch, _) = self
-            .fetch_threads(changed.iter().map(String::as_str), false)
+        let (mut batch, later) = self
+            .fetch_threads_skipping(changed.iter().map(String::as_str))
             .await?;
-        batch.next_cursor = Some(latest.map_or(cursor, Cursor));
+        // the history moves on; the threads left out ride along in the cursor to be read again
+        batch.next_cursor = Some(Cursor(join_cursor(&latest.unwrap_or(start), &later)));
         Ok(batch)
     }
 

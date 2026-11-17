@@ -115,7 +115,8 @@ fn refresh(app: &mut App, client: &Client) {
         app.set_filters(filters, error);
     }
     if let Ok(Response::Events { events }) = client.call(RequestBody::EventsList {
-        from: haste_core::time::now_secs() - 3600,
+        // from Monday, so the days already gone this week are drawn too
+        from: haste_tui::inbox::week_start(haste_core::time::now_secs(), app.tz_offset, 0),
     }) {
         app.set_events(events);
     }

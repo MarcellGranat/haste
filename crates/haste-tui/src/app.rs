@@ -644,6 +644,10 @@ pub struct App {
     /// Upcoming calendar events, soonest first (read-only).
     pub events: Vec<EventView>,
     pub calendar_selected: usize,
+    /// Which week the Calendar shows, counted from this one (0 = this week, 1 = next).
+    pub calendar_week: i64,
+    /// The cursor has been put on today's items once.
+    calendar_homed: bool,
     pub later_selected: usize,
     pub muted_selected: usize,
     /// Open reminders (read-only; add or change them through proposals).
@@ -796,6 +800,8 @@ impl App {
             machines: Vec::new(),
             events: Vec::new(),
             calendar_selected: 0,
+            calendar_week: 0,
+            calendar_homed: false,
             later_selected: 0,
             muted_selected: 0,
             reminder_list: Vec::new(),
@@ -840,7 +846,35 @@ impl App {
 
     pub fn set_events(&mut self, events: Vec<EventView>) {
         self.events = events;
+        if !self.calendar_homed && !self.events.is_empty() {
+            self.calendar_homed = true;
+            self.calendar_home();
+        }
         self.clamp();
+    }
+
+    /// Put the cursor on the first item of today (or of the week's first day that has any, when
+    /// the week shown is not this one).
+    fn calendar_home(&mut self) {
+        let off = self.tz_offset;
+        let now = haste_core::time::now_secs();
+        let start = if self.calendar_week == 0 {
+            inbox::day_start(now, off)
+        } else {
+            i64::MIN
+        };
+        let at = self
+            .agenda()
+            .iter()
+            .position(|r| r.at() >= start)
+            .unwrap_or(0);
+        self.calendar_selected = at;
+    }
+
+    /// `[` / `]` / `T` on the Calendar tab: another week (`None` is this one).
+    fn calendar_week_step(&mut self, step: Option<i64>) {
+        self.calendar_week = step.map_or(0, |s| (self.calendar_week + s).clamp(-4, 26));
+        self.calendar_home();
     }
 
     pub fn set_reminder_list(&mut self, reminders: Vec<ReminderView>) {
@@ -1204,18 +1238,18 @@ impl App {
         }
     }
 
-    /// Calendar rows for the next [`inbox::AGENDA_DAYS`] days, soonest first: events, and open
-    /// TODO items with a date (a repeating one at each of its turns in the window).
+    /// Calendar rows for the week shown (Monday on), soonest first: events, and open TODO
+    /// items with a date (a repeating one at each of its turns in the window).
     #[must_use]
     pub fn agenda(&self) -> Vec<AgendaItem<'_>> {
         let now = haste_core::time::now_secs();
-        let from = inbox::day_start(now, self.tz_offset);
+        let from = inbox::week_start(now, self.tz_offset, self.calendar_week);
         let until = from + inbox::AGENDA_DAYS * 86_400;
         let mut out: Vec<AgendaItem<'_>> = self
             .events
             .iter()
             .filter(|e| {
-                e.event.status != "cancelled" && e.event.end_at >= now && e.event.start_at < until
+                e.event.status != "cancelled" && e.event.end_at >= from && e.event.start_at < until
             })
             .map(AgendaItem::Event)
             .collect();
@@ -1250,7 +1284,7 @@ impl App {
         let off = self.tz_offset;
         out.retain(|r| {
             let local = r.at() + off;
-            ((local.div_euclid(86_400) + 3).rem_euclid(7)) < 5
+            ((local.div_euclid(86_400) + 3).rem_euclid(7)) < inbox::WEEK_DAYS
         });
         out.sort_by_key(AgendaItem::at);
         out
@@ -1563,6 +1597,9 @@ impl App {
                     });
                 }
             }
+            Key::Char(']') if self.view == View::Calendar => self.calendar_week_step(Some(1)),
+            Key::Char('[') if self.view == View::Calendar => self.calendar_week_step(Some(-1)),
+            Key::Char('T') if self.view == View::Calendar => self.calendar_week_step(None),
             Key::Char('h') | Key::Left if self.view == View::Calendar => {
                 self.calendar_day_step(false);
             }
@@ -3511,6 +3548,7 @@ mod tests {
         let mut app = App::new();
         let now = haste_core::time::now_secs();
         let mut daily = reminder_view("daily", Some(on_a_weekday(now, 3_600)));
+        pin_week(&mut app, on_a_weekday(now, 3_600));
         daily.repeat = Some(RepeatRule {
             freq: RepeatFreq::Day,
             every: 1,
@@ -3587,6 +3625,7 @@ mod tests {
         let mut app = App::new();
         let now = haste_core::time::now_secs();
         app.set_reminder_list(vec![reminder_view("rent", Some(on_a_weekday(now, 3_600)))]);
+        pin_week(&mut app, on_a_weekday(now, 3_600));
         press(&mut app, "3");
         assert!(app.on_todos());
         // Enter opens the same popup as for a new one, filled with what it has
@@ -4599,6 +4638,14 @@ mod tests {
         assert!(app.reactions_pending.is_empty());
     }
 
+    /// Show the Calendar week that holds `t`, whatever day the tests run.
+    fn pin_week(app: &mut App, t: i64) {
+        let now = haste_core::time::now_secs();
+        let off = app.tz_offset;
+        app.calendar_week =
+            (inbox::week_start(t, off, 0) - inbox::week_start(now, off, 0)) / (7 * 86_400);
+    }
+
     /// A time at least `ahead` seconds from `now` that falls on a weekday (the calendar leaves
     /// the weekend out), whatever day the tests run.
     fn on_a_weekday(now: i64, ahead: i64) -> i64 {
@@ -4899,6 +4946,7 @@ mod tests {
             tags: vec![],
             shifted: false,
         };
+        pin_week(&mut app, on_a_weekday(now, 3600));
         app.set_events(vec![
             e("soon", on_a_weekday(now, 3600), "confirmed"),
             e("far", now + 9 * 86_400, "confirmed"),
@@ -4943,6 +4991,7 @@ mod tests {
         let mut app = App::new();
         let now = haste_core::time::now_secs();
         let first = on_a_weekday(now, 3_600);
+        pin_week(&mut app, first);
         // a weekday event, the next weekday's, and one on a Saturday
         let next = on_a_weekday(first + 86_400, 0);
         let mut saturday = first;
@@ -4979,6 +5028,7 @@ mod tests {
         let mut app = App::new();
         let now = haste_core::time::now_secs();
         let start = on_a_weekday(now, 3_600);
+        pin_week(&mut app, start);
         app.set_events(vec![
             event_view("e1", start, 60, false),
             event_view("all", start, 60, true),
@@ -5028,6 +5078,7 @@ mod tests {
         let now = haste_core::time::now_secs();
         // all-day events are dates: midnight UTC
         let day = on_a_weekday(now, 3_600);
+        pin_week(&mut app, day);
         let date = day - day.rem_euclid(86_400);
         app.set_events(vec![event_view("all", date, 24 * 60, true)]);
         press(&mut app, "3");
@@ -5058,6 +5109,7 @@ mod tests {
         let now = haste_core::time::now_secs();
         // from tomorrow on, so no event is already past whatever the time of day is
         let day1 = on_a_weekday(now + 86_400, 3_600);
+        pin_week(&mut app, day1);
         let day1 = day1 - day1.rem_euclid(86_400);
         let day2 = on_a_weekday(day1 + 86_400 + 1, 0);
         let day2 = day2 - day2.rem_euclid(86_400);
@@ -5097,6 +5149,7 @@ mod tests {
         let mut app = App::new();
         let now = haste_core::time::now_secs();
         app.set_reminder_list(vec![reminder_view("rent", Some(on_a_weekday(now, 3_600)))]);
+        pin_week(&mut app, on_a_weekday(now, 3_600));
         // on the calendar the task is under the cursor
         press(&mut app, "3");
         assert!(app.on_todos());

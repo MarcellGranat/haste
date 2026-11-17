@@ -12,8 +12,26 @@ pub const CHANNELS: [&str; 6] = [
     "imessage",
     "googlechat",
 ];
-/// How far ahead the Calendar tab looks.
+/// The calendar window: a whole Monday-to-Sunday week (the weekend is not drawn).
 pub const AGENDA_DAYS: i64 = 7;
+/// The days drawn for a week: Monday to Friday.
+pub const WEEK_DAYS: i64 = 5;
+
+/// Local midnight of the Monday of the week that holds `now`, moved by `weeks` weeks. On a
+/// Saturday or Sunday the week that counts is the coming one: the weekend is not drawn, so the
+/// week just ended would show nothing.
+#[must_use]
+pub fn week_start(now: i64, off: i64, weeks: i64) -> i64 {
+    let today = day_start(now, off);
+    // 1970-01-01 was a Thursday: day 0 is weekday 3 when Monday is 0
+    let weekday = ((today + off).div_euclid(DAY) + 3).rem_euclid(7);
+    let this_week = if weekday >= WEEK_DAYS {
+        today + (7 - weekday) * DAY
+    } else {
+        today - weekday * DAY
+    };
+    this_week + weeks * 7 * DAY
+}
 /// Longest snooze accepted.
 pub const MAX_SNOOZE_DAYS: i64 = 365;
 /// Hour of day (local time) used for "morning" and for a reminder given only a date.
@@ -764,5 +782,20 @@ mod tests {
             describe(from_civil(2026, 11, 13, 8, 0), 3600),
             "Fri 13 Nov 09:00"
         );
+    }
+
+    #[test]
+    fn the_week_starts_on_monday_and_a_weekend_shows_the_coming_week() {
+        // 2026-11-16 was a Monday; 2026-11-14 a Saturday
+        let monday: i64 = 1_794_787_200; // 2026-11-16T00:00:00Z
+        assert_eq!(((monday / 86_400) + 3).rem_euclid(7), 0);
+        for day in 0..5 {
+            assert_eq!(week_start(monday + day * 86_400 + 40_000, 0, 0), monday);
+        }
+        // Saturday and Sunday look at the next Monday
+        assert_eq!(week_start(monday - 2 * 86_400 + 100, 0, 0), monday);
+        assert_eq!(week_start(monday - 86_400 + 100, 0, 0), monday);
+        assert_eq!(week_start(monday + 100, 0, 1), monday + 7 * 86_400);
+        assert_eq!(week_start(monday + 100, 0, -1), monday - 7 * 86_400);
     }
 }

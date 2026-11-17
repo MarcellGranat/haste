@@ -665,7 +665,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         }
         View::Channels => vec![("Enter", "open"), ("j/k", "move")],
         View::Calendar => {
-            let mut h = vec![("j/k", "move")];
+            let mut h = vec![("j/k", "move"), ("[ ]", "week"), ("T", "this week")];
             if app
                 .agenda()
                 .get(app.calendar_selected)
@@ -1747,15 +1747,22 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let off = app.tz_offset;
     let now = haste_core::time::now_secs();
     let today = inbox::day_start(now, off);
-    let days: Vec<i64> = (0..inbox::AGENDA_DAYS)
-        .map(|d| today + d * 86_400)
-        .filter(|d| (((d + off).div_euclid(86_400) + 3).rem_euclid(7)) < 5)
-        .collect();
+    let monday = inbox::week_start(now, off, app.calendar_week);
+    let days: Vec<i64> = (0..inbox::WEEK_DAYS).map(|d| monday + d * 86_400).collect();
     let rows = app.agenda();
-    let block = theme::panel(
-        " Calendar · next 7 days without the weekend · ←→ day · j/k item · Enter edits ",
-    )
-    .border_style(Style::new().fg(theme::BORDER_ACTIVE));
+    let which = match app.calendar_week {
+        0 => "this week".to_owned(),
+        1 => "next week".to_owned(),
+        -1 => "last week".to_owned(),
+        n if n > 1 => format!("in {n} weeks"),
+        n => format!("{} weeks ago", -n),
+    };
+    let title = format!(
+        " Calendar · {} – {} · {which} · ←→ day · [ ] week · T today · Enter edits ",
+        inbox::day_label(monday, off),
+        inbox::day_label(monday + (inbox::WEEK_DAYS - 1) * 86_400, off),
+    );
+    let block = theme::panel(&title).border_style(Style::new().fg(theme::BORDER_ACTIVE));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if days.is_empty() || inner.height < 8 || inner.width < 30 {
@@ -1869,7 +1876,14 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         let is_today = *day == today;
         let _ = d;
         head_spans.push(Span::styled(
-            fit(&format!(" {label}"), col_w),
+            fit(
+                &if is_today {
+                    format!(" ● {label}")
+                } else {
+                    format!(" {label}")
+                },
+                col_w,
+            ),
             if is_today {
                 Style::new()
                     .fg(theme::BASE)
@@ -1930,7 +1944,20 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         )];
         for (d, _) in days.iter().enumerate() {
             let inner_w = col_w.saturating_sub(1);
-            spans.push(Span::styled("│", Style::new().fg(theme::SURFACE1)));
+            // today's column is tinted and has a lit edge
+            let tint = if days[d] == today {
+                Style::new().bg(theme::UNREAD_BG)
+            } else {
+                Style::new()
+            };
+            spans.push(Span::styled(
+                "│",
+                Style::new().fg(if days[d] == today {
+                    theme::MAUVE
+                } else {
+                    theme::SURFACE1
+                }),
+            ));
             // the items on this row, left to right
             let mut hits: Vec<(usize, usize, &Placed)> = placed
                 .iter()
@@ -1952,7 +1979,7 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
             let mut at = 0;
             for (x, w, p) in hits {
                 if x > at {
-                    spans.push(Span::raw(" ".repeat(x - at)));
+                    spans.push(Span::styled(" ".repeat(x - at), tint));
                 }
                 let selected = p.index == app.calendar_selected;
                 let begins = minute_of(p.start, d) >= row_start || r == 0;
@@ -1981,7 +2008,7 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 at = x + w;
             }
             if at < inner_w {
-                spans.push(Span::raw(" ".repeat(inner_w - at)));
+                spans.push(Span::styled(" ".repeat(inner_w - at), tint));
             }
         }
         lines.push(Line::from(spans));
@@ -3143,6 +3170,10 @@ mod tests {
         while weekday(day) >= 5 {
             day += 86_400;
         }
+        // the week that holds that day, whichever day the test runs
+        app.calendar_week = (inbox::week_start(day, app.tz_offset, 0)
+            - inbox::week_start(now, app.tz_offset, 0))
+            / (7 * 86_400);
         let at = |h: i64| day + h * 3_600;
         let ev = |id: &str, start: i64, mins: i64| haste_proto::EventView {
             event: haste_core::model::Event {
@@ -3182,6 +3213,36 @@ mod tests {
             "no weekend: {text}"
         );
         assert!(text.contains("Enter edits"), "{text}");
+    }
+
+    #[test]
+    fn the_calendar_shows_monday_to_friday_marks_today_and_steps_between_weeks() {
+        let mut app = App::new();
+        app.view = crate::app::View::Calendar;
+        app.tz_offset = 0;
+        let text = render(&app);
+        // five day columns, Monday first, and no weekend
+        let (mon, fri) = (text.find("Mon "), text.find("Fri "));
+        assert!(mon.is_some() && fri.is_some() && mon < fri, "{text}");
+        assert!(!text.contains("Sat ") && !text.contains("Sun "), "{text}");
+        assert!(text.contains("this week"), "{text}");
+        // today's column is marked with a dot, and only today's
+        let now = haste_core::time::now_secs();
+        let weekday = (now.div_euclid(86_400) + 3).rem_euclid(7);
+        assert_eq!(
+            text.matches('●').count(),
+            usize::from(weekday < 5),
+            "{text}"
+        );
+        // ] goes to the next week (no dot there), [ back, T returns to this one
+        app.handle_key(crate::app::Key::Char(']'));
+        let next = render(&app);
+        assert!(next.contains("next week") && !next.contains('●'), "{next}");
+        app.handle_key(crate::app::Key::Char('['));
+        app.handle_key(crate::app::Key::Char('['));
+        assert!(render(&app).contains("last week"));
+        app.handle_key(crate::app::Key::Char('T'));
+        assert!(render(&app).contains("this week"));
     }
 
     #[test]

@@ -159,7 +159,28 @@ impl GmailClient {
         query: Query<'_>,
     ) -> Result<Option<T>, ConnectorError> {
         let request = self.http.get(format!("{}{path}", self.base)).query(query);
-        match self.send(request).await? {
+        let answer = self.send(request).await;
+        if let Err(e) = &answer {
+            // which kind of read failed and why, as fixed labels only
+            let kind = if path.ends_with("/profile") {
+                "profile"
+            } else if path.ends_with("/history") {
+                "history"
+            } else if path.contains("/threads/") {
+                "thread"
+            } else {
+                "list"
+            };
+            haste_core::log::warn(
+                "gmail",
+                "request_failed",
+                &[
+                    haste_core::log::l("kind", kind),
+                    haste_core::log::l("class", haste_core::connector::transient_label(e)),
+                ],
+            );
+        }
+        match answer? {
             Some(body) => Self::parse(&body).map(Some),
             None => Ok(None),
         }

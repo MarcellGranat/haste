@@ -1380,6 +1380,7 @@ fn events_list(state: &State, principal: &Principal, from: i64) -> Response {
     let tags = state.store.all_event_tags().unwrap_or_default();
     let overrides = state.store.event_overrides().unwrap_or_default();
     let machine_labels = machine_labels_for(state, principal);
+    let names = state.store.calendar_names().unwrap_or_default();
     match state.store.list_events(from) {
         Ok(rows) => Response::Events {
             events: rows
@@ -1399,6 +1400,7 @@ fn events_list(state: &State, principal: &Principal, from: i64) -> Response {
                             None => false,
                         };
                         EventView {
+                            calendar_name: names.get(&event.calendar).cloned().unwrap_or_default(),
                             event,
                             tags: own,
                             shifted,

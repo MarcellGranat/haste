@@ -36,9 +36,9 @@ pub enum Outcome {
 
 #[derive(Debug, Clone)]
 pub struct NewEventForm {
-    /// The Google calendars the events already on screen come from; "local only" comes before
-    /// them and is the default.
-    pub calendars: Vec<String>,
+    /// The Google calendars the events already on screen come from, each as its id and the name
+    /// to show; "local only" comes before them and is the default.
+    pub calendars: Vec<(String, String)>,
     /// 0 is "local only", then the calendars in order.
     pub picked: usize,
     pub title: String,
@@ -51,7 +51,7 @@ impl NewEventForm {
     /// A form that starts at `start` and lasts `minutes`, in a local time `off` seconds ahead
     /// of UTC.
     #[must_use]
-    pub fn new(calendars: Vec<String>, start: i64, minutes: u32, off: i64) -> Self {
+    pub fn new(calendars: Vec<(String, String)>, start: i64, minutes: u32, off: i64) -> Self {
         let mut time = EventForm::new("", "", start, start + i64::from(minutes) * 60, false, off);
         time.duration = DurationEdit::new(minutes, MIN_MINUTES, MAX_MINUTES, false);
         Self {
@@ -69,7 +69,7 @@ impl NewEventForm {
         self.picked
             .checked_sub(1)
             .and_then(|i| self.calendars.get(i))
-            .map(String::as_str)
+            .map(|(id, _)| id.as_str())
     }
 
     #[must_use]
@@ -187,7 +187,15 @@ mod tests {
     fn form() -> NewEventForm {
         // Wednesday 18 Nov 2026, 10:00 local, an hour
         let start = from_civil(2026, 11, 18, 10, 0) - OFF;
-        NewEventForm::new(vec!["a@x.org".into(), "b@x.org".into()], start, 60, OFF)
+        NewEventForm::new(
+            vec![
+                ("a@x.org".into(), "Work".into()),
+                ("b@x.org".into(), "Home".into()),
+            ],
+            start,
+            60,
+            OFF,
+        )
     }
 
     #[test]

@@ -626,6 +626,9 @@ pub struct EventView {
     /// Moved or resized here: `event` carries the local times, Google keeps its own.
     #[serde(default)]
     pub shifted: bool,
+    /// The name of the event's calendar, empty when it is not known (yet).
+    #[serde(default)]
+    pub calendar_name: String,
 }
 
 /// Counts and permission state only: no titles, notes or list names.

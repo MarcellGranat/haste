@@ -342,6 +342,9 @@ fn store_batch(
                 .finish_calendar_sweep(&sweep.calendar, &sweep.id, now_secs())?;
         }
     }
+    if !batch.calendar_names.is_empty() {
+        state.store.set_calendar_names(&batch.calendar_names)?;
+    }
     if let Some(Cursor(c)) = &batch.next_cursor {
         state.store.set_connector_cursor(source, Some(c))?;
     }

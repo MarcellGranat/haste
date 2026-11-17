@@ -246,6 +246,39 @@ impl Store {
         })
     }
 
+    /// Remember the names of calendars (by id), replacing an older name.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn set_calendar_names(&self, names: &[(String, String)]) -> StoreResult<()> {
+        let names = names.to_vec();
+        self.write(move |conn| {
+            let tx = conn.transaction()?;
+            for (calendar, name) in &names {
+                tx.execute(
+                    "INSERT INTO calendar_names (calendar, name) VALUES (?1, ?2) \
+                     ON CONFLICT(calendar) DO UPDATE SET name = excluded.name",
+                    params![calendar, name],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// The known calendar names, by calendar id.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn calendar_names(&self) -> StoreResult<HashMap<String, String>> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare("SELECT calendar, name FROM calendar_names")?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            Ok(rows.collect::<Result<_, _>>()?)
+        })
+    }
+
     /// Add an event that lives here only: calendar `local`, never sent anywhere. Returns its id.
     ///
     /// # Errors
@@ -776,5 +809,18 @@ mod tests {
         };
         s.upsert_events(&[], &[sweep]).unwrap();
         assert_eq!(s.list_events(0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn calendar_names_are_remembered_and_a_newer_name_replaces_the_older() {
+        let (_d, s) = test_store();
+        assert!(s.calendar_names().unwrap().is_empty());
+        s.set_calendar_names(&[("a".into(), "Work".into()), ("b".into(), "Home".into())])
+            .unwrap();
+        s.set_calendar_names(&[("a".into(), "Office".into())])
+            .unwrap();
+        let names = s.calendar_names().unwrap();
+        assert_eq!(names.get("a").map(String::as_str), Some("Office"));
+        assert_eq!(names.get("b").map(String::as_str), Some("Home"));
     }
 }

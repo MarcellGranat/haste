@@ -2398,7 +2398,7 @@ fn draw_new_event(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let on_calendar = form.field == Field::Calendar;
     let mut calendar_row = vec![label("Calendar", on_calendar)];
     let names = std::iter::once("local only".to_owned())
-        .chain(form.calendars.iter().map(|c| inbox::sanitize(c)));
+        .chain(form.calendars.iter().map(|(_, name)| inbox::sanitize(name)));
     for (i, name) in names.enumerate() {
         let on = i == form.picked;
         calendar_row.push(Span::styled(
@@ -3331,6 +3331,7 @@ mod tests {
             },
             tags: vec![],
             shifted: id == "moved",
+            calendar_name: String::new(),
         };
         // two that overlap share the column; one is far outside the working day
         app.set_events(vec![

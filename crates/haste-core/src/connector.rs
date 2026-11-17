@@ -58,6 +58,9 @@ pub struct Batch {
     /// Calendar events (only the Calendar connector fills these).
     pub events: Vec<Event>,
     pub calendar_sweeps: Vec<CalendarSweep>,
+    /// Calendar events: `(calendar id, the name its owner gave it)`, so lists show a name and
+    /// not the id.
+    pub calendar_names: Vec<(String, String)>,
     pub next_cursor: Option<Cursor>,
     /// Mail: `(thread external id, unread)` as the provider reports it.
     pub unread: Vec<(String, bool)>,

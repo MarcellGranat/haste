@@ -48,6 +48,8 @@ pub struct GcalConnector {
     config: GcalConfig,
     audit: CycleAudit,
     clock: Clock,
+    /// The calendar names went out with an earlier batch (they are read once per start).
+    names_sent: std::sync::atomic::AtomicBool,
 }
 
 enum Listed {
@@ -113,6 +115,7 @@ impl GcalConnector {
             config: config.clone(),
             audit,
             clock: Arc::new(haste_core::time::now_secs),
+            names_sent: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -204,6 +207,21 @@ impl GcalConnector {
         let now = (self.clock)();
         let mut next = CalendarCursor::default();
         let mut batch = Batch::default();
+        // the names of the selected calendars, once per start; a failed read is only tried again
+        // next time, it never fails the cycle
+        if !self.config.calendars.is_empty()
+            && !self.names_sent.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            if let Ok(calendars) = self.client.list_calendars().await {
+                batch.calendar_names = calendars
+                    .into_iter()
+                    .filter(|c| self.config.selects(&c.id) && !c.summary.trim().is_empty())
+                    .map(|c| (c.id, c.summary))
+                    .collect();
+                self.names_sent
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         let (mut full_count, mut reset_count) = (0, 0);
         // Only calendars listed in gcal.json are ever requested.
         for calendar in &self.config.calendars {

@@ -3042,15 +3042,22 @@ impl App {
         } else {
             day + inbox::DEFAULT_REMINDER_HOUR * 3_600
         };
-        // the Google calendars the events on screen come from
-        let mut calendars: Vec<String> = self
+        // the Google calendars the events on screen come from: the id and the name to show
+        let mut calendars: Vec<(String, String)> = self
             .events
             .iter()
-            .map(|e| e.event.calendar.clone())
-            .filter(|c| c != haste_core::model::LOCAL_CALENDAR)
+            .filter(|e| e.event.calendar != haste_core::model::LOCAL_CALENDAR)
+            .map(|e| {
+                let name = if e.calendar_name.trim().is_empty() {
+                    e.event.calendar.clone()
+                } else {
+                    e.calendar_name.clone()
+                };
+                (e.event.calendar.clone(), name)
+            })
             .collect();
-        calendars.sort();
-        calendars.dedup();
+        calendars.sort_by(|a, b| (&a.1, &a.0).cmp(&(&b.1, &b.0)));
+        calendars.dedup_by(|a, b| a.0 == b.0);
         self.new_event = Some(Box::new(crate::eventnew::NewEventForm::new(
             calendars, start, 60, off,
         )));
@@ -5018,6 +5025,7 @@ mod tests {
             },
             tags: vec![],
             shifted: false,
+            calendar_name: String::new(),
         };
         pin_week(&mut app, on_a_weekday(now, 3600));
         app.set_events(vec![
@@ -5056,6 +5064,7 @@ mod tests {
             },
             tags: vec![],
             shifted: false,
+            calendar_name: "Work".into(),
         }
     }
 
@@ -5680,8 +5689,8 @@ mod tests {
         assert_eq!(form.calendar(), None, "local only is the default");
         assert_eq!(
             form.calendars,
-            vec!["c".to_owned()],
-            "the calendars on screen"
+            vec![("c".to_owned(), "Work".to_owned())],
+            "the calendars on screen, by name"
         );
         // Enter to the title, type it, Enter to the start, Enter to the length, Enter adds it
         app.handle_key(Key::Enter);

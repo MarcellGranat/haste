@@ -242,6 +242,13 @@ const MIGRATIONS: &[&str] = &[
         WHERE m.thread_id = triage.object_id AND m.is_own = 0 AND m.sent_at > triage.updated_at
     );
     ",
+    // 18: the names of the calendars that events come from (the events carry only the id).
+    "
+    CREATE TABLE calendar_names (
+        calendar TEXT PRIMARY KEY,
+        name TEXT NOT NULL
+    );
+    ",
 ];
 
 /// Highest schema version this binary understands.

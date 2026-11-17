@@ -80,6 +80,17 @@ fn no_deletes(server: &FakeServer) {
     );
 }
 
+/// What the fake Google answers to the calendar list: a name for `primary` only.
+fn calendar_list() -> (u16, String) {
+    ok(
+        &json!({"items":[{"id":"primary","summary":"Main calendar"},{"id":"other","summary":"Not selected"}]}),
+    )
+}
+
+fn is_calendar_list(r: &Recorded) -> bool {
+    r.path.ends_with("/calendarList")
+}
+
 fn has_param(r: &Recorded, key: &str) -> bool {
     r.query.split('&').any(|p| p.split('=').next() == Some(key))
 }
@@ -89,6 +100,9 @@ async fn the_first_listing_has_no_time_window_stores_only_in_window_events_and_k
     let server = spawn(|r| {
         if r.path == "/token" {
             return token_ok();
+        }
+        if is_calendar_list(r) {
+            return calendar_list();
         }
         assert!(r.path.starts_with("/calendar/v3/calendars/"), "{}", r.path);
         if has_param(r, "pageToken") {
@@ -114,7 +128,7 @@ async fn the_first_listing_has_no_time_window_stores_only_in_window_events_and_k
     let listing: Vec<_> = server
         .requests()
         .into_iter()
-        .filter(|r| r.path != "/token")
+        .filter(|r| r.path != "/token" && !is_calendar_list(r))
         .collect();
     assert!(listing.iter().all(|r| !has_param(r, "timeMin")
         && !has_param(r, "timeMax")
@@ -129,6 +143,11 @@ async fn the_first_listing_has_no_time_window_stores_only_in_window_events_and_k
         batch.calendar_sweeps.len(),
         2,
         "each full listing ends in a sweep"
+    );
+    // the name of a selected calendar comes along, an unselected one's does not
+    assert_eq!(
+        batch.calendar_names,
+        vec![("primary".to_owned(), "Main calendar".to_owned())]
     );
     let cursor =
         haste_connector_gcal::connector::CalendarCursor::decode(&batch.next_cursor.unwrap().0);
@@ -187,6 +206,9 @@ async fn a_gone_token_relists_once_and_a_second_gone_does_not_loop() {
         if r.path == "/token" {
             return token_ok();
         }
+        if is_calendar_list(r) {
+            return calendar_list();
+        }
         seen.fetch_add(1, Ordering::SeqCst);
         if has_param(r, "syncToken") {
             (410, json!({"error":{"code":410,"message":"gone"}}).to_string())
@@ -215,6 +237,9 @@ async fn a_gone_token_relists_once_and_a_second_gone_does_not_loop() {
         if r.path == "/token" {
             return token_ok();
         }
+        if is_calendar_list(r) {
+            return calendar_list();
+        }
         seen.fetch_add(1, Ordering::SeqCst);
         (410, "{}".into())
     })
@@ -229,6 +254,9 @@ async fn only_selected_calendars_are_requested_and_an_empty_list_reads_nothing()
     let server = spawn(|r| {
         if r.path == "/token" {
             return token_ok();
+        }
+        if is_calendar_list(r) {
+            return calendar_list();
         }
         assert!(
             r.path.contains("/calendars/primary/"),
@@ -292,7 +320,7 @@ async fn writes_send_update_none_only_allow_listed_fields_and_never_delete() {
     let writes: Vec<_> = server
         .requests()
         .into_iter()
-        .filter(|r| r.path != "/token")
+        .filter(|r| r.path != "/token" && !is_calendar_list(r))
         .collect();
     assert_eq!(writes.len(), 2);
     for w in &writes {

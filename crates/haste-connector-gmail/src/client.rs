@@ -116,6 +116,33 @@ pub struct GmailClient {
     tokens: Arc<TokenSource>,
 }
 
+/// The timestamp in "Retry after 2026-11-17T15:30:00.000Z" of a Google answer, or nothing. Only a
+/// string of the exact timestamp shape is returned.
+fn retry_after(body: &str) -> String {
+    let lower = body.to_ascii_lowercase();
+    let Some(at) = lower.find("retry after ") else {
+        return String::new();
+    };
+    let Some(rest) = body.get(at + "retry after ".len()..) else {
+        return String::new();
+    };
+    let tail: String = rest.chars().take(24).collect();
+    let shaped = tail.len() == 24
+        && tail.chars().enumerate().all(|(i, c)| match i {
+            4 | 7 => c == '-',
+            10 => c == 'T',
+            13 | 16 => c == ':',
+            19 => c == '.',
+            23 => c == 'Z',
+            _ => c.is_ascii_digit(),
+        });
+    if shaped {
+        tail
+    } else {
+        String::new()
+    }
+}
+
 type Query<'a> = &'a [(&'a str, String)];
 
 impl GmailClient {
@@ -144,7 +171,19 @@ impl GmailClient {
         match status {
             200..=299 => Ok(Some(body)),
             404 => Ok(None),
-            _ => Err(classify(status, &body)),
+            _ => {
+                // the status, and the time Google says to retry after when it names one
+                // (a fixed-format timestamp, never text of the answer)
+                haste_core::log::warn(
+                    "gmail",
+                    "http_refused",
+                    &[
+                        haste_core::log::n("status", usize::from(status)),
+                        haste_core::log::id("retry_after", &retry_after(&body)),
+                    ],
+                );
+                Err(classify(status, &body))
+            }
         }
     }
 
@@ -469,5 +508,21 @@ impl GmailClient {
             Some(body) => Self::parse(&body),
             None => Err(ConnectorError::Other("draft endpoint not found".into())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retry_after;
+
+    #[test]
+    fn the_retry_after_time_is_read_only_when_it_has_the_exact_shape() {
+        assert_eq!(
+            retry_after("User-rate limit exceeded.  Retry after 2026-11-17T15:30:00.000Z"),
+            "2026-11-17T15:30:00.000Z"
+        );
+        assert_eq!(retry_after("Retry after tomorrow, ok?"), "");
+        assert_eq!(retry_after("no hint ÄÖÜ"), "");
+        assert_eq!(retry_after("Retry after ÄÖÜÄÖÜÄÖÜÄÖÜÄÖÜÄÖÜÄÖÜÄÖÜ"), "");
     }
 }

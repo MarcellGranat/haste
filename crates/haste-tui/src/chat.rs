@@ -267,26 +267,16 @@ pub fn links(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Longest address shown in full; longer ones are shown as `https://host/…`.
-const LINK_SHOWN: usize = 40;
-
-/// What is shown for an address: itself when short, else its scheme and host with `/…`, cut to
-/// `max` columns. Two different addresses never share a shown text (a number is added).
+/// What is shown for an address: all of it when it fits on one row of `max` columns (a link is
+/// clicked as one piece, so it is never wrapped), else its start cut with `…`. Two different
+/// addresses never share a shown text (a number is added).
 fn shown_link(url: &str, max: usize, taken: &[(String, String)]) -> String {
     let max = max.max(12);
-    let base = if url.chars().count() <= LINK_SHOWN.min(max) {
+    let base = if url.chars().count() <= max {
         url.to_owned()
     } else {
-        let host_end = url.find("://").map_or(url.len(), |i| {
-            url[i + 3..]
-                .find(['/', '?', '#'])
-                .map_or(url.len(), |j| i + 3 + j)
-        });
-        let host: String = url[..host_end]
-            .chars()
-            .take(max.saturating_sub(2))
-            .collect();
-        format!("{host}/…")
+        let head: String = url.chars().take(max.saturating_sub(1)).collect();
+        format!("{head}…")
     };
     let mut shown = base.clone();
     let mut n = 1;
@@ -694,27 +684,36 @@ mod tests {
     }
 
     #[test]
-    fn long_addresses_are_shown_short_and_keep_their_full_form() {
+    fn an_address_is_shown_in_full_when_it_fits_a_row_and_cut_at_the_end_when_not() {
         let long =
             "https://click.example.com/ls/click?upn=u001.AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
         let other =
             "https://click.example.com/ls/click?upn=u001.ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ";
+        // it fits: nothing is cut
         let mut map = Vec::new();
         let text = format!("go ({long}), or {other}. short: https://a.org/x and {long} again");
-        let shown = shorten_links(&text, 60, &mut map);
-        assert_eq!(
-            shown,
-            "go (https://click.example.com/…), or https://click.example.com/…2. \
-             short: https://a.org/x and https://click.example.com/… again"
-        );
+        let shown = shorten_links(&text, 100, &mut map);
+        assert_eq!(shown, text);
         assert_eq!(
             map,
             vec![
-                ("https://click.example.com/…".to_owned(), long.to_owned()),
-                ("https://click.example.com/…2".to_owned(), other.to_owned()),
+                (long.to_owned(), long.to_owned()),
+                (other.to_owned(), other.to_owned()),
                 ("https://a.org/x".to_owned(), "https://a.org/x".to_owned()),
             ]
         );
+        // it does not: the start stays, the end is cut, and two addresses stay apart
+        let mut map = Vec::new();
+        let shown = shorten_links(&format!("{long} {other}"), 50, &mut map);
+        let cut = |u: &str| format!("{}…", u.chars().take(49).collect::<String>());
+        assert_eq!(shown, format!("{} {}", cut(long), cut(other)));
+        assert_eq!(map[0], (cut(long), long.to_owned()));
+        // same start, different end: the shown texts are told apart by a number
+        let a = "https://example.org/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1";
+        let b = "https://example.org/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2";
+        let mut map = Vec::new();
+        shorten_links(&format!("{a} {b}"), 20, &mut map);
+        assert_ne!(map[0].0, map[1].0);
     }
 
     #[test]
@@ -731,7 +730,7 @@ mod tests {
         let (lines, laid) = layout(
             &messages,
             &Layout {
-                width: 60,
+                width: 120,
                 selected: 0,
                 own: None,
                 tz_offset: 0,
@@ -740,15 +739,12 @@ mod tests {
                 expanded: &std::collections::HashSet::new(),
             },
         );
-        assert_eq!(
-            laid[0].links,
-            vec![("https://click.example.com/…".to_owned(), long.to_owned())]
-        );
+        assert_eq!(laid[0].links, vec![(long.to_owned(), long.to_owned())]);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
             .collect();
-        assert!(text.contains("https://click.example.com/…") && !text.contains("upn="));
+        assert!(text.contains(long), "the whole address is shown");
     }
 
     #[test]

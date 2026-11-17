@@ -263,7 +263,7 @@ pub const CHAT_SEND_DELAY: Duration = Duration::from_secs(3);
 #[must_use]
 pub fn send_delay(source: &str) -> Duration {
     match source {
-        "imessage" | "whatsapp" | "messenger" => CHAT_SEND_DELAY,
+        "imessage" | "whatsapp" | "messenger" | "googlechat" => CHAT_SEND_DELAY,
         _ => SEND_DELAY,
     }
 }
@@ -5532,7 +5532,7 @@ mod tests {
 
     #[test]
     fn chat_sends_wait_three_seconds_and_mail_ten() {
-        for chat in ["imessage", "whatsapp", "messenger"] {
+        for chat in ["imessage", "whatsapp", "messenger", "googlechat"] {
             assert_eq!(send_delay(chat), Duration::from_secs(3), "{chat}");
         }
         for mail in ["gmail", "icloud", "email"] {

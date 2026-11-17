@@ -4,7 +4,14 @@ use haste_core::time::{from_civil, to_civil};
 use haste_proto::{FilterView, ThreadView};
 
 /// Channels shown on the Channels tab, in order.
-pub const CHANNELS: [&str; 5] = ["gmail", "icloud", "whatsapp", "messenger", "imessage"];
+pub const CHANNELS: [&str; 6] = [
+    "gmail",
+    "icloud",
+    "whatsapp",
+    "messenger",
+    "imessage",
+    "googlechat",
+];
 /// How far ahead the Calendar tab looks.
 pub const AGENDA_DAYS: i64 = 7;
 /// Longest snooze accepted.

@@ -812,6 +812,7 @@ pub fn source_icon(source: &str) -> &'static str {
         "whatsapp" => "✆",
         "messenger" => "◉",
         "imessage" => "✎",
+        "googlechat" => "▣",
         _ => "•",
     }
 }

@@ -11,6 +11,8 @@ pub enum Source {
     Imessage,
     Whatsapp,
     Messenger,
+    /// Google Chat, read through Beeper.
+    GoogleChat,
     Email,
     /// Apple Reminders.
     Reminders,
@@ -29,6 +31,7 @@ impl Source {
             Self::Imessage => "imessage".into(),
             Self::Whatsapp => "whatsapp".into(),
             Self::Messenger => "messenger".into(),
+            Self::GoogleChat => "googlechat".into(),
             Self::Email => "email".into(),
             Self::Reminders => "reminders".into(),
             Self::GoogleCalendar => "gcal".into(),
@@ -45,6 +48,7 @@ impl From<String> for Source {
             "imessage" => Self::Imessage,
             "whatsapp" => Self::Whatsapp,
             "messenger" => Self::Messenger,
+            "googlechat" => Self::GoogleChat,
             "email" => Self::Email,
             "reminders" => Self::Reminders,
             "gcal" => Self::GoogleCalendar,

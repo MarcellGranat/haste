@@ -46,7 +46,9 @@ impl SendScope {
     pub fn of(source: &Source) -> Option<Self> {
         match source {
             Source::Gmail | Source::Icloud | Source::Email => Some(Self::Mail),
-            Source::Whatsapp | Source::Messenger | Source::Imessage => Some(Self::Chat),
+            Source::Whatsapp | Source::Messenger | Source::Imessage | Source::GoogleChat => {
+                Some(Self::Chat)
+            }
             _ => None,
         }
     }
@@ -56,7 +58,7 @@ impl SendScope {
     pub fn sources(self) -> &'static [&'static str] {
         match self {
             Self::Mail => &["gmail", "icloud", "email"],
-            Self::Chat => &["whatsapp", "messenger", "imessage"],
+            Self::Chat => &["whatsapp", "messenger", "imessage", "googlechat"],
         }
     }
 
@@ -449,10 +451,12 @@ mod tests {
 
     #[test]
     fn chat_sends_have_their_own_stricter_limits_and_mail_has_no_daily_cap() {
-        use crate::model::Source::{Gmail, Icloud, Imessage, Messenger, Reminders, Whatsapp};
+        use crate::model::Source::{
+            Gmail, GoogleChat, Icloud, Imessage, Messenger, Reminders, Whatsapp,
+        };
         assert_eq!(SendScope::of(&Gmail), Some(SendScope::Mail));
         assert_eq!(SendScope::of(&Icloud), Some(SendScope::Mail));
-        for s in [Whatsapp, Messenger, Imessage] {
+        for s in [Whatsapp, Messenger, Imessage, GoogleChat] {
             assert_eq!(SendScope::of(&s), Some(SendScope::Chat));
         }
         assert_eq!(

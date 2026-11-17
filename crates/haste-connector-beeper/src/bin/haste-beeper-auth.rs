@@ -214,6 +214,6 @@ async fn main() -> ExitCode {
         "\nChoose what to read in {}: account ids, `on_device_attested` (when the connection is not reported) or `allow_cloud` (accept a cloud account) where needed, and the chat ids to allow.",
         BeeperConfig::path(&home).display()
     );
-    println!("Then restart hasted and release one source with `haste connector release whatsapp|messenger|imessage`.");
+    println!("Then restart hasted and release one source with `haste connector release whatsapp|messenger|imessage|googlechat`.");
     ExitCode::SUCCESS
 }

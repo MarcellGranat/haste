@@ -139,7 +139,7 @@ async fn main() {
             #[cfg(feature = "beeper")]
             match log_start("beeper", hasted::start_beeper(&handle.state, &base)) {
                 Ok(true) => eprintln!(
-                    "hasted: beeper connectors registered (whatsapp, messenger, imessage; kill switches decide when they run)"
+                    "hasted: beeper connectors registered (whatsapp, messenger, imessage, googlechat; kill switches decide when they run)"
                 ),
                 Ok(false) => eprintln!(
                     "hasted: beeper not set up yet (run `haste connector beeper auth`, then write beeper.json)"

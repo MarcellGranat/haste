@@ -66,6 +66,7 @@ pub fn channel_colour(source: &str) -> Color {
         "whatsapp" => GREEN,
         "messenger" => BLUE,
         "imessage" => TEAL,
+        "googlechat" => YELLOW,
         _ => SUBTEXT0,
     }
 }
@@ -142,7 +143,14 @@ mod tests {
 
     #[test]
     fn every_channel_has_a_colour() {
-        for c in ["gmail", "icloud", "whatsapp", "messenger", "imessage"] {
+        for c in [
+            "gmail",
+            "icloud",
+            "whatsapp",
+            "messenger",
+            "imessage",
+            "googlechat",
+        ] {
             assert_ne!(channel_colour(c), SUBTEXT0, "{c}");
         }
     }

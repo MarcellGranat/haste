@@ -12,10 +12,16 @@ pub enum BeeperSource {
     Whatsapp,
     Messenger,
     Imessage,
+    GoogleChat,
 }
 
 impl BeeperSource {
-    pub const ALL: [Self; 3] = [Self::Whatsapp, Self::Messenger, Self::Imessage];
+    pub const ALL: [Self; 4] = [
+        Self::Whatsapp,
+        Self::Messenger,
+        Self::Imessage,
+        Self::GoogleChat,
+    ];
 
     #[must_use]
     pub fn source(self) -> Source {
@@ -23,6 +29,7 @@ impl BeeperSource {
             Self::Whatsapp => Source::Whatsapp,
             Self::Messenger => Source::Messenger,
             Self::Imessage => Source::Imessage,
+            Self::GoogleChat => Source::GoogleChat,
         }
     }
 
@@ -38,6 +45,12 @@ impl BeeperSource {
             Some(Self::Imessage)
         } else if n.contains("messenger") || n.contains("facebook") {
             Some(Self::Messenger)
+        } else if n.contains("googlechat")
+            || n.contains("gchat")
+            || n.contains("hangouts")
+            || (n.contains("google") && n.contains("chat"))
+        {
+            Some(Self::GoogleChat)
         } else {
             None
         }
@@ -49,6 +62,7 @@ impl BeeperSource {
             Self::Whatsapp => "whatsapp",
             Self::Messenger => "messenger",
             Self::Imessage => "imessage",
+            Self::GoogleChat => "googlechat",
         }
     }
 }
@@ -289,6 +303,14 @@ mod tests {
             BeeperSource::from_network("messenger"),
             Some(BeeperSource::Messenger)
         );
+        for n in ["googlechat", "Google Chat", "gchat", "google-chat"] {
+            assert_eq!(
+                BeeperSource::from_network(n),
+                Some(BeeperSource::GoogleChat),
+                "{n}"
+            );
+        }
+        assert_eq!(BeeperSource::from_network("gmail"), None);
         assert_eq!(
             BeeperSource::from_network("imessage"),
             Some(BeeperSource::Imessage)

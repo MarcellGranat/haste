@@ -171,12 +171,17 @@ impl GmailClient {
             } else {
                 "list"
             };
+            // a thread's id is an opaque provider id, never content; it says whether one thread
+            // keeps failing
+            let id = path.rsplit('/').next().unwrap_or("");
+            let id = if kind == "thread" { id } else { "" };
             haste_core::log::warn(
                 "gmail",
                 "request_failed",
                 &[
                     haste_core::log::l("kind", kind),
                     haste_core::log::l("class", haste_core::connector::transient_label(e)),
+                    haste_core::log::id("thread", id),
                 ],
             );
         }

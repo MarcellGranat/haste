@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod art;
+pub mod calendarcolors;
 pub mod chat;
 pub mod client;
 pub mod compose;

@@ -1348,7 +1348,14 @@ fn main() -> io::Result<()> {
     })?;
     let events = client.subscribe();
     let mut app = App::new();
+    app.calendar_colors = haste_tui::calendarcolors::CalendarColors::load(&base_dir());
     refresh(&mut app, &client);
+    if app.calendar_colors.ignored > 0 {
+        app.status = format!(
+            "calendar_colors.json: {} entries were not understood and are left out",
+            app.calendar_colors.ignored
+        );
+    }
     let mut last_reminders = Instant::now();
     let mut last_logs = Instant::now() - LOGS_EVERY;
     let (archive_jobs, archive_done) = archive_worker(client.clone());

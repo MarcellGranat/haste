@@ -591,6 +591,8 @@ pub struct App {
     pub event_form: Option<Box<crate::eventedit::EventForm>>,
     /// The popup that adds an event, while `Mode::NewEvent`.
     pub new_event: Option<Box<crate::eventnew::NewEventForm>>,
+    /// The colour of each calendar on the Calendar tab (`calendar_colors.json`).
+    pub calendar_colors: crate::calendarcolors::CalendarColors,
     /// The duration popup while `Mode::TaskDuration`: reminder id, title, minutes.
     pub task_duration: Option<(String, String, crate::durfield::DurationEdit)>,
     /// Every known project label, offered in the reminder popup.
@@ -769,6 +771,7 @@ impl App {
             remind: None,
             event_form: None,
             new_event: None,
+            calendar_colors: crate::calendarcolors::CalendarColors::default(),
             task_duration: None,
             known_labels: Vec::new(),
             labeler: None,

@@ -1728,6 +1728,8 @@ struct Placed {
     label: String,
     task: bool,
     shifted: bool,
+    /// The colour of the event's calendar; `None` for a task.
+    colour: Option<Color>,
     index: usize,
 }
 
@@ -1778,7 +1780,7 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
     // place the items: timed ones in the grid, all-day ones in the strip above it
     let mut placed: Vec<Placed> = Vec::new();
-    let mut all_day: Vec<Vec<(String, usize)>> = vec![Vec::new(); days.len()];
+    let mut all_day: Vec<Vec<(String, usize, Color)>> = vec![Vec::new(); days.len()];
     for (index, row) in rows.iter().enumerate() {
         let at = row.at();
         let Some(day) = days.iter().position(|d| at >= *d && at < *d + 86_400) else {
@@ -1786,7 +1788,12 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         };
         match row {
             AgendaItem::Event(e) if e.event.all_day => {
-                all_day[day].push((inbox::sanitize(&e.event.title).replace('\n', " "), index));
+                all_day[day].push((
+                    inbox::sanitize(&e.event.title).replace('\n', " "),
+                    index,
+                    app.calendar_colors
+                        .colour(&e.event.calendar, &e.calendar_name),
+                ));
             }
             AgendaItem::Event(e) => placed.push(Placed {
                 day,
@@ -1797,6 +1804,10 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 label: inbox::sanitize(&e.event.title).replace('\n', " "),
                 task: false,
                 shifted: e.shifted,
+                colour: Some(
+                    app.calendar_colors
+                        .colour(&e.event.calendar, &e.calendar_name),
+                ),
                 index,
             }),
             AgendaItem::Task { reminder, at } => placed.push(Placed {
@@ -1808,6 +1819,7 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 label: inbox::sanitize(&reminder.reminder.title).replace('\n', " "),
                 task: true,
                 shifted: false,
+                colour: None,
                 index,
             }),
         }
@@ -1912,12 +1924,12 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
             theme::muted(),
         )];
         for items in &all_day {
-            let (text, index) = match items.get(s) {
-                Some((t, i)) if s + 1 == strip && items.len() > strip => {
-                    (format!(" {t} +{}", items.len() - strip), Some(*i))
+            let (text, index, colour) = match items.get(s) {
+                Some((t, i, c)) if s + 1 == strip && items.len() > strip => {
+                    (format!(" {t} +{}", items.len() - strip), Some(*i), *c)
                 }
-                Some((t, i)) => (format!(" {t}"), Some(*i)),
-                None => (String::new(), None),
+                Some((t, i, c)) => (format!(" {t}"), Some(*i), *c),
+                None => (String::new(), None, theme::SAPPHIRE),
             };
             let selected = index == Some(app.calendar_selected);
             spans.push(Span::styled(
@@ -1928,7 +1940,7 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
                         .bg(theme::MAUVE)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::new().fg(theme::SAPPHIRE)
+                    Style::new().fg(colour)
                 },
             ));
         }
@@ -2032,10 +2044,13 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
                         .fg(theme::BASE)
                         .bg(theme::MAUVE)
                         .add_modifier(Modifier::BOLD)
-                } else if p.task {
-                    Style::new().fg(theme::PEACH).bg(theme::SURFACE0)
+                } else if let Some(colour) = p.colour {
+                    // an event in its calendar's colour: the colour on a tint of itself
+                    Style::new()
+                        .fg(colour)
+                        .bg(crate::calendarcolors::tint(colour, 28))
                 } else {
-                    Style::new().fg(theme::TEXT).bg(theme::SURFACE1)
+                    Style::new().fg(theme::PEACH).bg(theme::SURFACE0)
                 };
                 spans.push(Span::styled(lane_text(&text, w), style));
                 at = x + w;
@@ -2053,18 +2068,20 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let selected = rows.get(app.calendar_selected);
     let describe = match selected {
         Some(AgendaItem::Event(e)) if e.event.all_day => format!(
-            "{} · all day · {}",
+            "{} · all day · {} · {}",
             inbox::day_label(e.event.start_at, 0),
-            inbox::sanitize(&e.event.title).replace('\n', " ")
+            inbox::sanitize(&e.event.title).replace('\n', " "),
+            calendar_label(e)
         ),
         Some(AgendaItem::Event(e)) => {
             let end = inbox::stamp(e.event.end_at, off);
             format!(
-                "{} {}–{} · {}{}",
+                "{} {}–{} · {} · {}{}",
                 inbox::day_label(e.event.start_at, off),
                 &inbox::stamp(e.event.start_at, off)[11..],
                 &end[11..],
                 inbox::sanitize(&e.event.title).replace('\n', " "),
+                calendar_label(e),
                 if e.shifted {
                     " · moved here only · R puts it back"
                 } else {
@@ -2089,6 +2106,18 @@ fn draw_calendar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Style::new().fg(theme::TEXT),
     )));
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The name of an event's calendar for the line under the grid: its name, else "local only"
+/// for an event that lives only here, else its id.
+fn calendar_label(e: &haste_proto::EventView) -> String {
+    if !e.calendar_name.trim().is_empty() {
+        inbox::sanitize(&e.calendar_name)
+    } else if e.event.calendar == haste_core::model::LOCAL_CALENDAR {
+        "local only".to_owned()
+    } else {
+        inbox::sanitize(&e.event.calendar)
+    }
 }
 
 /// A length of time as it is edited: its text, then the unit digits are typed in (the picked
@@ -2397,18 +2426,26 @@ fn draw_new_event(frame: &mut Frame<'_>, app: &App, area: Rect) {
     // the calendar: every choice in a row, the picked one lit
     let on_calendar = form.field == Field::Calendar;
     let mut calendar_row = vec![label("Calendar", on_calendar)];
-    let names = std::iter::once("local only".to_owned())
-        .chain(form.calendars.iter().map(|(_, name)| inbox::sanitize(name)));
-    for (i, name) in names.enumerate() {
+    let local = (
+        haste_core::model::LOCAL_CALENDAR.to_owned(),
+        "local only".to_owned(),
+    );
+    let names = std::iter::once(&local).chain(form.calendars.iter());
+    for (i, (id, name)) in names.enumerate() {
         let on = i == form.picked;
+        // each calendar in its own colour, the picked one marked
+        let colour = app.calendar_colors.colour(id, name);
         calendar_row.push(Span::styled(
-            format!(" {name} "),
+            format!(" {} ", inbox::sanitize(name)),
             if on && on_calendar {
-                picked
+                Style::new()
+                    .fg(theme::BASE)
+                    .bg(colour)
+                    .add_modifier(Modifier::BOLD)
             } else if on {
-                Style::new().fg(theme::MAUVE).add_modifier(Modifier::BOLD)
+                Style::new().fg(colour).add_modifier(Modifier::BOLD)
             } else {
-                dim
+                Style::new().fg(colour)
             },
         ));
     }
@@ -3351,6 +3388,68 @@ mod tests {
             "no weekend: {text}"
         );
         assert!(text.contains("Enter edits"), "{text}");
+    }
+
+    /// The colour the text `needle` is drawn in on the screen, if it is there.
+    fn colour_of(app: &App, needle: &str) -> Option<ratatui::style::Color> {
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let cells = terminal.backend().buffer().content().to_vec();
+        let n = needle.chars().count();
+        (0..cells.len().saturating_sub(n)).find_map(|i| {
+            let text: String = cells[i..i + n].iter().map(|c| c.symbol()).collect();
+            (text == needle).then(|| cells[i].fg)
+        })
+    }
+
+    #[test]
+    fn events_are_drawn_in_their_calendars_colour_from_the_file_or_the_palette() {
+        use crate::calendarcolors::CalendarColors;
+        let mut app = App::new();
+        app.view = crate::app::View::Calendar;
+        app.tz_offset = 0;
+        let now = haste_core::time::now_secs();
+        let weekday = |t: i64| (t.div_euclid(86_400) + 3).rem_euclid(7);
+        let mut day = now - now.rem_euclid(86_400) + 86_400;
+        while weekday(day) >= 5 {
+            day += 86_400;
+        }
+        app.calendar_week =
+            (inbox::week_start(day, 0, 0) - inbox::week_start(now, 0, 0)) / (7 * 86_400);
+        let ev = |id: &str, calendar: &str, name: &str, hour: i64| haste_proto::EventView {
+            event: haste_core::model::Event {
+                id: id.into(),
+                external_id: id.into(),
+                calendar: calendar.into(),
+                title: format!("t-{id}"),
+                start_at: day + hour * 3_600,
+                end_at: day + hour * 3_600 + 3_000,
+                all_day: false,
+                status: "confirmed".into(),
+                attendees: vec![],
+                location: String::new(),
+                description_snippet: String::new(),
+                updated_at: 0,
+                missing_since: None,
+                version: 1,
+            },
+            tags: vec![],
+            shifted: false,
+            calendar_name: name.into(),
+        };
+        app.set_events(vec![
+            ev("w", "cal-w", "Work", 9),
+            ev("h", "cal-h", "Home", 12),
+            ev("l", "local", "", 15),
+        ]);
+        // move the cursor off the events so none is drawn as selected
+        app.calendar_selected = 99;
+        app.calendar_colors = CalendarColors::parse(r##"{ "Work": "#ff0000", "home": "green" }"##);
+        let red = ratatui::style::Color::Rgb(255, 0, 0);
+        assert_eq!(colour_of(&app, "t-w"), Some(red));
+        assert_eq!(colour_of(&app, "t-h"), Some(crate::theme::GREEN));
+        // a calendar the file does not name gets its own colour from the palette
+        assert_eq!(colour_of(&app, "t-l"), Some(crate::theme::SKY));
     }
 
     #[test]

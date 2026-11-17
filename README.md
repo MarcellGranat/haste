@@ -445,6 +445,25 @@ target/human/release/haste connector gcal auth
 - An update proposed against an event that changed afterwards is marked STALE and needs your
   acknowledgement (`--ack-stale`).
 
+### Calendar colours
+
+In the TUI's Calendar tab every calendar has a colour of its own: one picked from a built-in
+palette by the calendar's id (the same colour every time), or the one you choose in
+`calendar_colors.json` in the data folder (`~/Library/Application Support/haste`, or `$HASTE_HOME`).
+The file is one JSON object from a calendar to a colour:
+
+```json
+{ "Work": "#f38ba8", "me@example.org": "teal", "local": "sky" }
+```
+
+- A calendar is named by its name or its id; capitals do not matter. `local` is the events that
+  live only in haste (`c` on the Calendar tab, "local only").
+- A colour is `#rrggbb`, `#rgb` or one of the palette names: rosewater, flamingo, pink, mauve, red,
+  maroon, peach, yellow, green, teal, sky, sapphire, blue, lavender.
+- Mauve (the cursor) and red (the line for the time now) are not in the automatic palette, so they
+  keep meaning one thing. The file is read when the TUI starts; an entry that is not understood is
+  left out and the status line says how many.
+
 ### Known limits
 
 - The first sync lists the whole calendar (Google only gives a sync token for an unwindowed

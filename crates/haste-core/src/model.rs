@@ -239,6 +239,9 @@ pub struct RepeatRule {
 /// Most characters of an event description kept locally.
 pub const DESCRIPTION_SNIPPET_MAX: usize = 280;
 
+/// The calendar name of an event that lives here only (never sent to Google).
+pub const LOCAL_CALENDAR: &str = "local";
+
 /// A calendar event mirrored from Google Calendar. Scope tags and triage state are stored apart
 /// (keyed by `external_id`) so a re-sync never drops them. Titles, descriptions, locations and
 /// attendee addresses are never written to logs or audit records.

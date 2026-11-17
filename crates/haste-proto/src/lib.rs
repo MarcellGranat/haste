@@ -345,6 +345,13 @@ pub enum RequestBody {
         #[serde(default)]
         until: Option<i64>,
     },
+    /// Human-only: add an event that lives here only (calendar `local`); nothing is sent to
+    /// Google. Times are unix seconds.
+    EventCreateLocal {
+        title: String,
+        start: i64,
+        end: i64,
+    },
     /// Human-only: how long a task takes on the calendar (30 minutes, 1, 2, 3 or 4 hours),
     /// here only.
     ReminderDuration {

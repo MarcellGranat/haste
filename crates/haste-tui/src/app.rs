@@ -345,6 +345,13 @@ pub enum Effect {
         reminder_id: String,
         minutes: u32,
     },
+    /// Add a calendar event: to this Google calendar, or here only when `None`.
+    CreateEvent {
+        calendar: Option<String>,
+        title: String,
+        start: i64,
+        end: i64,
+    },
     /// Move or resize a calendar event here only (`None` puts it back as Google has it).
     ShiftEvent {
         event_id: String,
@@ -525,6 +532,8 @@ pub enum Mode {
     RemindForm,
     /// The popup that moves or resizes a calendar event here only (`app.event_form`).
     EventEdit,
+    /// The popup that adds a calendar event (`app.new_event`).
+    NewEvent,
     /// How long a task takes on the calendar (`app.task_duration`).
     TaskDuration,
     /// The emoji keyboard, opened with Ctrl-e in a text field: a key types its emoji into the
@@ -580,6 +589,8 @@ pub struct App {
     pub remind: Option<Box<crate::remind::RemindForm>>,
     /// The event popup, while `Mode::EventEdit`.
     pub event_form: Option<Box<crate::eventedit::EventForm>>,
+    /// The popup that adds an event, while `Mode::NewEvent`.
+    pub new_event: Option<Box<crate::eventnew::NewEventForm>>,
     /// The duration popup while `Mode::TaskDuration`: reminder id, title, minutes.
     pub task_duration: Option<(String, String, crate::durfield::DurationEdit)>,
     /// Every known project label, offered in the reminder popup.
@@ -757,6 +768,7 @@ impl App {
             compose: None,
             remind: None,
             event_form: None,
+            new_event: None,
             task_duration: None,
             known_labels: Vec::new(),
             labeler: None,
@@ -1438,6 +1450,7 @@ impl App {
             } => self.key_snooze(key, thread_id, input, todo, pick),
             Mode::RemindForm => self.key_remind_form(key),
             Mode::EventEdit => self.key_event_edit(key),
+            Mode::NewEvent => self.key_new_event(key),
             Mode::TaskDuration => self.key_task_duration(key),
             Mode::Emoji { back } => self.key_emoji(key, *back),
             Mode::ReplyChoice { thread_id } => self.key_reply_choice(key, thread_id),
@@ -1600,6 +1613,8 @@ impl App {
             Key::Char(']') if self.view == View::Calendar => self.calendar_week_step(Some(1)),
             Key::Char('[') if self.view == View::Calendar => self.calendar_week_step(Some(-1)),
             Key::Char('T') if self.view == View::Calendar => self.calendar_week_step(None),
+            // a new event, whatever is under the cursor
+            Key::Char('c') if self.view == View::Calendar => self.start_new_event(),
             Key::Char('h') | Key::Left if self.view == View::Calendar => {
                 self.calendar_day_step(false);
             }
@@ -3011,6 +3026,64 @@ impl App {
         self.mode = Mode::EventEdit;
     }
 
+    /// `c` on the Calendar tab: the popup that adds an event. It starts on the day under the
+    /// cursor (today when there is nothing), at the next full hour today or at 10:00 on another
+    /// day, and lasts an hour.
+    fn start_new_event(&mut self) {
+        let off = self.tz_offset;
+        let now = haste_core::time::now_secs();
+        let today = inbox::day_start(now, off);
+        let day = self
+            .agenda()
+            .get(self.calendar_selected)
+            .map_or(today, |r| inbox::day_start(r.at(), off));
+        let start = if day <= today {
+            (now.div_euclid(3_600) + 1) * 3_600
+        } else {
+            day + inbox::DEFAULT_REMINDER_HOUR * 3_600
+        };
+        // the Google calendars the events on screen come from
+        let mut calendars: Vec<String> = self
+            .events
+            .iter()
+            .map(|e| e.event.calendar.clone())
+            .filter(|c| c != haste_core::model::LOCAL_CALENDAR)
+            .collect();
+        calendars.sort();
+        calendars.dedup();
+        self.new_event = Some(Box::new(crate::eventnew::NewEventForm::new(
+            calendars, start, 60, off,
+        )));
+        self.mode = Mode::NewEvent;
+    }
+
+    fn key_new_event(&mut self, key: Key) -> Option<Effect> {
+        let form = self.new_event.as_mut()?;
+        match form.handle(key) {
+            crate::eventnew::Outcome::Continue => None,
+            crate::eventnew::Outcome::Cancel => {
+                self.new_event = None;
+                self.mode = Mode::Normal;
+                None
+            }
+            crate::eventnew::Outcome::Create {
+                calendar,
+                title,
+                start,
+                end,
+            } => {
+                self.new_event = None;
+                self.mode = Mode::Normal;
+                Some(Effect::CreateEvent {
+                    calendar,
+                    title,
+                    start,
+                    end,
+                })
+            }
+        }
+    }
+
     fn key_event_edit(&mut self, key: Key) -> Option<Effect> {
         let form = self.event_form.as_mut()?;
         let (event_id, outcome) = (form.event_id.clone(), form.handle(key));
@@ -3892,7 +3965,7 @@ mod tests {
             }]
         );
         // opening a blocked thread does not mark it read, and actions are refused
-        press(&mut app, "\n");
+        app.handle_key(Key::Enter);
         let view = app.threads[1].clone();
         app.show_thread(view, vec![], None);
         assert!(app.reader.as_ref().unwrap().blocked);
@@ -5591,5 +5664,70 @@ mod tests {
         for mail in ["gmail", "icloud", "email"] {
             assert_eq!(send_delay(mail), Duration::from_secs(10), "{mail}");
         }
+    }
+
+    #[test]
+    fn c_on_the_calendar_opens_the_new_event_popup_with_local_only_and_adds_the_event() {
+        let mut app = App::new();
+        let now = haste_core::time::now_secs();
+        pin_week(&mut app, on_a_weekday(now, 3_600));
+        app.set_events(vec![event_view("e1", on_a_weekday(now, 3_600), 60, false)]);
+        press(&mut app, "3");
+        assert_eq!(app.view, View::Calendar);
+        press(&mut app, "c");
+        assert_eq!(app.mode, Mode::NewEvent);
+        let form = app.new_event.as_ref().unwrap();
+        assert_eq!(form.calendar(), None, "local only is the default");
+        assert_eq!(
+            form.calendars,
+            vec!["c".to_owned()],
+            "the calendars on screen"
+        );
+        // Enter to the title, type it, Enter to the start, Enter to the length, Enter adds it
+        app.handle_key(Key::Enter);
+        for c in "Dentist".chars() {
+            app.handle_key(Key::Char(c));
+        }
+        app.handle_key(Key::Enter);
+        app.handle_key(Key::Enter);
+        let Some(Effect::CreateEvent {
+            calendar,
+            title,
+            start,
+            end,
+        }) = app.handle_key(Key::Enter)
+        else {
+            panic!("expected CreateEvent");
+        };
+        assert_eq!((calendar, title.as_str()), (None, "Dentist"));
+        assert_eq!(end - start, 3_600);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.new_event.is_none());
+    }
+
+    #[test]
+    fn escape_closes_the_new_event_popup_and_a_google_calendar_can_be_picked() {
+        let mut app = App::new();
+        app.view = View::Calendar;
+        press(&mut app, "c");
+        assert_eq!(app.mode, Mode::NewEvent);
+        assert!(app.handle_key(Key::Esc).is_none());
+        assert_eq!(app.mode, Mode::Normal);
+        // with an event on screen from a Google calendar, Down picks it
+        let now = haste_core::time::now_secs();
+        pin_week(&mut app, on_a_weekday(now, 3_600));
+        app.set_events(vec![event_view("e1", on_a_weekday(now, 3_600), 60, false)]);
+        press(&mut app, "c");
+        app.handle_key(Key::Down);
+        app.handle_key(Key::Enter);
+        for c in "Lunch".chars() {
+            app.handle_key(Key::Char(c));
+        }
+        app.handle_key(Key::Enter);
+        app.handle_key(Key::Enter);
+        let Some(Effect::CreateEvent { calendar, .. }) = app.handle_key(Key::Enter) else {
+            panic!("expected CreateEvent");
+        };
+        assert_eq!(calendar.as_deref(), Some("c"));
     }
 }

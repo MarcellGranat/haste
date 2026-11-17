@@ -10,6 +10,7 @@ pub mod durfield;
 pub mod editor;
 pub mod emoji;
 pub mod eventedit;
+pub mod eventnew;
 pub mod extract;
 pub mod inbox;
 pub mod logs;

@@ -104,6 +104,7 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::ReadSet { .. }
         | RequestBody::SenderRules
         | RequestBody::EventShift { .. }
+        | RequestBody::EventCreateLocal { .. }
         | RequestBody::ReminderDuration { .. }
         | RequestBody::ReminderLater { .. }
         | RequestBody::ScheduledList
@@ -159,6 +160,7 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::ReadSet { .. } => "read_set",
         RequestBody::SenderRules => "sender_rules",
         RequestBody::EventShift { .. } => "event_shift",
+        RequestBody::EventCreateLocal { .. } => "event_create_local",
         RequestBody::ReminderDuration { .. } => "reminder_duration",
         RequestBody::ReminderLater { .. } => "reminder_later",
         RequestBody::ScheduleSend { .. } => "schedule_send",
@@ -788,6 +790,9 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
         RequestBody::EventShift { event_id, times } => {
             event_shift(state, principal, &event_id, times)
         }
+        RequestBody::EventCreateLocal { title, start, end } => {
+            event_create_local(state, principal, &title, start, end)
+        }
         RequestBody::SenderRules => {
             let (mute, mut errors) = read_rule_file(&state.config.data_dir, ignore::IGNORE_FILE);
             let (priority, e2) = read_rule_file(&state.config.data_dir, ignore::PRIORITY_FILE);
@@ -1128,6 +1133,44 @@ fn change_reminder_tag(
 
 /// Event reads pass through the same scope filter as thread and reminder reads.
 /// How long a task takes on the calendar, here only: one of the offered lengths.
+/// The longest a local event may last.
+const LOCAL_EVENT_MAX_SECS: i64 = 24 * 3_600;
+/// The longest a local event title may be (characters).
+const LOCAL_EVENT_TITLE_MAX: usize = 200;
+
+/// Add an event that lives here only. The audit carries the id, never the title.
+fn event_create_local(
+    state: &State,
+    actor: &Principal,
+    title: &str,
+    start: i64,
+    end: i64,
+) -> Response {
+    let title = title.trim();
+    if title.is_empty() || title.chars().count() > LOCAL_EVENT_TITLE_MAX {
+        return err(
+            ErrorCode::Validation,
+            "an event needs a title of up to 200 characters",
+        );
+    }
+    if end <= start || end - start > LOCAL_EVENT_MAX_SECS {
+        return err(
+            ErrorCode::Validation,
+            "an event lasts up to a day and ends after it starts",
+        );
+    }
+    match state
+        .store
+        .create_local_event(title, start, end, now_secs())
+    {
+        Ok(id) => {
+            state.audit(&actor.id, "event.create_local", "created", Some(&id), None);
+            Response::Done
+        }
+        Err(e) => map_store(&e),
+    }
+}
+
 fn reminder_duration(
     state: &State,
     actor: &Principal,

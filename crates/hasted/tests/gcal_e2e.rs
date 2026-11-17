@@ -408,6 +408,58 @@ async fn an_all_day_event_given_a_time_is_a_timed_one_here_until_put_back() {
 }
 
 #[tokio::test]
+async fn a_local_event_is_added_by_the_human_only_and_never_sent_to_google() {
+    let rig = boot().await;
+    release_and_sync(&rig).await;
+    let add = |title: &str, start: i64, end: i64| RequestBody::EventCreateLocal {
+        title: title.into(),
+        start,
+        end,
+    };
+    let (start, end) = (4_000_000_000, 4_000_003_600);
+    // an agent cannot
+    let token = agent(&rig).await;
+    assert_eq!(
+        code(&call(&rig, &token, add("Dentist", start, end)).await),
+        Some(ErrorCode::Denied)
+    );
+    // nonsense is refused: no title, ends before it starts, longer than a day
+    for bad in [
+        add("  ", start, end),
+        add("x", end, start),
+        add("x", start, start + 2 * 86_400),
+    ] {
+        assert_eq!(code(&human(&rig, bad).await), Some(ErrorCode::Validation));
+    }
+    assert!(matches!(
+        human(&rig, add("Dentist", start, end)).await,
+        Response::Done
+    ));
+    let mine: Vec<_> = events_of(&rig)
+        .await
+        .into_iter()
+        .filter(|e| e.event.calendar == haste_core::model::LOCAL_CALENDAR)
+        .collect();
+    assert_eq!(mine.len(), 1);
+    assert_eq!((mine[0].event.start_at, mine[0].event.end_at), (start, end));
+    // a new read of Google leaves it alone, and Google was never written
+    sync_once(&rig.daemon.state, &rig.connector).await.unwrap();
+    assert_eq!(
+        events_of(&rig)
+            .await
+            .iter()
+            .filter(|e| e.event.calendar == haste_core::model::LOCAL_CALENDAR)
+            .count(),
+        1
+    );
+    assert!(writes(&rig).is_empty(), "nothing was sent to Google");
+    let audit = std::fs::read_to_string(rig.daemon.state.config.data_dir.join("audit.jsonl"))
+        .unwrap_or_default();
+    assert!(audit.contains("event.create_local") && !audit.contains("Dentist"));
+    rig.daemon.shutdown().await;
+}
+
+#[tokio::test]
 async fn invalid_calendar_proposals_are_refused_at_creation_and_pending_ones_write_nothing() {
     let rig = boot().await;
     release_and_sync(&rig).await;

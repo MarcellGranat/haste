@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashMap};
 use haste_core::auth::new_id;
 use haste_core::connector::CalendarSweep;
 use haste_core::herdr::ProjectTag;
-use haste_core::model::{Event, Identifier, IdentifierKind};
+use haste_core::model::{Event, Identifier, IdentifierKind, LOCAL_CALENDAR};
 use haste_core::proposal::{Payload, Proposal, ProposalState};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
@@ -243,6 +243,41 @@ impl Store {
             ))?;
             let rows = stmt.query_map([from], from_row)?;
             Ok(rows.collect::<Result<_, _>>()?)
+        })
+    }
+
+    /// Add an event that lives here only: calendar `local`, never sent anywhere. Returns its id.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn create_local_event(
+        &self,
+        title: &str,
+        start: i64,
+        end: i64,
+        now: i64,
+    ) -> StoreResult<String> {
+        let title = title.to_owned();
+        self.write(move |conn| {
+            let id = new_id();
+            let event = Event {
+                id: id.clone(),
+                external_id: format!("local:{id}"),
+                calendar: LOCAL_CALENDAR.to_owned(),
+                title,
+                start_at: start,
+                end_at: end,
+                all_day: false,
+                status: "confirmed".into(),
+                attendees: Vec::new(),
+                location: String::new(),
+                description_snippet: String::new(),
+                updated_at: now,
+                missing_since: None,
+                version: 1,
+            };
+            insert_event(conn, &id, &event, 1, None)?;
+            Ok(id)
         })
     }
 
@@ -722,5 +757,24 @@ mod tests {
         s.begin_execution(&p.id, false, 3).unwrap();
         let back = s.fail_execution(&p.id, "permission needed", 4).unwrap();
         assert_eq!(back.state, ProposalState::Approved);
+    }
+
+    #[test]
+    fn a_local_event_is_stored_listed_and_left_alone_by_a_google_sweep() {
+        let (_d, s) = test_store();
+        let id = s.create_local_event("Dentist", 2_000, 5_600, 10).unwrap();
+        let listed = s.list_events(0).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, id);
+        assert_eq!(listed[0].calendar, LOCAL_CALENDAR);
+        assert_eq!(listed[0].external_id, format!("local:{id}"));
+        assert_eq!((listed[0].start_at, listed[0].end_at), (2_000, 5_600));
+        // a sweep of a Google calendar does not touch it
+        let sweep = CalendarSweep {
+            calendar: "primary".into(),
+            id: "s1".into(),
+        };
+        s.upsert_events(&[], &[sweep]).unwrap();
+        assert_eq!(s.list_events(0).unwrap().len(), 1);
     }
 }

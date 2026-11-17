@@ -64,6 +64,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     if *base == Mode::EventEdit {
         draw_event_edit(frame, app, frame.area());
     }
+    if *base == Mode::NewEvent {
+        draw_new_event(frame, app, frame.area());
+    }
     if *base == Mode::TaskDuration {
         draw_task_duration(frame, app, frame.area());
     }
@@ -665,7 +668,12 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         }
         View::Channels => vec![("Enter", "open"), ("j/k", "move")],
         View::Calendar => {
-            let mut h = vec![("j/k", "move"), ("[ ]", "week"), ("T", "this week")];
+            let mut h = vec![
+                ("j/k", "move"),
+                ("c", "new event"),
+                ("[ ]", "week"),
+                ("T", "this week"),
+            ];
             if app
                 .agenda()
                 .get(app.calendar_selected)
@@ -2358,6 +2366,110 @@ fn draw_event_edit(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// The popup that adds a calendar event: the calendar first, then what and when.
+fn draw_new_event(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    use crate::eventedit::Part;
+    use crate::eventnew::Field;
+    let Some(form) = &app.new_event else {
+        return;
+    };
+    let rect = centered(area, 72.min(area.width.saturating_sub(4)), 10);
+    frame.render_widget(Clear, rect);
+    let block = theme::panel(" New event ").border_style(pane_border(true));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let text = Style::new().fg(theme::TEXT);
+    let dim = Style::new().fg(theme::OVERLAY0);
+    let picked = Style::new()
+        .fg(theme::BASE)
+        .bg(theme::MAUVE)
+        .add_modifier(Modifier::BOLD);
+    let label = |name: &str, on: bool| {
+        Span::styled(
+            format!("{} {name:<9}", if on { "▌" } else { " " }),
+            if on {
+                Style::new().fg(theme::MAUVE).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(theme::SUBTEXT0)
+            },
+        )
+    };
+    // the calendar: every choice in a row, the picked one lit
+    let on_calendar = form.field == Field::Calendar;
+    let mut calendar_row = vec![label("Calendar", on_calendar)];
+    let names = std::iter::once("local only".to_owned())
+        .chain(form.calendars.iter().map(|c| inbox::sanitize(c)));
+    for (i, name) in names.enumerate() {
+        let on = i == form.picked;
+        calendar_row.push(Span::styled(
+            format!(" {name} "),
+            if on && on_calendar {
+                picked
+            } else if on {
+                Style::new().fg(theme::MAUVE).add_modifier(Modifier::BOLD)
+            } else {
+                dim
+            },
+        ));
+    }
+    let (day, hour, minute) = form.start_parts();
+    let part = |s: String, p: Part| {
+        let on = form.field == Field::Start && form.part() == p;
+        Span::styled(format!(" {s} "), if on { picked } else { text })
+    };
+    let end = inbox::stamp(form.end(), app.tz_offset);
+    let on_title = form.field == Field::Title;
+    let title_line = Line::from(vec![
+        label("Title", on_title),
+        Span::styled(
+            if form.title.is_empty() && !on_title {
+                "(what is it?)".to_owned()
+            } else {
+                inbox::sanitize(&form.title)
+            },
+            if form.title.is_empty() { dim } else { text },
+        ),
+        Span::styled(
+            if on_title { "▏" } else { "" },
+            Style::new().fg(theme::MAUVE),
+        ),
+    ]);
+    let mut lasts = vec![label("Lasts", form.field == Field::Duration)];
+    lasts.extend(duration_spans(
+        form.duration(),
+        form.field == Field::Duration,
+    ));
+    lasts.push(Span::styled(format!("  ends {}", &end[11..]), dim));
+    let lines = vec![
+        Line::from(calendar_row),
+        Line::from(Span::styled(
+            if form.picked == 0 {
+                "           stays on this machine, nothing goes to Google"
+            } else {
+                "           created in that Google calendar (guests are not emailed)"
+            },
+            dim,
+        )),
+        title_line,
+        Line::from(vec![
+            label("Starts", form.field == Field::Start),
+            part(day, Part::Day),
+            Span::styled("│", dim),
+            part(hour, Part::Hour),
+            Span::styled(":", dim),
+            part(minute, Part::Minute),
+        ]),
+        Line::from(lasts),
+        Line::default(),
+        Line::from(Span::styled(
+            "  ←→ choose · Tab or Enter next · ↑↓ change · type a number · Enter on Lasts adds it",
+            dim,
+        )),
+        Line::from(Span::styled("  Esc cancels", dim)),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 /// The opened thread: every message, oldest first, wrapped to the panel and scrollable.
 fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(reader) = &app.reader else {
@@ -3238,6 +3350,25 @@ mod tests {
             "no weekend: {text}"
         );
         assert!(text.contains("Enter edits"), "{text}");
+    }
+
+    #[test]
+    fn the_new_event_popup_offers_local_only_first_and_says_what_it_does() {
+        let mut app = App::new();
+        app.view = crate::app::View::Calendar;
+        app.handle_key(crate::app::Key::Char('c'));
+        let text = render(&app);
+        for needle in [
+            "New event",
+            "local only",
+            "Title",
+            "Starts",
+            "Lasts",
+            "Esc cancels",
+        ] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
+        assert!(text.contains("nothing goes to Google"), "{text}");
     }
 
     #[test]

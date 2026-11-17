@@ -163,6 +163,47 @@ fn complete_reminder(client: &Client, id: &str) -> Result<(), String> {
     }))
 }
 
+/// Add an event to a Google calendar as the human: propose, approve and run, through the same
+/// audited steps as any other calendar create. Guests are never emailed.
+fn create_google_event(
+    client: &Client,
+    calendar: String,
+    title: String,
+    start: i64,
+    end: i64,
+) -> Result<(), String> {
+    let proposal = match client.call(RequestBody::Propose {
+        payload: haste_core::proposal::Payload::CalendarCreate {
+            calendar,
+            title,
+            start,
+            end,
+            all_day: false,
+            attendees: Vec::new(),
+            description: None,
+            project: None,
+        },
+        thread_id: None,
+        idempotency_key: format!("tui-event-{}-{start}", haste_core::time::now_secs()),
+        hints: None,
+    }) {
+        Ok(Response::Proposal { proposal }) => proposal,
+        other => {
+            return Err(describe(other)
+                .err()
+                .unwrap_or_else(|| "no proposal".into()))
+        }
+    };
+    describe(client.call(RequestBody::Approve {
+        proposal_id: proposal.id.clone(),
+        acknowledge_stale: false,
+    }))?;
+    describe(client.call(RequestBody::Execute {
+        proposal_id: proposal.id,
+        acknowledge_stale: false,
+    }))
+}
+
 /// `<data>/labels_recent`: one label per line, the last used first.
 fn recent_labels() -> Vec<String> {
     std::fs::read_to_string(base_dir().join("labels_recent"))
@@ -564,6 +605,29 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 Ok(()) => format!("the task takes {} on the calendar", inbox_minutes(minutes)),
                 Err(e) => e,
             };
+        }
+        Effect::CreateEvent {
+            calendar,
+            title,
+            start,
+            end,
+        } => {
+            app.status = match calendar {
+                None => {
+                    match describe(client.call(RequestBody::EventCreateLocal { title, start, end }))
+                    {
+                        Ok(()) => "event added (here only)".into(),
+                        Err(e) => format!("event not added: {e}"),
+                    }
+                }
+                Some(calendar) => match create_google_event(client, calendar, title, start, end) {
+                    Ok(()) => "event added to Google Calendar".into(),
+                    Err(e) => format!("event not added: {e}"),
+                },
+            };
+            // the new event shows now, not at the next refresh
+            refresh(app, client);
+            return false;
         }
         Effect::ShiftEvent { event_id, times } => {
             app.status = match describe(client.call(RequestBody::EventShift { event_id, times })) {

@@ -935,6 +935,7 @@ fn kind(body: &RequestBody) -> Kind {
         | RequestBody::SenderRules
         | RequestBody::EventShift { .. }
         | RequestBody::EventCreateLocal { .. }
+        | RequestBody::EventDeleteLocal { .. }
         | RequestBody::ReminderDuration { .. }
         | RequestBody::ReminderLater { .. }
         | RequestBody::ScheduleSend { .. }

@@ -22,8 +22,9 @@ use crate::theme;
 pub const FILE: &str = "calendar_colors.json";
 
 /// The names a colour may be written as.
-pub const NAMES: [(&str, Color); 14] = [
+pub const NAMES: [(&str, Color); 15] = [
     ("rosewater", theme::ROSEWATER),
+    ("rose", theme::ROSEWATER),
     ("flamingo", theme::FLAMINGO),
     ("pink", theme::PINK),
     ("mauve", theme::MAUVE),

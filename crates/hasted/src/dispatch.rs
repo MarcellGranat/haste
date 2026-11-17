@@ -105,6 +105,7 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::SenderRules
         | RequestBody::EventShift { .. }
         | RequestBody::EventCreateLocal { .. }
+        | RequestBody::EventDeleteLocal { .. }
         | RequestBody::ReminderDuration { .. }
         | RequestBody::ReminderLater { .. }
         | RequestBody::ScheduledList
@@ -161,6 +162,7 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::SenderRules => "sender_rules",
         RequestBody::EventShift { .. } => "event_shift",
         RequestBody::EventCreateLocal { .. } => "event_create_local",
+        RequestBody::EventDeleteLocal { .. } => "event_delete_local",
         RequestBody::ReminderDuration { .. } => "reminder_duration",
         RequestBody::ReminderLater { .. } => "reminder_later",
         RequestBody::ScheduleSend { .. } => "schedule_send",
@@ -790,6 +792,9 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
         RequestBody::EventShift { event_id, times } => {
             event_shift(state, principal, &event_id, times)
         }
+        RequestBody::EventDeleteLocal { event_id } => {
+            event_delete_local(state, principal, &event_id)
+        }
         RequestBody::EventCreateLocal { title, start, end } => {
             event_create_local(state, principal, &title, start, end)
         }
@@ -1133,6 +1138,24 @@ fn change_reminder_tag(
 
 /// Event reads pass through the same scope filter as thread and reminder reads.
 /// How long a task takes on the calendar, here only: one of the offered lengths.
+/// Delete an event that lives here only. Google's events are never deleted by haste.
+fn event_delete_local(state: &State, actor: &Principal, event_id: &str) -> Response {
+    match state.store.delete_local_event(event_id) {
+        Ok(true) => {
+            state.audit(
+                actor.id.as_str(),
+                "event.delete_local",
+                "deleted",
+                Some(event_id),
+                None,
+            );
+            Response::Done
+        }
+        Ok(false) => err(ErrorCode::NotFound, "no local event with that id"),
+        Err(e) => map_store(&e),
+    }
+}
+
 /// The longest a local event may last.
 const LOCAL_EVENT_MAX_SECS: i64 = 24 * 3_600;
 /// The longest a local event title may be (characters).

@@ -456,6 +456,31 @@ async fn a_local_event_is_added_by_the_human_only_and_never_sent_to_google() {
     let audit = std::fs::read_to_string(rig.daemon.state.config.data_dir.join("audit.jsonl"))
         .unwrap_or_default();
     assert!(audit.contains("event.create_local") && !audit.contains("Dentist"));
+    // only the human deletes it, and only a local one
+    let id = mine[0].event.id.clone();
+    let delete = |event_id: &str| RequestBody::EventDeleteLocal {
+        event_id: event_id.into(),
+    };
+    assert_eq!(
+        code(&call(&rig, &token, delete(&id)).await),
+        Some(ErrorCode::Denied)
+    );
+    let google = events_of(&rig)
+        .await
+        .into_iter()
+        .find(|e| e.event.calendar != haste_core::model::LOCAL_CALENDAR)
+        .unwrap();
+    assert_eq!(
+        code(&human(&rig, delete(&google.event.id)).await),
+        Some(ErrorCode::NotFound),
+        "a Google event is never deleted"
+    );
+    assert!(matches!(human(&rig, delete(&id)).await, Response::Done));
+    assert!(events_of(&rig)
+        .await
+        .iter()
+        .all(|e| e.event.calendar != haste_core::model::LOCAL_CALENDAR));
+    assert!(writes(&rig).is_empty());
     rig.daemon.shutdown().await;
 }
 

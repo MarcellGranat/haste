@@ -671,6 +671,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             let mut h = vec![
                 ("j/k", "move"),
                 ("c", "new event"),
+                ("x", "delete (local only)"),
                 ("[ ]", "week"),
                 ("T", "this week"),
             ];

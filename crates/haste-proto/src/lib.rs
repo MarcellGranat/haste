@@ -352,6 +352,11 @@ pub enum RequestBody {
         start: i64,
         end: i64,
     },
+    /// Human-only: delete an event that lives here only (calendar `local`). A Google event is
+    /// refused.
+    EventDeleteLocal {
+        event_id: String,
+    },
     /// Human-only: how long a task takes on the calendar (30 minutes, 1, 2, 3 or 4 hours),
     /// here only.
     ReminderDuration {

@@ -606,6 +606,14 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 Err(e) => e,
             };
         }
+        Effect::DeleteEvent { event_id } => {
+            app.status = match describe(client.call(RequestBody::EventDeleteLocal { event_id })) {
+                Ok(()) => "event deleted".into(),
+                Err(e) => format!("event not deleted: {e}"),
+            };
+            refresh(app, client);
+            return false;
+        }
         Effect::CreateEvent {
             calendar,
             title,

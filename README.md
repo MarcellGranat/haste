@@ -458,7 +458,7 @@ The file is one JSON object from a calendar to a colour:
 
 - A calendar is named by its name or its id; capitals do not matter. `local` is the events that
   live only in haste (`c` on the Calendar tab, "local only").
-- A colour is `#rrggbb`, `#rgb` or one of the palette names: rosewater, flamingo, pink, mauve, red,
+- A colour is `#rrggbb`, `#rgb` or one of the palette names: rosewater (or rose), flamingo, pink, mauve, red,
   maroon, peach, yellow, green, teal, sky, sapphire, blue, lavender.
 - Mauve (the cursor) and red (the line for the time now) are not in the automatic palette, so they
   keep meaning one thing. The file is read when the TUI starts; an entry that is not understood is

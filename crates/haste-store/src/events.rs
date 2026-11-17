@@ -246,6 +246,39 @@ impl Store {
         })
     }
 
+    /// Delete an event that lives here only (calendar `local`) with what hangs on it. Returns
+    /// false when there is no such local event: a Google event is never deleted.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn delete_local_event(&self, id: &str) -> StoreResult<bool> {
+        let id = id.to_owned();
+        self.write(move |conn| {
+            let tx = conn.transaction()?;
+            let external: Option<String> = tx
+                .query_row(
+                    "SELECT external_id FROM events WHERE id = ?1 AND calendar = ?2",
+                    params![id, LOCAL_CALENDAR],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(external) = external else {
+                return Ok(false);
+            };
+            tx.execute(
+                "DELETE FROM event_overrides WHERE external_id = ?1",
+                [&external],
+            )?;
+            tx.execute(
+                "DELETE FROM event_scope_tags WHERE external_id = ?1",
+                [&external],
+            )?;
+            tx.execute("DELETE FROM events WHERE id = ?1", [&id])?;
+            tx.commit()?;
+            Ok(true)
+        })
+    }
+
     /// Remember the names of calendars (by id), replacing an older name.
     ///
     /// # Errors
@@ -822,5 +855,19 @@ mod tests {
         let names = s.calendar_names().unwrap();
         assert_eq!(names.get("a").map(String::as_str), Some("Office"));
         assert_eq!(names.get("b").map(String::as_str), Some("Home"));
+    }
+
+    #[test]
+    fn only_a_local_event_can_be_deleted() {
+        let (_d, s) = test_store();
+        s.upsert_events(&[ev("primary", "1", "a")], &[]).unwrap();
+        let google = s.list_events(0).unwrap()[0].id.clone();
+        let local = s.create_local_event("Dentist", 2_000, 5_600, 10).unwrap();
+        assert!(!s.delete_local_event(&google).unwrap(), "Google's stays");
+        assert!(s.delete_local_event(&local).unwrap());
+        assert!(!s.delete_local_event(&local).unwrap(), "already gone");
+        let left = s.list_events(0).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].id, google);
     }
 }

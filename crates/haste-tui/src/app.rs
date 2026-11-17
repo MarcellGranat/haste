@@ -345,6 +345,10 @@ pub enum Effect {
         reminder_id: String,
         minutes: u32,
     },
+    /// Delete a calendar event that lives here only.
+    DeleteEvent {
+        event_id: String,
+    },
     /// Add a calendar event: to this Google calendar, or here only when `None`.
     CreateEvent {
         calendar: Option<String>,
@@ -480,6 +484,11 @@ pub enum Mode {
     },
     /// `d` in the Outbox: discard this draft?
     ConfirmDiscardDraft(String),
+    /// Delete a local event (its haste id and its title, for the question).
+    ConfirmDeleteEvent {
+        event_id: String,
+        title: String,
+    },
     /// Esc in the editor with something written: save it as a draft?
     ConfirmDiscardCompose,
     /// Choosing when a reply goes out (the editor, or an Outbox draft).
@@ -1486,6 +1495,9 @@ impl App {
             ),
             Mode::ConfirmDiscardCompose => self.key_discard_compose(key),
             Mode::ConfirmDiscardDraft(id) => self.confirm(key, Effect::Reject { id }),
+            Mode::ConfirmDeleteEvent { event_id, .. } => {
+                self.confirm(key, Effect::DeleteEvent { event_id })
+            }
             Mode::SendAt {
                 target,
                 input,
@@ -1616,6 +1628,21 @@ impl App {
             Key::Char(']') if self.view == View::Calendar => self.calendar_week_step(Some(1)),
             Key::Char('[') if self.view == View::Calendar => self.calendar_week_step(Some(-1)),
             Key::Char('T') if self.view == View::Calendar => self.calendar_week_step(None),
+            // delete an event that lives here only; a Google event is not touched
+            Key::Char('x') if self.view == View::Calendar => match self.event_under_cursor() {
+                Some(e) if e.event.calendar == haste_core::model::LOCAL_CALENDAR => {
+                    self.mode = Mode::ConfirmDeleteEvent {
+                        event_id: e.event.id.clone(),
+                        title: inbox::sanitize(&e.event.title).replace('\n', " "),
+                    };
+                }
+                Some(_) => {
+                    self.status =
+                        "only an event made here (local only) can be deleted; this one is Google's"
+                            .into();
+                }
+                None => {}
+            },
             // a new event, whatever is under the cursor
             Key::Char('c') if self.view == View::Calendar => self.start_new_event(),
             Key::Char('h') | Key::Left if self.view == View::Calendar => {
@@ -3292,6 +3319,9 @@ impl App {
                 Some(format!("Thread changed. Approve {id} anyway? [y/N]"))
             }
             Mode::ConfirmDiscardDraft(_) => Some("Discard this draft? [y/N]".into()),
+            Mode::ConfirmDeleteEvent { title, .. } => Some(format!(
+                "Delete the event \"{title}\"? It lives only here and cannot come back. [y/N]"
+            )),
             Mode::ConfirmDiscardCompose => {
                 Some("Save the draft? y save · n discard · any other key keeps editing".into())
             }
@@ -5741,5 +5771,38 @@ mod tests {
             panic!("expected CreateEvent");
         };
         assert_eq!(calendar.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn x_deletes_a_local_event_after_asking_and_leaves_a_google_one_alone() {
+        let mut app = App::new();
+        let now = haste_core::time::now_secs();
+        pin_week(&mut app, on_a_weekday(now, 3_600));
+        let mut local = event_view("loc", on_a_weekday(now, 3_600), 60, false);
+        local.event.calendar = haste_core::model::LOCAL_CALENDAR.into();
+        app.set_events(vec![local]);
+        press(&mut app, "3");
+        press(&mut app, "x");
+        assert!(matches!(app.mode, Mode::ConfirmDeleteEvent { .. }));
+        assert!(app.confirm_prompt().unwrap().contains("event-loc"));
+        // anything but y cancels
+        assert!(press(&mut app, "n").is_empty());
+        assert_eq!(app.mode, Mode::Normal);
+        press(&mut app, "x");
+        let effects = press(&mut app, "y");
+        assert_eq!(
+            effects,
+            vec![Effect::DeleteEvent {
+                event_id: "loc".into()
+            }]
+        );
+        // a Google event is not offered for deletion
+        let mut app = App::new();
+        pin_week(&mut app, on_a_weekday(now, 3_600));
+        app.set_events(vec![event_view("g", on_a_weekday(now, 3_600), 60, false)]);
+        press(&mut app, "3");
+        press(&mut app, "x");
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.status.contains("Google"), "{}", app.status);
     }
 }

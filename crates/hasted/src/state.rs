@@ -247,6 +247,24 @@ impl State {
         self.sync_waker(source).notify_one();
     }
 
+    /// Ask for a sync now and again a little later (after about 2, 7 and 19 seconds): a message
+    /// just sent may take a moment to show in the provider's own store, and the sync that finds
+    /// it is what makes an open thread show it.
+    pub fn wake_sync_after_send(&self, source: &Source) {
+        /// Pauses before each further sync.
+        const FOLLOW_UPS: [u64; 3] = [2, 5, 12];
+        let waker = self.sync_waker(source);
+        waker.notify_one();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                for secs in FOLLOW_UPS {
+                    tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                    waker.notify_one();
+                }
+            });
+        }
+    }
+
     pub fn register_connector(&self, connector: Arc<dyn Connector>) {
         // A connector that asks for it starts engaged the first time it is ever registered. A
         // persisted choice (engaged or released) is never overridden.

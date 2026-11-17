@@ -3718,9 +3718,9 @@ fn send(
                             None,
                         );
                     }
-                    // fetch the source now, so the sent message shows in the thread at once
-                    // instead of at the next poll
-                    state.wake_sync(&resolved.source);
+                    // fetch the source now and again shortly, so the sent message shows in the
+                    // open thread (the provider may not have it yet at the first try)
+                    state.wake_sync_after_send(&resolved.source);
                     state.publish(Event::ProposalChanged {
                         proposal_id: proposal_id.to_owned(),
                         state: p.state,

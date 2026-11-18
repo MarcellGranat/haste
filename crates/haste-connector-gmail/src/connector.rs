@@ -103,6 +103,8 @@ pub struct GmailConnector {
     account: String,
     /// The inbox tabs whose mail is loaded.
     tabs: crate::mapper::Tabs,
+    /// The label probe has run once since the start (or is not wanted: see [`Self::with_probe`]).
+    probed: std::sync::atomic::AtomicBool,
 }
 
 impl GmailConnector {
@@ -138,7 +140,17 @@ impl GmailConnector {
             client: GmailClient::new(http, api_base, Arc::new(tokens)),
             account: config.account.clone(),
             tabs: crate::mapper::Tabs::PRIMARY_ONLY,
+            // off unless asked for
+            probed: std::sync::atomic::AtomicBool::new(true),
         }
+    }
+
+    /// Run the label probe once after the start: it logs the fixed labels of the newest threads
+    /// Gmail lists as Primary, and stores nothing. Off by default; a diagnostic.
+    #[must_use]
+    pub fn with_probe(self, on: bool) -> Self {
+        self.probed.store(!on, std::sync::atomic::Ordering::Relaxed);
+        self
     }
 
     /// Load these inbox tabs (the default is Primary only).
@@ -292,7 +304,61 @@ impl GmailConnector {
         Ok((batch, later))
     }
 
+    /// Once per start: read the newest threads Gmail lists as Primary and log, for each, only
+    /// the fixed labels its messages carry (one letter per label, one group per message). Nothing
+    /// is stored. It shows how Gmail's own Primary search and the labels of a thread relate.
+    async fn probe_labels(&self) {
+        if self.probed.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let Ok(list) = self.client.list_threads(BACKFILL_DAYS, None, true).await else {
+            return;
+        };
+        for t in list.threads.iter().take(25) {
+            tokio::time::sleep(THREAD_GET_PACING).await;
+            let Ok(Some(api)) = self.client.get_thread(&t.id).await else {
+                continue;
+            };
+            let groups: Vec<String> = api
+                .messages
+                .iter()
+                .map(|m| {
+                    [
+                        ("INBOX", 'I'),
+                        ("CATEGORY_PERSONAL", 'P'),
+                        ("CATEGORY_PROMOTIONS", 'R'),
+                        ("CATEGORY_UPDATES", 'U'),
+                        ("CATEGORY_SOCIAL", 'S'),
+                        ("CATEGORY_FORUMS", 'F'),
+                        ("UNREAD", 'N'),
+                        ("SENT", 'T'),
+                        ("DRAFT", 'D'),
+                        ("IMPORTANT", 'M'),
+                        ("STARRED", '*'),
+                    ]
+                    .iter()
+                    .filter(|(l, _)| m.label_ids.iter().any(|x| x == l))
+                    .map(|(_, c)| *c)
+                    .collect::<String>()
+                })
+                .collect();
+            haste_core::log::info(
+                "gmail",
+                "probe",
+                &[
+                    haste_core::log::id("thread", &t.id),
+                    haste_core::log::id("labels", &groups.join(".")),
+                    haste_core::log::n(
+                        "wanted",
+                        usize::from(crate::mapper::is_wanted_inbox(&api, &self.tabs)),
+                    ),
+                ],
+            );
+        }
+    }
+
     async fn delta(&self, cursor: Cursor) -> Result<Batch, ConnectorError> {
+        self.probe_labels().await;
         let (start, pending) = split_cursor(&cursor.0);
         // threads that could not be read last time are asked for again
         let mut changed: BTreeSet<String> = pending.into_iter().collect();

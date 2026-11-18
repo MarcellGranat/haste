@@ -360,7 +360,9 @@ pub fn start_gmail(state: &Arc<State>, base: &Path) -> Result<bool, String> {
     let config = GmailConfig::load(base)?;
     let connector: Arc<dyn haste_core::connector::Connector> = Arc::new(
         GmailConnector::from_config(&config, Arc::new(KeychainStore))
-            .with_tabs(haste_connector_gmail::mapper::Tabs::load(base)),
+            .with_tabs(haste_connector_gmail::mapper::Tabs::load(base))
+            // a diagnostic: the file `gmail_probe` in the data folder turns it on for one start
+            .with_probe(base.join("gmail_probe").exists()),
     );
     state.register_connector(Arc::clone(&connector));
     tokio::spawn(scheduler::sync_loop(

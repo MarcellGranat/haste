@@ -169,12 +169,12 @@ impl GmailConnector {
                 None => break,
             }
         }
-        let (mut batch, complete) = self
-            .fetch_threads(ids.iter().map(String::as_str), true)
+        let (mut batch, later) = self
+            .fetch_threads_skipping(ids.iter().map(String::as_str))
             .await?;
-        // Only a full backfill moves to incremental sync. A partial one keeps what it read (the
-        // newest threads) and the next cycle tries again.
-        batch.next_cursor = complete.then_some(Cursor(history_id));
+        // The backfill moves to incremental sync at once; a thread Gmail refused now rides along
+        // in the cursor and is read again next cycle.
+        batch.next_cursor = Some(Cursor(join_cursor(&history_id, &later)));
         Ok(batch)
     }
 
@@ -196,36 +196,7 @@ impl GmailConnector {
         self.client.get_thread(id).await
     }
 
-    async fn fetch_threads<'a>(
-        &self,
-        ids: impl Iterator<Item = &'a str>,
-        partial_ok: bool,
-    ) -> Result<(Batch, bool), ConnectorError> {
-        let mut batch = Batch::default();
-        for id in ids {
-            tokio::time::sleep(THREAD_GET_PACING).await;
-            // A thread deleted since it was listed is simply skipped.
-            let read = match self.get_thread_patiently(id).await {
-                // Rate limited for good: keep what was read (a backfill only), stop here.
-                Err(ConnectorError::Transient(_)) if partial_ok && !batch.threads.is_empty() => {
-                    return Ok((batch, false));
-                }
-                other => other?,
-            };
-            // Only the default inbox is loaded; other folders and tabs are skipped.
-            if let Some(api) = read.filter(|t| crate::mapper::is_wanted_inbox(t, &self.tabs)) {
-                let mapped = map_thread(&api);
-                batch
-                    .unread
-                    .push((mapped.thread.external_id.clone(), mapped.labels.unread));
-                batch.threads.push(mapped.thread);
-                batch.messages.extend(mapped.messages);
-            }
-        }
-        Ok((batch, true))
-    }
-
-    /// Like [`Self::fetch_threads`], but a thread Gmail keeps refusing does not stop the others:
+    /// Read these threads in full. A thread Gmail keeps refusing does not stop the others:
     /// it is left out and returned for a later cycle. After [`MAX_SKIPPED_IN_A_ROW`] refusals in
     /// a row the rest is left for later too, so a real throttle is not hammered.
     async fn fetch_threads_skipping<'a>(
@@ -240,6 +211,7 @@ impl GmailConnector {
         // why a thread was not kept: no Inbox label at all, or the tab it is in (counts only)
         let (mut no_inbox, mut promotions, mut updates, mut social, mut forums) =
             (0_usize, 0_usize, 0_usize, 0_usize, 0_usize);
+        let mut personal_and_other = 0_usize;
         for id in ids {
             if in_a_row >= MAX_SKIPPED_IN_A_ROW {
                 later.push(id.to_owned());
@@ -277,6 +249,21 @@ impl GmailConnector {
                     }
                 }
                 Some(api) => {
+                    // a thread carrying the Personal label beside another category label:
+                    // counted, so it is visible how often Gmail does this
+                    let has = |label: &str| {
+                        api.messages
+                            .iter()
+                            .any(|m| m.label_ids.iter().any(|l| l == label))
+                    };
+                    if has("CATEGORY_PERSONAL")
+                        && (has("CATEGORY_PROMOTIONS")
+                            || has("CATEGORY_UPDATES")
+                            || has("CATEGORY_SOCIAL")
+                            || has("CATEGORY_FORUMS"))
+                    {
+                        personal_and_other += 1;
+                    }
                     let mapped = map_thread(&api);
                     batch
                         .unread
@@ -297,6 +284,7 @@ impl GmailConnector {
                 haste_core::log::n("updates", updates),
                 haste_core::log::n("social", social),
                 haste_core::log::n("forums", forums),
+                haste_core::log::n("personal_and_other", personal_and_other),
                 haste_core::log::n("gone", gone),
                 haste_core::log::n("later", later.len()),
             ],

@@ -237,7 +237,7 @@ impl Tabs {
 }
 
 /// Is this thread in the inbox, in one of the tabs that are loaded? True when one of its
-/// messages sits in INBOX in such a tab (no category label is Primary). Anything else (other
+/// messages sits in INBOX in such a tab (no category label, or the Personal one, is Primary). Anything else (other
 /// folders, spam, archived, tabs left out) is not loaded.
 #[must_use]
 pub fn is_wanted_inbox(api: &ApiThread, tabs: &Tabs) -> bool {
@@ -250,7 +250,8 @@ pub fn is_wanted_inbox(api: &ApiThread, tabs: &Tabs) -> bool {
             || has("CATEGORY_SOCIAL")
             || has("CATEGORY_UPDATES")
             || has("CATEGORY_FORUMS");
-        (tabs.primary && !other)
+        // Gmail's "Personal" category is the Primary tab: it counts even beside another one
+        (tabs.primary && (has("CATEGORY_PERSONAL") || !other))
             || (tabs.promotions && has("CATEGORY_PROMOTIONS"))
             || (tabs.social && has("CATEGORY_SOCIAL"))
             || (tabs.updates && has("CATEGORY_UPDATES"))

@@ -89,7 +89,6 @@ pub enum View {
     Later,
     /// Secondary screens, opened with 5, 6 and 7.
     Approvals,
-    Connectors,
     /// Mail from muted senders (hidden everywhere else).
     Muted,
     /// The last screen: what the daemon has been doing (its log), for debugging.
@@ -661,7 +660,6 @@ pub struct App {
     pub reminders: Option<RemindersStatusView>,
     /// Threads being archived in the background: out of the list already, back if it fails.
     pub pending_archive: std::collections::HashSet<String>,
-    pub connectors_selected: usize,
     pub machines: Vec<MachineView>,
     /// Upcoming calendar events, soonest first (read-only).
     pub events: Vec<EventView>,
@@ -820,7 +818,6 @@ impl App {
             connectors: Vec::new(),
             reminders: None,
             pending_archive: std::collections::HashSet::new(),
-            connectors_selected: 0,
             machines: Vec::new(),
             events: Vec::new(),
             calendar_selected: 0,
@@ -1321,15 +1318,14 @@ impl App {
             .today_selected
             .min(self.today_threads().len().saturating_sub(1));
         self.todo_selected = self.todo_selected.min(self.todos().len().saturating_sub(1));
-        self.channels_selected = self.channels_selected.min(inbox::CHANNELS.len() - 1);
+        self.channels_selected = self
+            .channels_selected
+            .min(self.channel_rows().len().saturating_sub(1));
         self.channel_thread_selected = self.channel_thread_selected.min(
             self.channel_threads(self.channels_selected)
                 .len()
                 .saturating_sub(1),
         );
-        self.connectors_selected = self
-            .connectors_selected
-            .min(self.connectors.len().saturating_sub(1));
         self.calendar_selected = self
             .calendar_selected
             .min(self.agenda().len().saturating_sub(1));
@@ -1361,14 +1357,13 @@ impl App {
             View::Channels if self.channel_inner => {
                 self.channel_threads(self.channels_selected).len()
             }
-            View::Channels => inbox::CHANNELS.len(),
+            View::Channels => self.channel_rows().len(),
             View::Calendar => self.agenda().len(),
             View::Later if self.later_focus == TodayFocus::Todo => self.later_todos().len(),
             View::Later => self.later_threads().len(),
             View::Muted => self.muted_threads().len(),
             View::Logs => self.shown_logs().len(),
             View::Approvals => self.rows().len(),
-            View::Connectors => self.connectors.len(),
         }
     }
 
@@ -1384,7 +1379,6 @@ impl App {
             View::Muted => &mut self.muted_selected,
             View::Logs => &mut self.logs_selected,
             View::Approvals => &mut self.approvals_selected,
-            View::Connectors => &mut self.connectors_selected,
         }
     }
 
@@ -1592,9 +1586,8 @@ impl App {
             Key::Char('3') => self.view = View::Calendar,
             Key::Char('4') => self.view = View::Later,
             Key::Char('5') => self.view = View::Approvals,
-            Key::Char('6') => self.view = View::Connectors,
-            Key::Char('7') => self.view = View::Muted,
-            Key::Char('8') => self.view = View::Logs,
+            Key::Char('6') => self.view = View::Muted,
+            Key::Char('7') => self.view = View::Logs,
             Key::Char('w') if self.view == View::Logs => {
                 self.logs_problems = !self.logs_problems;
                 self.logs_selected = self.shown_logs().len().saturating_sub(1);
@@ -1677,8 +1670,12 @@ impl App {
             Key::Char('t') if thread_view => self.start_remind(),
             Key::Char('r') if thread_view => return self.start_reply(),
             Key::Char('0') => self.jump(false),
-            Key::Char('R') if self.view == View::Connectors => self.start_release(),
-            Key::Char('E') if self.view == View::Connectors => return self.engage_selected(),
+            Key::Char('R') if self.view == View::Channels && !self.channel_inner => {
+                self.start_release();
+            }
+            Key::Char('E') if self.view == View::Channels && !self.channel_inner => {
+                return self.engage_selected();
+            }
             Key::Char('j') | Key::Down => self.move_selection(1),
             Key::Char('k') | Key::Up => self.move_selection(-1),
             // half a screen of rows
@@ -1698,9 +1695,31 @@ impl App {
         None
     }
 
+    /// The rows of the Channels tab: the six channels, then the other connectors (calendar,
+    /// reminders, ...), each with its status.
+    #[must_use]
+    pub fn channel_rows(&self) -> Vec<String> {
+        let mut rows: Vec<String> = inbox::CHANNELS.iter().map(|c| (*c).to_owned()).collect();
+        rows.extend(
+            self.connectors
+                .iter()
+                .filter(|c| !inbox::CHANNELS.contains(&c.source.as_str()))
+                .map(|c| c.source.clone()),
+        );
+        rows
+    }
+
+    /// The connector of the row under the cursor on the Channels tab.
+    fn selected_connector(&self) -> Option<&ConnectorView> {
+        let rows = self.channel_rows();
+        let name = rows.get(self.channels_selected)?;
+        self.connectors.iter().find(|c| c.source == *name)
+    }
+
     /// Releasing needs a `y`: the connector starts talking to the provider again.
     fn start_release(&mut self) {
-        let Some(c) = self.connectors.get(self.connectors_selected) else {
+        let Some(c) = self.selected_connector() else {
+            self.status = "this channel has no connector loaded".into();
             return;
         };
         if !c.engaged {
@@ -1712,7 +1731,10 @@ impl App {
 
     /// Engaging is the safe direction, so it needs no confirmation.
     fn engage_selected(&mut self) -> Option<Effect> {
-        let c = self.connectors.get(self.connectors_selected)?;
+        let Some(c) = self.selected_connector() else {
+            self.status = "this channel has no connector loaded".into();
+            return None;
+        };
         if c.engaged {
             self.status = format!("{} is already engaged", c.source);
             return None;
@@ -3839,7 +3861,7 @@ mod tests {
         assert_eq!(app.channel_threads(0).len(), 1);
         assert_eq!(ids(app.muted_threads()), ["t2"]);
         // the last screen: Esc goes back, b takes the sender off the mute list
-        press(&mut app, "7");
+        press(&mut app, "6");
         assert_eq!(app.view, View::Muted);
         assert_eq!(
             press(&mut app, "b"),
@@ -3883,7 +3905,7 @@ mod tests {
         assert!(matches!(app.mode, Mode::ConfirmDeleteThread { .. }));
         app.handle_key(Key::Esc);
         assert_eq!(app.mode, Mode::Normal);
-        press(&mut app, "7");
+        press(&mut app, "6");
         assert!(press(&mut app, "d").is_empty());
         assert!(matches!(app.mode, Mode::ConfirmDeleteMuted { .. }));
         let prompt = app.confirm_prompt().unwrap();
@@ -4606,11 +4628,11 @@ mod tests {
     #[test]
     fn esc_dismisses_the_footer_notice_before_it_does_anything_else() {
         let mut app = inbox_app();
-        app.view = View::Connectors;
+        app.view = View::Muted;
         app.notices.push("a send needs a check".into());
         app.handle_key(Key::Esc);
         assert!(app.notices.is_empty());
-        assert_eq!(app.view, View::Connectors, "the first Esc only dismisses");
+        assert_eq!(app.view, View::Muted, "the first Esc only dismisses");
         app.handle_key(Key::Esc);
         assert_eq!(app.view, View::Today);
     }
@@ -4783,7 +4805,7 @@ mod tests {
     #[test]
     fn the_logs_screen_follows_the_end_unless_the_cursor_is_higher_up() {
         let mut app = App::new();
-        press(&mut app, "8");
+        press(&mut app, "7");
         assert_eq!(app.view, View::Logs);
         app.set_logs(vec![log(1, "info", "a"), log(2, "warn", "b")]);
         assert_eq!(app.logs_selected, 1, "on the last line");
@@ -5627,22 +5649,49 @@ mod tests {
     fn connectors_app() -> App {
         let mut app = approvals_app();
         app.set_connectors(connectors());
-        press(&mut app, "6");
-        assert_eq!(app.view, View::Connectors);
+        press(&mut app, "2");
+        assert_eq!(app.view, View::Channels);
         app
     }
 
     #[test]
-    fn connectors_panel_navigates_with_vi_keys() {
+    fn the_channels_list_has_the_other_connectors_after_the_channels() {
         let mut app = connectors_app();
-        press(&mut app, "j");
-        assert_eq!(app.connectors_selected, 1);
-        press(&mut app, "j");
-        assert_eq!(app.connectors_selected, 1);
-        press(&mut app, "g");
-        assert_eq!(app.connectors_selected, 0);
+        let mut all = connectors();
+        all.push(ConnectorView {
+            source: "gcal".into(),
+            engaged: false,
+            registered: true,
+            last_synced: None,
+        });
+        app.set_connectors(all);
+        let rows = app.channel_rows();
+        assert_eq!(rows.len(), inbox::CHANNELS.len() + 1);
+        assert_eq!(rows.last().map(String::as_str), Some("gcal"));
         press(&mut app, "G");
-        assert_eq!(app.connectors_selected, 1);
+        assert_eq!(app.channels_selected, rows.len() - 1);
+        // a connector row can be stopped from here, and has no threads
+        assert!(app.channel_threads(app.channels_selected).is_empty());
+        assert_eq!(
+            app.handle_key(Key::Char('E')),
+            Some(Effect::EngageConnector {
+                source: "gcal".into()
+            })
+        );
+    }
+
+    #[test]
+    fn the_channels_list_navigates_with_vi_keys() {
+        let mut app = connectors_app();
+        let last = app.channel_rows().len() - 1;
+        press(&mut app, "j");
+        assert_eq!(app.channels_selected, 1);
+        press(&mut app, "G");
+        assert_eq!(app.channels_selected, last);
+        press(&mut app, "j");
+        assert_eq!(app.channels_selected, last);
+        press(&mut app, "g");
+        assert_eq!(app.channels_selected, 0);
     }
 
     #[test]

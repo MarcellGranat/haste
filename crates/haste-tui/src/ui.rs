@@ -38,7 +38,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         View::Muted => draw_muted(frame, app, body),
         View::Logs => draw_logs(frame, app, body),
         View::Approvals => draw_approvals(frame, app, body),
-        View::Connectors => draw_connectors(frame, app, body),
     }
     if let Mode::Detail(id) = &base {
         draw_detail(frame, app, id, body);
@@ -606,14 +605,10 @@ fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
         tab(&approvals, app.view == View::Approvals)
     });
     spans.push(tab(
-        &format!("6 Connectors {}", app.connectors.len()),
-        app.view == View::Connectors,
-    ));
-    spans.push(tab(
-        &format!("7 Muted {}", app.muted_threads().len()),
+        &format!("6 Muted {}", app.muted_threads().len()),
         app.view == View::Muted,
     ));
-    spans.push(tab("8 Logs", app.view == View::Logs));
+    spans.push(tab("7 Logs", app.view == View::Logs));
     frame.render_widget(Paragraph::new(Line::from(spans)).style(theme::text()), area);
 }
 
@@ -666,7 +661,12 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             h.push(("Esc", "back"));
             h
         }
-        View::Channels => vec![("Enter", "open"), ("j/k", "move")],
+        View::Channels => vec![
+            ("Enter", "open"),
+            ("j/k", "move"),
+            ("R", "release a stopped one"),
+            ("E", "stop one"),
+        ],
         View::Calendar => {
             let mut h = vec![
                 ("j/k", "move"),
@@ -729,7 +729,6 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ("m/b", "settle NEEDS CHECK"),
             ("Esc", "back"),
         ],
-        View::Connectors => vec![("R", "release"), ("E", "engage"), ("Esc", "back")],
     }
 }
 
@@ -1663,10 +1662,12 @@ fn draw_channels(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let [left, right] =
         Layout::horizontal([Constraint::Length(34), Constraint::Min(20)]).areas(area);
     let now = haste_core::time::now_secs();
-    let channel_items: Vec<ListItem<'_>> = CHANNELS
+    let rows = app.channel_rows();
+    let channel_items: Vec<ListItem<'_>> = rows
         .iter()
         .enumerate()
         .map(|(i, name)| {
+            let is_channel = i < CHANNELS.len();
             let n = app.channel_threads(i).len();
             // when the channel was last read: stopped, never since the start, or the time
             // (yellow once it is overdue: a poll is every five minutes)
@@ -1682,13 +1683,22 @@ fn draw_channels(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 },
                 None => (String::new(), theme::MUTED),
             };
+            let count = if is_channel {
+                format!("{n:>4}")
+            } else {
+                "    ".to_owned()
+            };
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("● {name:<10}"),
-                    Style::new().fg(theme::channel_colour(name)),
+                    Style::new().fg(if is_channel {
+                        theme::channel_colour(name)
+                    } else {
+                        theme::SUBTEXT0
+                    }),
                 ),
                 Span::styled(
-                    format!("{n:>4}"),
+                    count,
                     Style::new().fg(if n > 0 { theme::TEXT } else { theme::MUTED }),
                 ),
                 Span::styled(format!(" ↻ {refreshed:>7}"), Style::new().fg(colour)),
@@ -1707,6 +1717,10 @@ fn draw_channels(frame: &mut Frame<'_>, app: &App, area: Rect) {
         left,
         &mut cs,
     );
+    if app.channels_selected >= CHANNELS.len() {
+        draw_connector_detail(frame, app, right, &rows);
+        return;
+    }
     let threads = app.channel_threads(app.channels_selected);
     let items: Vec<ListItem<'_>> = threads
         .iter()
@@ -2661,45 +2675,51 @@ fn draw_approvals(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
-fn draw_connectors(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let items: Vec<ListItem<'_>> = app
-        .connectors
-        .iter()
-        .map(|c| {
-            let (marker, style) = if c.engaged {
-                (
-                    "ENGAGED ",
-                    Style::new().fg(theme::DANGER).add_modifier(Modifier::BOLD),
-                )
+/// The right pane for a row that is a connector and not a channel (calendar, reminders, ...).
+fn draw_connector_detail(frame: &mut Frame<'_>, app: &App, area: Rect, rows: &[String]) {
+    let name = rows.get(app.channels_selected).cloned().unwrap_or_default();
+    let now = haste_core::time::now_secs();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    match app.connectors.iter().find(|c| c.source == name) {
+        Some(c) => {
+            let (state, colour) = if c.engaged {
+                ("STOPPED (engaged): R releases it", theme::DANGER)
             } else {
-                ("running ", Style::new().fg(theme::OK))
+                ("running", theme::OK)
             };
-            let loaded = if c.registered { "" } else { " (not loaded)" };
-            let extra = match (&app.reminders, c.source.as_str()) {
-                (Some(r), "reminders") => {
-                    let permission = if r.permission == "granted" {
-                        String::new()
-                    } else {
-                        format!(" · PERMISSION NEEDED ({})", r.permission)
-                    };
-                    format!(" · {} open / {} total{permission}", r.open, r.total)
+            lines.push(Line::from(Span::styled(
+                state,
+                Style::new().fg(colour).add_modifier(Modifier::BOLD),
+            )));
+            if !c.registered {
+                lines.push(Line::from("not loaded in the daemon"));
+            }
+            lines.push(Line::from(match c.last_synced {
+                Some(at) => format!(
+                    "last read {} ({})",
+                    inbox::refreshed_label(at, now, app.tz_offset),
+                    inbox::smart_stamp(at, now, app.tz_offset)
+                ),
+                None => "not read since the daemon started".to_owned(),
+            }));
+            if let (Some(r), "reminders") = (&app.reminders, name.as_str()) {
+                lines.push(Line::from(format!("{} open / {} total", r.open, r.total)));
+                if r.permission != "granted" {
+                    lines.push(Line::from(Span::styled(
+                        format!("PERMISSION NEEDED ({})", r.permission),
+                        Style::new().fg(theme::WARNING),
+                    )));
                 }
-                _ => String::new(),
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(marker, style),
-                Span::raw(format!("{}{loaded}{extra}", c.source)),
-            ]))
-        })
-        .collect();
-    let mut state = ListState::default().with_selected(Some(app.connectors_selected));
-    frame.render_stateful_widget(
-        List::new(items)
-            .block(theme::panel("R release (asks) · E engage · u refresh"))
-            .highlight_style(theme::selected())
-            .highlight_symbol("▌ "),
+            }
+        }
+        None => lines.push(Line::from("no connector loaded")),
+    }
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            theme::panel(&format!(" {name} · R release · E stop "))
+                .border_style(pane_border(false)),
+        ),
         area,
-        &mut state,
     );
 }
 
@@ -3298,7 +3318,7 @@ mod tests {
             !today.contains("subject-noisy"),
             "muted mail is not in the inbox"
         );
-        assert!(today.contains("7 Muted 1"), "{today}");
+        assert!(today.contains("6 Muted 1"), "{today}");
         app.view = crate::app::View::Muted;
         let muted = render(&app);
         assert!(muted.contains("subject-noisy") && !muted.contains("subject-friend"));
@@ -3494,6 +3514,43 @@ mod tests {
         );
         assert!(text.contains('—'), "never read since the start: {text}");
         assert!(text.contains('↻'), "{text}");
+    }
+
+    #[test]
+    fn the_channels_tab_lists_the_other_connectors_and_shows_their_state() {
+        let mut app = App::new();
+        app.tz_offset = 0;
+        let now = haste_core::time::now_secs();
+        app.set_connectors(vec![
+            haste_proto::ConnectorView {
+                source: "gcal".into(),
+                engaged: true,
+                registered: true,
+                last_synced: Some(now),
+            },
+            haste_proto::ConnectorView {
+                source: "reminders".into(),
+                engaged: false,
+                registered: true,
+                last_synced: None,
+            },
+        ]);
+        app.handle_key(crate::app::Key::Char('2'));
+        let text = render(&app);
+        assert!(
+            text.contains("gcal") && text.contains("reminders"),
+            "{text}"
+        );
+        assert!(!text.contains("6 Connectors"), "{text}");
+        // on the calendar row: its state and the keys
+        for _ in 0..crate::inbox::CHANNELS.len() {
+            app.handle_key(crate::app::Key::Char('j'));
+        }
+        let text = render(&app);
+        assert!(
+            text.contains("STOPPED") && text.contains("R release"),
+            "{text}"
+        );
     }
 
     #[test]

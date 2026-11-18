@@ -176,7 +176,7 @@ haste connector release gmail     # resume; sync continues from the saved cursor
 haste connector engage gmail      # stop talking to Gmail at once (cursor is kept)
 ```
 
-The same actions live in the TUI's Connectors tab (`R` release, asking for `y`; `E` engage).
+The same actions live in the TUI's Channels tab (`2`): the list shows every channel and the other connectors with when each was last read; `R` releases the one under the cursor (asking for `y`), `E` engages it.
 Agents cannot use any of this. The circuit breaker engages a switch by itself on a Google
 restriction or challenge, with no retry, and never releases it.
 
@@ -544,7 +544,7 @@ and has three main tabs, plus three secondary screens:
 | `1` Today | Two panes. **Incoming** (top): every channel under the active filter, priority first, then newest; 25 rows at a time, `j`/`k` scrolls through the rest. **TODO** (below): open Apple Reminders due today (overdue included) or with no date. `Tab` switches the cursor between the two panes |
 | `2` Channels | The same inbox by channel (gmail, icloud, whatsapp, messenger, imessage) with counts; `Enter` opens a channel, `Esc` goes back |
 | `3` Calendar | The next 7 days of your calendar, grouped by day (read-only, your local time) |
-| `4` `5` `6` | Approvals, Connectors, Agents (`Esc` returns to Today); the header shows the pending-approvals count |
+| `5` `6` `7` | Outbox, Muted, Logs (`Esc` returns to Today); the header shows the number of drafts waiting |
 
 On a thread (Today, or inside a channel), only you can use these keys:
 

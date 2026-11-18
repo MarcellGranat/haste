@@ -133,6 +133,19 @@ threads and messages, with their triage marks) and reads the inbox again from th
 changes at the provider. Use it after changing what is loaded, for example to drop the
 Promotions that were read before only the primary inbox was kept.
 
+### Which inbox tabs are loaded
+
+Only the Primary tab of the inbox is loaded by default; mail Gmail sorts into Promotions, Social,
+Updates or Forums, and archived mail, is left out. To load more, put `gmail_tabs.json` (no secret in
+it) in the data folder and restart `hasted`:
+
+```json
+{ "tabs": ["primary", "updates"] }
+```
+
+Names are `primary`, `promotions`, `social`, `updates`, `forums`, or `"all"`. Mail already left out
+comes in after `haste connector resync gmail` (or the next time its thread changes).
+
 ### Attachments: preview and save (human only)
 
 In the reader, `a` opens the attachments of the message under the cursor. `p` previews the

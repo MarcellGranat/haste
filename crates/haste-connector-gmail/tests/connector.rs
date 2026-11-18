@@ -167,6 +167,44 @@ async fn a_thread_gmail_keeps_refusing_does_not_stop_the_others_and_is_asked_for
     assert!(server.count("/gmail/v1/users/me/threads/stuck") > 4);
 }
 
+/// The three-message fixture with every message moved into the Promotions tab.
+fn promotions_thread() -> String {
+    THREAD_FULL.replace(r#""INBOX""#, r#""INBOX","CATEGORY_PROMOTIONS""#)
+}
+
+#[tokio::test]
+async fn a_promotions_thread_is_loaded_only_when_that_tab_is_chosen() {
+    let thread = promotions_thread();
+    assert!(
+        thread.contains("CATEGORY_PROMOTIONS"),
+        "the fixture has an inbox label"
+    );
+    let routes_for = |thread: String| {
+        move |r: &Recorded| match (r.method.as_str(), r.path.as_str()) {
+            ("GET", "/gmail/v1/users/me/threads/t100") => (200, thread.clone()),
+            _ => routes(|| {
+                (
+                    200,
+                    r#"{"history":[{"messages":[{"id":"m3","threadId":"t100"}]}],"historyId":"950"}"#
+                        .into(),
+                )
+            })(r),
+        }
+    };
+    // Primary only (the default): the thread is read and left out
+    let server = spawn(routes_for(thread.clone())).await;
+    let c = connector(&server, store_with_refresh());
+    let batch = c.fetch(Some(Cursor("900".into()))).await.unwrap();
+    assert!(batch.threads.is_empty());
+    // with the Promotions tab chosen it is kept
+    let server = spawn(routes_for(thread)).await;
+    let c = connector(&server, store_with_refresh()).with_tabs(
+        haste_connector_gmail::mapper::Tabs::from_names(&["promotions"]),
+    );
+    let batch = c.fetch(Some(Cursor("900".into()))).await.unwrap();
+    assert_eq!(batch.threads.len(), 1);
+}
+
 #[tokio::test]
 async fn empty_delta_returns_an_empty_batch_with_the_same_cursor() {
     let server = spawn(routes(|| (200, r#"{"historyId":"999"}"#.into()))).await;

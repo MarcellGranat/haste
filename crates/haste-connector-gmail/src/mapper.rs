@@ -146,21 +146,122 @@ fn map_message(message: &ApiMessage, thread_external_id: &str) -> Message {
     }
 }
 
-/// Is this thread in the default inbox? True when one of its messages sits in INBOX without a
-/// Promotions, Social, Updates or Forums category. Anything else (other folders, spam, archived,
-/// other tabs) is not loaded.
+/// Which inbox tabs are loaded. The default is Primary only; `gmail_tabs.json` in the data
+/// folder can add the others: `{ "tabs": ["primary", "updates"] }`, or `{ "tabs": "all" }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tabs {
+    pub primary: bool,
+    pub promotions: bool,
+    pub social: bool,
+    pub updates: bool,
+    pub forums: bool,
+}
+
+/// The file with the choice, in the data folder (no secret in it).
+pub const TABS_FILE: &str = "gmail_tabs.json";
+
+impl Tabs {
+    pub const PRIMARY_ONLY: Self = Self {
+        primary: true,
+        promotions: false,
+        social: false,
+        updates: false,
+        forums: false,
+    };
+    pub const ALL: Self = Self {
+        primary: true,
+        promotions: true,
+        social: true,
+        updates: true,
+        forums: true,
+    };
+
+    /// Only Primary: Gmail's own search can then do the filtering.
+    #[must_use]
+    pub fn is_primary_only(&self) -> bool {
+        *self == Self::PRIMARY_ONLY
+    }
+
+    /// The tabs a text names (`primary`, `promotions`, `social`, `updates`, `forums`, capitals
+    /// do not matter); a name that is not one of them is left out, and an empty choice falls
+    /// back to Primary.
+    #[must_use]
+    pub fn from_names<S: AsRef<str>>(names: &[S]) -> Self {
+        let mut tabs = Self {
+            primary: false,
+            ..Self::PRIMARY_ONLY
+        };
+        for name in names {
+            match name.as_ref().trim().to_lowercase().as_str() {
+                "primary" => tabs.primary = true,
+                "promotions" => tabs.promotions = true,
+                "social" => tabs.social = true,
+                "updates" => tabs.updates = true,
+                "forums" => tabs.forums = true,
+                "all" => return Self::ALL,
+                _ => {}
+            }
+        }
+        if tabs
+            == (Self {
+                primary: false,
+                ..Self::PRIMARY_ONLY
+            })
+        {
+            Self::PRIMARY_ONLY
+        } else {
+            tabs
+        }
+    }
+
+    /// The choice in `gmail_tabs.json` in `dir`; no file, or one that cannot be read, is
+    /// Primary only.
+    #[must_use]
+    pub fn load(dir: &std::path::Path) -> Self {
+        let Ok(text) = std::fs::read_to_string(dir.join(TABS_FILE)) else {
+            return Self::PRIMARY_ONLY;
+        };
+        let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&text)
+        else {
+            return Self::PRIMARY_ONLY;
+        };
+        match map.get("tabs") {
+            Some(serde_json::Value::String(one)) => Self::from_names(&[one.as_str()]),
+            Some(serde_json::Value::Array(list)) => {
+                let names: Vec<&str> = list.iter().filter_map(|v| v.as_str()).collect();
+                Self::from_names(&names)
+            }
+            _ => Self::PRIMARY_ONLY,
+        }
+    }
+}
+
+/// Is this thread in the inbox, in one of the tabs that are loaded? True when one of its
+/// messages sits in INBOX in such a tab (no category label is Primary). Anything else (other
+/// folders, spam, archived, tabs left out) is not loaded.
+#[must_use]
+pub fn is_wanted_inbox(api: &ApiThread, tabs: &Tabs) -> bool {
+    api.messages.iter().any(|m| {
+        let has = |label: &str| m.label_ids.iter().any(|l| l == label);
+        if !has("INBOX") {
+            return false;
+        }
+        let other = has("CATEGORY_PROMOTIONS")
+            || has("CATEGORY_SOCIAL")
+            || has("CATEGORY_UPDATES")
+            || has("CATEGORY_FORUMS");
+        (tabs.primary && !other)
+            || (tabs.promotions && has("CATEGORY_PROMOTIONS"))
+            || (tabs.social && has("CATEGORY_SOCIAL"))
+            || (tabs.updates && has("CATEGORY_UPDATES"))
+            || (tabs.forums && has("CATEGORY_FORUMS"))
+    })
+}
+
+/// Is this thread in the default inbox (the Primary tab)?
 #[must_use]
 pub fn is_primary_inbox(api: &ApiThread) -> bool {
-    const OTHER_TABS: [&str; 4] = [
-        "CATEGORY_PROMOTIONS",
-        "CATEGORY_SOCIAL",
-        "CATEGORY_UPDATES",
-        "CATEGORY_FORUMS",
-    ];
-    api.messages.iter().any(|m| {
-        m.label_ids.iter().any(|l| l == "INBOX")
-            && !m.label_ids.iter().any(|l| OTHER_TABS.contains(&l.as_str()))
-    })
+    is_wanted_inbox(api, &Tabs::PRIMARY_ONLY)
 }
 
 /// Map a fully fetched Gmail thread. `Message::thread_id` carries the Gmail thread id.
@@ -387,5 +488,36 @@ mod tests {
         let a = map_thread(&fixture("thread_three_messages.json"));
         let b = map_thread(&fixture("thread_three_messages.json"));
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn the_tabs_loaded_come_from_the_names_and_default_to_primary() {
+        assert_eq!(Tabs::from_names::<&str>(&[]), Tabs::PRIMARY_ONLY);
+        assert_eq!(Tabs::from_names(&["nonsense"]), Tabs::PRIMARY_ONLY);
+        assert_eq!(Tabs::from_names(&["All"]), Tabs::ALL);
+        let t = Tabs::from_names(&["Updates", "promotions"]);
+        assert!(t.updates && t.promotions && !t.primary && !t.social && !t.forums);
+        assert!(Tabs::PRIMARY_ONLY.is_primary_only() && !t.is_primary_only());
+        let dir = std::env::temp_dir().join("haste-no-gmail-tabs");
+        assert_eq!(Tabs::load(&dir), Tabs::PRIMARY_ONLY);
+    }
+
+    #[test]
+    fn a_thread_is_loaded_when_it_is_in_the_inbox_in_a_tab_that_is_wanted() {
+        let promo = thread_with(&["INBOX", "CATEGORY_PROMOTIONS"]);
+        let updates = thread_with(&["INBOX", "CATEGORY_UPDATES"]);
+        let plain = thread_with(&["INBOX", "CATEGORY_PERSONAL"]);
+        let archived = thread_with(&["CATEGORY_UPDATES"]);
+        let updates_only = Tabs::from_names(&["updates"]);
+        assert!(!is_wanted_inbox(&promo, &Tabs::PRIMARY_ONLY));
+        assert!(is_wanted_inbox(&plain, &Tabs::PRIMARY_ONLY));
+        assert!(is_wanted_inbox(&updates, &updates_only));
+        assert!(!is_wanted_inbox(&promo, &updates_only));
+        assert!(!is_wanted_inbox(&plain, &updates_only));
+        assert!(is_wanted_inbox(&promo, &Tabs::ALL));
+        assert!(
+            !is_wanted_inbox(&archived, &Tabs::ALL),
+            "archived stays out"
+        );
     }
 }

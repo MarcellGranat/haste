@@ -246,9 +246,15 @@ impl GmailClient {
         &self,
         days: u32,
         page: Option<&str>,
+        primary_only: bool,
     ) -> Result<ThreadList, ConnectorError> {
+        let tab = if primary_only {
+            " category:primary"
+        } else {
+            ""
+        };
         let mut query = vec![
-            ("q", format!("in:inbox category:primary newer_than:{days}d")),
+            ("q", format!("in:inbox{tab} newer_than:{days}d")),
             ("maxResults", "100".to_owned()),
         ];
         if let Some(p) = page {

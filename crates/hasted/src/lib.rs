@@ -359,7 +359,8 @@ pub fn start_gmail(state: &Arc<State>, base: &Path) -> Result<bool, String> {
     }
     let config = GmailConfig::load(base)?;
     let connector: Arc<dyn haste_core::connector::Connector> = Arc::new(
-        GmailConnector::from_config(&config, Arc::new(KeychainStore)),
+        GmailConnector::from_config(&config, Arc::new(KeychainStore))
+            .with_tabs(haste_connector_gmail::mapper::Tabs::load(base)),
     );
     state.register_connector(Arc::clone(&connector));
     tokio::spawn(scheduler::sync_loop(

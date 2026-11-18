@@ -101,6 +101,8 @@ pub struct GmailConnector {
     client: GmailClient,
     /// The connector's own address: the From of a send, and never a reply target.
     account: String,
+    /// The inbox tabs whose mail is loaded.
+    tabs: crate::mapper::Tabs,
 }
 
 impl GmailConnector {
@@ -135,7 +137,15 @@ impl GmailConnector {
         Self {
             client: GmailClient::new(http, api_base, Arc::new(tokens)),
             account: config.account.clone(),
+            tabs: crate::mapper::Tabs::PRIMARY_ONLY,
         }
+    }
+
+    /// Load these inbox tabs (the default is Primary only).
+    #[must_use]
+    pub fn with_tabs(mut self, tabs: crate::mapper::Tabs) -> Self {
+        self.tabs = tabs;
+        self
     }
 
     async fn backfill(&self) -> Result<Batch, ConnectorError> {
@@ -146,7 +156,7 @@ impl GmailConnector {
         'pages: loop {
             let list = self
                 .client
-                .list_threads(BACKFILL_DAYS, page.as_deref())
+                .list_threads(BACKFILL_DAYS, page.as_deref(), self.tabs.is_primary_only())
                 .await?;
             for t in list.threads {
                 if ids.len() >= BACKFILL_MAX_THREADS {
@@ -203,7 +213,7 @@ impl GmailConnector {
                 other => other?,
             };
             // Only the default inbox is loaded; other folders and tabs are skipped.
-            if let Some(api) = read.filter(crate::mapper::is_primary_inbox) {
+            if let Some(api) = read.filter(|t| crate::mapper::is_wanted_inbox(t, &self.tabs)) {
                 let mapped = map_thread(&api);
                 batch
                     .unread
@@ -247,7 +257,7 @@ impl GmailConnector {
             in_a_row = 0;
             match read {
                 None => gone += 1,
-                Some(api) if !crate::mapper::is_primary_inbox(&api) => {
+                Some(api) if !crate::mapper::is_wanted_inbox(&api, &self.tabs) => {
                     other_tab += 1;
                     let has = |label: &str| {
                         api.messages

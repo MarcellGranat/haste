@@ -225,6 +225,8 @@ impl GmailConnector {
         let mut batch = Batch::default();
         let mut later: Vec<String> = Vec::new();
         let mut in_a_row = 0;
+        // what became of the changed threads: counts only
+        let (mut other_tab, mut gone) = (0_usize, 0_usize);
         for id in ids {
             if in_a_row >= MAX_SKIPPED_IN_A_ROW {
                 later.push(id.to_owned());
@@ -240,15 +242,29 @@ impl GmailConnector {
                 other => other?,
             };
             in_a_row = 0;
-            if let Some(api) = read.filter(crate::mapper::is_primary_inbox) {
-                let mapped = map_thread(&api);
-                batch
-                    .unread
-                    .push((mapped.thread.external_id.clone(), mapped.labels.unread));
-                batch.threads.push(mapped.thread);
-                batch.messages.extend(mapped.messages);
+            match read {
+                None => gone += 1,
+                Some(api) if !crate::mapper::is_primary_inbox(&api) => other_tab += 1,
+                Some(api) => {
+                    let mapped = map_thread(&api);
+                    batch
+                        .unread
+                        .push((mapped.thread.external_id.clone(), mapped.labels.unread));
+                    batch.threads.push(mapped.thread);
+                    batch.messages.extend(mapped.messages);
+                }
             }
         }
+        haste_core::log::info(
+            "gmail",
+            "delta_read",
+            &[
+                haste_core::log::n("kept", batch.threads.len()),
+                haste_core::log::n("not_primary_inbox", other_tab),
+                haste_core::log::n("gone", gone),
+                haste_core::log::n("later", later.len()),
+            ],
+        );
         Ok((batch, later))
     }
 
@@ -280,6 +296,15 @@ impl GmailConnector {
                 None => break,
             }
         }
+        haste_core::log::info(
+            "gmail",
+            "delta",
+            &[
+                haste_core::log::id("from", &start),
+                haste_core::log::id("to", latest.as_deref().unwrap_or("")),
+                haste_core::log::n("changed", changed.len()),
+            ],
+        );
         if changed.is_empty() {
             return Ok(Batch {
                 next_cursor: Some(cursor),

@@ -227,6 +227,9 @@ impl GmailConnector {
         let mut in_a_row = 0;
         // what became of the changed threads: counts only
         let (mut other_tab, mut gone) = (0_usize, 0_usize);
+        // why a thread was not kept: no Inbox label at all, or the tab it is in (counts only)
+        let (mut no_inbox, mut promotions, mut updates, mut social, mut forums) =
+            (0_usize, 0_usize, 0_usize, 0_usize, 0_usize);
         for id in ids {
             if in_a_row >= MAX_SKIPPED_IN_A_ROW {
                 later.push(id.to_owned());
@@ -244,7 +247,25 @@ impl GmailConnector {
             in_a_row = 0;
             match read {
                 None => gone += 1,
-                Some(api) if !crate::mapper::is_primary_inbox(&api) => other_tab += 1,
+                Some(api) if !crate::mapper::is_primary_inbox(&api) => {
+                    other_tab += 1;
+                    let has = |label: &str| {
+                        api.messages
+                            .iter()
+                            .any(|m| m.label_ids.iter().any(|l| l == label))
+                    };
+                    if !has("INBOX") {
+                        no_inbox += 1;
+                    } else if has("CATEGORY_PROMOTIONS") {
+                        promotions += 1;
+                    } else if has("CATEGORY_UPDATES") {
+                        updates += 1;
+                    } else if has("CATEGORY_SOCIAL") {
+                        social += 1;
+                    } else if has("CATEGORY_FORUMS") {
+                        forums += 1;
+                    }
+                }
                 Some(api) => {
                     let mapped = map_thread(&api);
                     batch
@@ -261,6 +282,11 @@ impl GmailConnector {
             &[
                 haste_core::log::n("kept", batch.threads.len()),
                 haste_core::log::n("not_primary_inbox", other_tab),
+                haste_core::log::n("no_inbox_label", no_inbox),
+                haste_core::log::n("promotions", promotions),
+                haste_core::log::n("updates", updates),
+                haste_core::log::n("social", social),
+                haste_core::log::n("forums", forums),
                 haste_core::log::n("gone", gone),
                 haste_core::log::n("later", later.len()),
             ],

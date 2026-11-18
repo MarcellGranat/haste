@@ -449,6 +449,10 @@ pub enum Effect {
         label: String,
         add: bool,
     },
+    /// Read this connector's provider now.
+    RefreshConnector {
+        source: String,
+    },
     ReleaseConnector {
         source: String,
     },
@@ -1670,6 +1674,9 @@ impl App {
             Key::Char('t') if thread_view => self.start_remind(),
             Key::Char('r') if thread_view => return self.start_reply(),
             Key::Char('0') => self.jump(false),
+            Key::Char('u') if self.view == View::Channels && !self.channel_inner => {
+                return self.refresh_selected();
+            }
             Key::Char('R') if self.view == View::Channels && !self.channel_inner => {
                 self.start_release();
             }
@@ -1714,6 +1721,21 @@ impl App {
         let rows = self.channel_rows();
         let name = rows.get(self.channels_selected)?;
         self.connectors.iter().find(|c| c.source == *name)
+    }
+
+    /// `u` on the Channels list: read this channel's provider now.
+    fn refresh_selected(&mut self) -> Option<Effect> {
+        let Some(c) = self.selected_connector() else {
+            self.status = "this channel has no connector loaded".into();
+            return None;
+        };
+        if c.engaged {
+            self.status = format!("{} is stopped: R releases it first", c.source);
+            return None;
+        }
+        Some(Effect::RefreshConnector {
+            source: c.source.clone(),
+        })
     }
 
     /// Releasing needs a `y`: the connector starts talking to the provider again.
@@ -5855,5 +5877,23 @@ mod tests {
         press(&mut app, "x");
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.status.contains("Google"), "{}", app.status);
+    }
+
+    #[test]
+    fn u_on_the_channels_list_refreshes_a_running_connector_and_not_a_stopped_one() {
+        let mut app = connectors_app(); // gmail is stopped, icloud runs
+        assert!(app.handle_key(Key::Char('u')).is_none());
+        assert!(app.status.contains("stopped"), "{}", app.status);
+        press(&mut app, "j");
+        assert_eq!(
+            app.handle_key(Key::Char('u')),
+            Some(Effect::RefreshConnector {
+                source: "icloud".into()
+            })
+        );
+        // a channel without a connector loaded says so
+        press(&mut app, "j");
+        assert!(app.handle_key(Key::Char('u')).is_none());
+        assert!(app.status.contains("no connector"), "{}", app.status);
     }
 }

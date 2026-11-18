@@ -838,6 +838,14 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 Err(e) => e,
             };
         }
+        Effect::RefreshConnector { source } => {
+            app.status = match describe(client.call(RequestBody::ConnectorRefresh {
+                source: source.clone(),
+            })) {
+                Ok(()) => format!("reading {source} now; the time updates in a moment"),
+                Err(e) => format!("not refreshed: {e}"),
+            };
+        }
         Effect::ReleaseConnector { source } => {
             let reply = client.call(RequestBody::ConnectorRelease {
                 source: source.clone(),

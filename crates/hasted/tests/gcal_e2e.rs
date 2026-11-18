@@ -408,6 +408,38 @@ async fn an_all_day_event_given_a_time_is_a_timed_one_here_until_put_back() {
 }
 
 #[tokio::test]
+async fn a_running_connector_is_refreshed_by_the_human_only() {
+    let rig = boot().await;
+    release_and_sync(&rig).await;
+    let refresh = |source: &str| RequestBody::ConnectorRefresh {
+        source: source.into(),
+    };
+    let token = agent(&rig).await;
+    assert_eq!(
+        code(&call(&rig, &token, refresh("gcal")).await),
+        Some(ErrorCode::Denied)
+    );
+    assert_eq!(
+        code(&human(&rig, refresh("nope")).await),
+        Some(ErrorCode::Validation)
+    );
+    assert!(matches!(human(&rig, refresh("gcal")).await, Response::Done));
+    // a stopped one is refused until it is released
+    human(
+        &rig,
+        RequestBody::ConnectorEngage {
+            source: "gcal".into(),
+        },
+    )
+    .await;
+    assert_eq!(
+        code(&human(&rig, refresh("gcal")).await),
+        Some(ErrorCode::Denied)
+    );
+    rig.daemon.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_local_event_is_added_by_the_human_only_and_never_sent_to_google() {
     let rig = boot().await;
     release_and_sync(&rig).await;

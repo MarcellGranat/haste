@@ -159,6 +159,10 @@ pub enum RequestBody {
     },
     /// Human-only: list connectors and whether their kill switch is engaged.
     ConnectorStatus,
+    /// Human-only: read a running connector's provider now instead of at the next poll.
+    ConnectorRefresh {
+        source: String,
+    },
     /// Human-only: disengage a connector's kill switch (the stored cursor is kept).
     ConnectorRelease {
         source: String,

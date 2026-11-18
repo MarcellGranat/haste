@@ -664,6 +664,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         View::Channels => vec![
             ("Enter", "open"),
             ("j/k", "move"),
+            ("u", "refresh"),
             ("R", "release a stopped one"),
             ("E", "stop one"),
         ],
@@ -2716,7 +2717,7 @@ fn draw_connector_detail(frame: &mut Frame<'_>, app: &App, area: Rect, rows: &[S
     }
     frame.render_widget(
         Paragraph::new(lines).block(
-            theme::panel(&format!(" {name} · R release · E stop "))
+            theme::panel(&format!(" {name} · u refresh · R release · E stop "))
                 .border_style(pane_border(false)),
         ),
         area,

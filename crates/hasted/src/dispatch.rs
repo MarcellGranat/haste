@@ -77,6 +77,7 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::AuditRecent { .. }
         | RequestBody::ConnectorStatus
         | RequestBody::ConnectorRelease { .. }
+        | RequestBody::ConnectorRefresh { .. }
         | RequestBody::ConnectorEngage { .. }
         | RequestBody::ConnectorResync { .. }
         | RequestBody::AttachmentSave { .. }
@@ -130,6 +131,7 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::ReminderEdit { .. } => "reminder_edit",
         RequestBody::ConnectorStatus => "connector_status",
         RequestBody::ConnectorRelease { .. } => "connector_release",
+        RequestBody::ConnectorRefresh { .. } => "connector_refresh",
         RequestBody::ConnectorEngage { .. } => "connector_engage",
         RequestBody::ConnectorResync { .. } => "connector_resync",
         RequestBody::AttachmentSave { .. } => "attachment_save",
@@ -656,6 +658,7 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
         }
         RequestBody::ConnectorStatus => connector_status(state),
         RequestBody::ConnectorRelease { source } => set_switch(state, principal, &source, false),
+        RequestBody::ConnectorRefresh { source } => connector_refresh(state, principal, &source),
         RequestBody::ConnectorResync { source } => connector_resync(state, principal, &source),
         RequestBody::AttachmentSave {
             message_id,
@@ -2609,6 +2612,40 @@ fn connector_resync(state: &State, actor: &Principal, source: &str) -> Response 
         }
         Err(e) => map_store(&e),
     }
+}
+
+/// The shortest time between two reads of a source asked for by hand.
+const REFRESH_BY_HAND_MIN_SECS: i64 = 10;
+
+/// Ask a running connector to read its provider now. A stopped one is refused (release it
+/// first), and a source that was read a moment ago is left alone.
+fn connector_refresh(state: &State, actor: &Principal, source: &str) -> Response {
+    let source = Source::from(source.to_owned());
+    if !state.registered_sources().contains(&source) {
+        return err(
+            ErrorCode::Validation,
+            "no connector is registered for this source",
+        );
+    }
+    match state.store.kill_switch_engaged(&source) {
+        Ok(true) => return err(ErrorCode::Denied, "it is stopped: release it first"),
+        Ok(false) => {}
+        Err(e) => return map_store(&e),
+    }
+    let recent = state
+        .last_synced(&source)
+        .is_some_and(|at| now_secs() - at < REFRESH_BY_HAND_MIN_SECS);
+    if !recent {
+        state.wake_sync(&source);
+    }
+    state.audit(
+        &actor.id,
+        "connector.refresh",
+        "asked",
+        Some(&source.as_name()),
+        None,
+    );
+    Response::Done
 }
 
 fn set_switch(state: &State, actor: &Principal, source: &str, engaged: bool) -> Response {

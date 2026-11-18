@@ -933,6 +933,7 @@ fn kind(body: &RequestBody) -> Kind {
         | RequestBody::IgnoreMute { .. }
         | RequestBody::ReadSet { .. }
         | RequestBody::SenderRules
+        | RequestBody::ConnectorRefresh { .. }
         | RequestBody::EventShift { .. }
         | RequestBody::EventCreateLocal { .. }
         | RequestBody::EventDeleteLocal { .. }

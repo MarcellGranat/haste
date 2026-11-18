@@ -196,9 +196,11 @@ pub async fn sync_once(
     let batch = guard.fetch(cursor).await?;
 
     let st = Arc::clone(state);
+    let synced_source = source.clone();
     let stored = tokio::task::spawn_blocking(move || store_batch(&st, &source, batch)).await;
     match stored {
         Ok(Ok((report, changed))) => {
+            state.record_synced(&synced_source, now_secs());
             for id in changed {
                 state.publish(Event::ThreadChanged { thread_id: id });
             }

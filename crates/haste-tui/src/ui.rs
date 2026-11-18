@@ -1661,13 +1661,27 @@ fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 fn draw_channels(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let [left, right] =
-        Layout::horizontal([Constraint::Length(28), Constraint::Min(20)]).areas(area);
+        Layout::horizontal([Constraint::Length(34), Constraint::Min(20)]).areas(area);
     let now = haste_core::time::now_secs();
     let channel_items: Vec<ListItem<'_>> = CHANNELS
         .iter()
         .enumerate()
         .map(|(i, name)| {
             let n = app.channel_threads(i).len();
+            // when the channel was last read: stopped, never since the start, or the time
+            // (yellow once it is overdue: a poll is every five minutes)
+            let (refreshed, colour) = match app.connectors.iter().find(|c| c.source == *name) {
+                Some(c) if c.engaged => ("stopped".to_owned(), theme::DANGER),
+                Some(c) => match c.last_synced {
+                    Some(at) if now - at > 15 * 60 => (
+                        inbox::refreshed_label(at, now, app.tz_offset),
+                        theme::WARNING,
+                    ),
+                    Some(at) => (inbox::refreshed_label(at, now, app.tz_offset), theme::MUTED),
+                    None => ("—".to_owned(), theme::MUTED),
+                },
+                None => (String::new(), theme::MUTED),
+            };
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("● {name:<10}"),
@@ -1677,6 +1691,7 @@ fn draw_channels(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     format!("{n:>4}"),
                     Style::new().fg(if n > 0 { theme::TEXT } else { theme::MUTED }),
                 ),
+                Span::styled(format!(" ↻ {refreshed:>7}"), Style::new().fg(colour)),
             ]))
         })
         .collect();
@@ -3451,6 +3466,34 @@ mod tests {
         assert_eq!(colour_of(&app, "t-h"), Some(crate::theme::GREEN));
         // a calendar the file does not name gets its own colour from the palette
         assert_eq!(colour_of(&app, "t-l"), Some(crate::theme::SKY));
+    }
+
+    #[test]
+    fn the_channels_show_when_each_was_last_read() {
+        let mut app = App::new();
+        app.tz_offset = 0;
+        let now = haste_core::time::now_secs();
+        let view =
+            |source: &str, engaged: bool, last_synced: Option<i64>| haste_proto::ConnectorView {
+                source: source.into(),
+                engaged,
+                registered: true,
+                last_synced,
+            };
+        app.set_connectors(vec![
+            view("gmail", false, Some(now - 60)),
+            view("icloud", true, Some(now - 60)),
+            view("whatsapp", false, None),
+            view("messenger", false, Some(now - 3 * 86_400)),
+        ]);
+        app.handle_key(crate::app::Key::Char('2'));
+        let text = render(&app);
+        assert!(
+            text.contains("stopped"),
+            "a stopped channel says so: {text}"
+        );
+        assert!(text.contains('—'), "never read since the start: {text}");
+        assert!(text.contains('↻'), "{text}");
     }
 
     #[test]

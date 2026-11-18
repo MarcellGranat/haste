@@ -98,6 +98,8 @@ pub struct State {
     sync_wakers: Mutex<HashMap<Source, Arc<Notify>>>,
     /// When each source was last woken by a thread being opened.
     refreshed: Mutex<RefreshGate>,
+    /// When each source's last read of its provider succeeded (in memory, empty after a start).
+    synced: Mutex<HashMap<Source, i64>>,
     /// Threads whose earlier history was asked for (once each per run), and the ones waiting.
     history: Mutex<HistoryQueue>,
     history_wakers: Mutex<HashMap<Source, Arc<Notify>>>,
@@ -150,6 +152,7 @@ impl State {
             reminders_helper: RwLock::new(None),
             sync_wakers: Mutex::new(HashMap::new()),
             refreshed: Mutex::new(RefreshGate::default()),
+            synced: Mutex::new(HashMap::new()),
             history: Mutex::new(HistoryQueue::default()),
             history_wakers: Mutex::new(HashMap::new()),
         }
@@ -240,6 +243,23 @@ impl State {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .done
             .remove(thread_id);
+    }
+
+    /// A read of this source's provider just succeeded.
+    pub fn record_synced(&self, source: &Source, at: i64) {
+        self.synced
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(source.clone(), at);
+    }
+
+    /// When this source was last read successfully, if it has been since the daemon started.
+    pub fn last_synced(&self, source: &Source) -> Option<i64> {
+        self.synced
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(source)
+            .copied()
     }
 
     /// Ask a source's sync loop to run a cycle now (a permit is kept if it is busy).

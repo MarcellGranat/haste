@@ -419,6 +419,20 @@ pub fn smart_stamp(secs: i64, now: i64, off: i64) -> String {
     }
 }
 
+/// When a channel was last read, short enough for a list row: `14:32` today, `12 Nov` before.
+#[must_use]
+pub fn refreshed_label(secs: i64, now: i64, off: i64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (_, m, d, h, mi) = to_civil(secs + off);
+    if day_start(secs, off) == day_start(now, off) {
+        format!("{h:02}:{mi:02}")
+    } else {
+        format!("{d} {}", MONTHS[usize::try_from(m - 1).unwrap_or(0)])
+    }
+}
+
 /// `Thu 12 Nov` for the local day containing `secs`.
 #[must_use]
 pub fn day_label(secs: i64, off: i64) -> String {
@@ -797,5 +811,20 @@ mod tests {
         assert_eq!(week_start(monday - 86_400 + 100, 0, 0), monday);
         assert_eq!(week_start(monday + 100, 0, 1), monday + 7 * 86_400);
         assert_eq!(week_start(monday + 100, 0, -1), monday - 7 * 86_400);
+    }
+
+    #[test]
+    fn the_refreshed_label_is_the_time_today_and_the_date_before() {
+        let day: i64 = 1_794_787_200; // 2026-11-16T00:00:00Z
+        assert_eq!(
+            refreshed_label(day + 14 * 3_600 + 32 * 60, day + 20 * 3_600, 0),
+            "14:32"
+        );
+        assert_eq!(refreshed_label(day - 3_600, day + 3_600, 0), "15 Nov");
+        // a local day, not the UTC one
+        assert_eq!(
+            refreshed_label(day + 23 * 3_600, day + 24 * 3_600 + 1_800, 3_600),
+            "00:00"
+        );
     }
 }

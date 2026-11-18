@@ -656,6 +656,10 @@ pub struct ConnectorView {
     pub engaged: bool,
     /// A connector implementation is currently loaded in the daemon.
     pub registered: bool,
+    /// When its last read of the provider succeeded (unix seconds); nothing until the first one
+    /// since the daemon started.
+    #[serde(default)]
+    pub last_synced: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -939,6 +943,7 @@ mod tests {
                 source: "gmail".into(),
                 engaged: true,
                 registered: true,
+                last_synced: Some(1_700_000_000),
             }],
         };
         let back: Response = read_frame(&mut encode_frame(&resp).unwrap().as_slice()).unwrap();

@@ -1433,6 +1433,12 @@ fn main() -> io::Result<()> {
             if last_reminders.elapsed() >= REMINDERS_EVERY {
                 last_reminders = Instant::now();
                 load_reminders(&mut app, &client);
+                // the channels' last-read times move without any change to announce
+                if let Ok(Response::Connectors { connectors }) =
+                    client.call(RequestBody::ConnectorStatus)
+                {
+                    app.set_connectors(connectors);
+                }
             }
             if let Some(effect) = app.tick(Instant::now()) {
                 if run_effect(&mut app, &client, effect) {

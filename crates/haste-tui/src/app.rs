@@ -5613,11 +5613,13 @@ mod tests {
                 source: "gmail".into(),
                 engaged: true,
                 registered: true,
+                last_synced: None,
             },
             ConnectorView {
                 source: "icloud".into(),
                 engaged: false,
                 registered: true,
+                last_synced: Some(1_700_000_000),
             },
         ]
     }

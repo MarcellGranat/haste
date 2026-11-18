@@ -2344,6 +2344,7 @@ fn connector_status(state: &State) -> Response {
             .map(|source| ConnectorView {
                 engaged: switches.iter().any(|(s, on)| s == &source && *on),
                 registered: registered.contains(&source),
+                last_synced: state.last_synced(&source),
                 source: source.as_name(),
             })
             .collect(),

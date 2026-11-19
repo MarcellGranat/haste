@@ -502,10 +502,21 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
         Effect::Background => {
             // hand the screen back to the tab before this one; the TUI stays up. Without the
             // helper (or if it fails) it quits as `q` always did.
-            let sent = std::env::var_os("HASTE_HERDR_TOGGLE").is_some_and(|toggle| {
-                std::process::Command::new(toggle)
-                    .arg("--leave")
-                    .stdin(std::process::Stdio::null())
+            // HASTE_BACKGROUND_COMMAND (a shell command line, e.g. tmux's detach) or, for a Herdr
+            // tab of its own, HASTE_HERDR_TOGGLE with --leave
+            let mut command = if let Some(line) = std::env::var_os("HASTE_BACKGROUND_COMMAND") {
+                let mut c = std::process::Command::new("/bin/sh");
+                c.arg("-c").arg(line);
+                Some(c)
+            } else {
+                std::env::var_os("HASTE_HERDR_TOGGLE").map(|toggle| {
+                    let mut c = std::process::Command::new(toggle);
+                    c.arg("--leave");
+                    c
+                })
+            };
+            let sent = command.as_mut().is_some_and(|c| {
+                c.stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status()
@@ -1467,7 +1478,8 @@ fn main() -> io::Result<()> {
     let events = client.subscribe();
     let mut app = App::new();
     app.calendar_colors = haste_tui::calendarcolors::CalendarColors::load(&base_dir());
-    app.background_mode = std::env::var_os("HASTE_HERDR_TAB").is_some();
+    app.background_mode = std::env::var_os("HASTE_HERDR_TAB").is_some()
+        || std::env::var_os("HASTE_BACKGROUND_COMMAND").is_some();
     refresh(&mut app, &client);
     if app.calendar_colors.ignored > 0 {
         app.status = format!(

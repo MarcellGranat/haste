@@ -175,7 +175,16 @@ fn draw_compose(frame: &mut Frame<'_>, app: &App, area: Rect, docked: bool) {
     };
     frame.render_widget(Clear, rect);
     let heading = format!(" {} ", c.heading);
-    let block = theme::panel(&heading).border_style(pane_border(true));
+    // a reply has a colour of its own, so it cannot be mistaken for the thread above it
+    let reply = matches!(c.kind, crate::compose::ComposeKind::Reply { .. });
+    let accent = if reply {
+        theme::REPLY
+    } else {
+        theme::BORDER_ACTIVE
+    };
+    let block = theme::panel(&heading)
+        .border_style(Style::new().fg(accent))
+        .title_style(Style::new().fg(accent).add_modifier(Modifier::BOLD));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     let attach_rows = u16::try_from(c.attachments.len().min(4)).unwrap_or(4) + 1;
@@ -200,7 +209,11 @@ fn draw_compose(frame: &mut Frame<'_>, app: &App, area: Rect, docked: bool) {
         let focused = i == c.focus;
         let box_area = areas[i];
         let label = format!(" {} ", f.label);
-        let b = theme::panel(&label).border_style(pane_border(focused));
+        let b = theme::panel(&label).border_style(if reply && focused {
+            Style::new().fg(accent)
+        } else {
+            pane_border(focused)
+        });
         let text_area = b.inner(box_area);
         frame.render_widget(b, box_area);
         let lines: Vec<Line<'_>> = f
@@ -812,7 +825,10 @@ fn draw_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ),
         None => {
             let mut spans = Vec::new();
-            for (k, what) in hints(app) {
+            // a text box on screen (a reply over its thread, a note, a TODO) shows its own keys:
+            // none here, and none from the thread behind it
+            let own_keys = app.compose.is_some();
+            for (k, what) in if own_keys { Vec::new() } else { hints(app) } {
                 spans.push(Span::styled(
                     format!(" {k}"),
                     Style::new()
@@ -824,7 +840,9 @@ fn draw_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     Style::new().fg(theme::HINT_TEXT),
                 ));
             }
-            spans.push(Span::styled(" q quit ", theme::muted()));
+            if !own_keys {
+                spans.push(Span::styled(" q quit ", theme::muted()));
+            }
             if !app.status.is_empty() {
                 spans.push(Span::styled(
                     format!("  {}", app.status),
@@ -2728,7 +2746,12 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(lines)
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
-            .block(block.title_bottom(hint)),
+            .block(if app.compose.is_some() {
+                // the reply box has its own keys; the thread's would only be in the way
+                block
+            } else {
+                block.title_bottom(hint)
+            }),
         area,
     );
 }
@@ -3687,6 +3710,35 @@ mod tests {
         let text = render(&app);
         assert!(text.contains("│        Ana: SECOND-PREVIEW"), "{text}");
         assert!(!text.contains("│        Ana: FIRST-PREVIEW"), "{text}");
+    }
+
+    #[test]
+    fn a_reply_box_hides_the_keys_of_the_thread_and_of_the_footer_and_has_its_own_colour() {
+        let mut app = App::new();
+        app.set_threads(vec![]);
+        open_thread(&mut app, vec![]);
+        let before = render(&app);
+        assert!(
+            before.contains("r reply") && before.contains("o older"),
+            "{before}"
+        );
+        app.open_reply_form("t1");
+        let text = render(&app);
+        assert!(
+            !text.contains("o older") && !text.contains("q quit"),
+            "{text}"
+        );
+        assert!(text.contains("Ctrl-g"), "its own keys stay: {text}");
+        // the box is drawn in the reply colour
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let cells = terminal.backend().buffer().content().to_vec();
+        assert!(
+            cells
+                .iter()
+                .any(|c| c.fg == crate::theme::REPLY && c.symbol() == "╭"),
+            "the reply box has its own colour"
+        );
     }
 
     #[test]

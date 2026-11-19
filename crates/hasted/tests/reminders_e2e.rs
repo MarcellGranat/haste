@@ -231,8 +231,31 @@ async fn call(r: &Rig, token: &str, body: RequestBody) -> Response {
     serde_json::from_slice(&buf).unwrap()
 }
 
+/// Does a successful request of this kind wake the daemon's own read of Reminders?
+fn wakes_a_read(body: &RequestBody) -> bool {
+    matches!(
+        body,
+        RequestBody::ReminderNew { .. }
+            | RequestBody::ReminderEdit { .. }
+            | RequestBody::ReminderLater { until: Some(_), .. }
+    )
+}
+
 async fn human(r: &Rig, body: RequestBody) -> Response {
-    call(r, &r.human, body).await
+    let wakes = wakes_a_read(&body);
+    let before = r.daemon.state.sync_count(&Source::Reminders);
+    let answer = call(r, &r.human, body).await;
+    if wakes && !matches!(answer, Response::Error { .. }) {
+        // the write woke the daemon's own read; let it be stored before the test goes on, so an
+        // older list cannot land over what the next step changes
+        for _ in 0..30 {
+            if r.daemon.state.sync_count(&Source::Reminders) > before {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    answer
 }
 
 fn code(r: &Response) -> Option<ErrorCode> {
@@ -262,16 +285,8 @@ async fn agent(r: &Rig) -> String {
     token
 }
 
-/// How many reads of Reminders the audit log has recorded so far.
-fn logged_syncs(r: &Rig) -> usize {
-    std::fs::read_to_string(r.daemon.state.config.data_dir.join("audit.jsonl"))
-        .unwrap_or_default()
-        .matches(r#""action":"reminders.sync""#)
-        .count()
-}
-
 async fn release_and_sync(r: &Rig) {
-    let before = logged_syncs(r);
+    let before = r.daemon.state.sync_count(&Source::Reminders);
     human(
         r,
         RequestBody::ConnectorRelease {
@@ -280,10 +295,10 @@ async fn release_and_sync(r: &Rig) {
     )
     .await;
     sync_once(&r.daemon.state, &r.connector).await.unwrap();
-    // Releasing also wakes the daemon's own sync loop. Let that read finish too, so it cannot
-    // land in the middle of what the test does next and put an older list over a change.
+    // Releasing also wakes the daemon's own sync loop. Let that read be stored too, so it
+    // cannot land in the middle of what the test does next and put an older list over a change.
     for _ in 0..500 {
-        if logged_syncs(r) >= before + 2 {
+        if r.daemon.state.sync_count(&Source::Reminders) >= before + 2 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;

@@ -34,6 +34,8 @@ pub const CRUST: Color = Color::Rgb(0x11, 0x11, 0x1b);
 // Semantic aliases.
 pub const BORDER: Color = SURFACE2;
 pub const BORDER_ACTIVE: Color = MAUVE;
+/// The reply box: a colour of its own, so it stands out from the thread above it.
+pub const REPLY: Color = GREEN;
 pub const SELECTED_BG: Color = SURFACE0;
 pub const HINT_KEY: Color = PEACH;
 pub const HINT_TEXT: Color = OVERLAY1;

@@ -606,6 +606,12 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 Err(e) => e,
             };
         }
+        Effect::CopyText { text } => {
+            app.status = match copy_to_clipboard(&text) {
+                Ok(()) => format!("copied {} characters", text.chars().count()),
+                Err(e) => format!("not copied: {e}"),
+            };
+        }
         Effect::DeleteEvent { event_id } => {
             app.status = match describe(client.call(RequestBody::EventDeleteLocal { event_id })) {
                 Ok(()) => "event deleted".into(),
@@ -1341,6 +1347,39 @@ fn run_draft(
         acknowledge_stale: false,
     }))
     .map(|()| id)
+}
+
+/// Put text on the system clipboard: `pbcopy` on macOS, `wl-copy` or `xclip` elsewhere. The text
+/// goes only to that program's input, never to a log or the screen.
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let programs: [(&str, &[&str]); 3] = [
+        ("pbcopy", &[]),
+        ("wl-copy", &[]),
+        ("xclip", &["-selection", "clipboard"]),
+    ];
+    for (program, args) in programs {
+        let Ok(mut child) = Command::new(program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            continue;
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(text.as_bytes())
+                .map_err(|e| e.to_string())?;
+        }
+        return match child.wait() {
+            Ok(status) if status.success() => Ok(()),
+            _ => Err(format!("{program} failed")),
+        };
+    }
+    Err("no clipboard program found (pbcopy, wl-copy or xclip)".into())
 }
 
 /// `haste-tui --status`: the line for Herdr's status bar (see `haste_tui::statusline`), then

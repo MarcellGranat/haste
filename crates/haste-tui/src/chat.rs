@@ -322,6 +322,15 @@ fn shorten_links(text: &str, max: usize, out: &mut Vec<(String, String)>) -> Str
     result
 }
 
+/// The text of one message as the reader shows it (reactions and attachment lines left out, tags
+/// and entities decoded): what `y` copies.
+#[must_use]
+pub fn displayed_text(body: &str) -> String {
+    let (plain, _) = haste_core::reactions::take(body);
+    let (text, _) = split_body(&inbox::sanitize(&decode_entities(&plain)));
+    text.trim().to_owned()
+}
+
 /// An attachment line as the reader shows it: `name · type · size`. Older Beeper rows are a
 /// bare `[attachment]` with no name.
 #[must_use]

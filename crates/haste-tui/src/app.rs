@@ -348,6 +348,10 @@ pub enum Effect {
     DeleteEvent {
         event_id: String,
     },
+    /// Put this text on the clipboard.
+    CopyText {
+        text: String,
+    },
     /// Add a calendar event: to this Google calendar, or here only when `None`.
     CreateEvent {
         calendar: Option<String>,
@@ -2256,7 +2260,7 @@ impl App {
         let last = reader.messages.len().saturating_sub(1);
         let first = reader.first_visible();
         // a batch of attachment-only messages is one item: moving lands on its last message
-        if reader.blocked && matches!(key, Key::Char('r' | 'e' | 'l' | '+')) {
+        if reader.blocked && (matches!(key, Key::Char('r' | 'e' | 'l')) || key == Key::Ctrl('e')) {
             self.status = "this sender is blocked: b unblocks it, Esc leaves it".into();
             return None;
         }
@@ -2381,7 +2385,17 @@ impl App {
                     );
                 }
             }
-            Key::Char('+') => match reader.messages.get(reader.selected).map(|m| m.id.clone()) {
+            Key::Char('y') => {
+                if let Some(m) = reader.messages.get(reader.selected) {
+                    let text = crate::chat::displayed_text(&m.body_text);
+                    if text.is_empty() {
+                        self.status = "nothing to copy in this message".into();
+                    } else {
+                        return Some(Effect::CopyText { text });
+                    }
+                }
+            }
+            Key::Ctrl('e') => match reader.messages.get(reader.selected).map(|m| m.id.clone()) {
                 Some(_) if self.thread_is_mail(&thread_id) => {
                     self.status = "reactions are for chats, not mail".into();
                 }
@@ -4691,12 +4705,12 @@ mod tests {
         app.set_threads(vec![mail.clone(), chat.clone()]);
         // mail: refused, nothing to pick
         app.show_thread(mail, vec![message("m1", "a@x.com", "hi", 10)], None);
-        assert!(press(&mut app, "+").is_empty());
+        assert!(app.handle_key(Key::Ctrl('e')).is_none());
         assert_eq!(app.mode, Mode::Read);
         assert!(app.status.contains("chats"), "{}", app.status);
         // chat: the picker opens and a digit sends that emoji for the selected message
         app.show_thread(chat, vec![message("m1", "a@x.com", "hi", 10)], None);
-        assert!(press(&mut app, "+").is_empty());
+        assert!(app.handle_key(Key::Ctrl('e')).is_none());
         assert!(matches!(app.mode, Mode::React { .. }));
         assert_eq!(
             press(&mut app, "2"),
@@ -4707,7 +4721,7 @@ mod tests {
         );
         assert_eq!(app.mode, Mode::Read);
         // letters work too; y and z have no emoji and punctuation none: the keyboard stays open
-        press(&mut app, "+");
+        app.handle_key(Key::Ctrl('e'));
         assert_eq!(
             press(&mut app, "q"),
             vec![Effect::React {
@@ -4715,7 +4729,7 @@ mod tests {
                 key: "❓".into()
             }]
         );
-        press(&mut app, "+");
+        app.handle_key(Key::Ctrl('e'));
         for key in ["y", "z", "-", " "] {
             assert!(press(&mut app, key).is_empty(), "{key:?}");
             assert!(matches!(app.mode, Mode::React { .. }), "{key:?}");
@@ -4778,7 +4792,7 @@ mod tests {
         app.show_thread(chat, vec![message("m1", "a@x.com", "hi", 10)], None);
         let body = |app: &App| app.reader.as_ref().unwrap().messages[0].body_text.clone();
         assert_eq!(body(&app), "hi");
-        press(&mut app, "+");
+        app.handle_key(Key::Ctrl('e'));
         press(&mut app, "1");
         // the reaction is on the message before Beeper has answered
         assert!(body(&app).contains("👍"), "{}", body(&app));
@@ -4787,7 +4801,7 @@ mod tests {
         assert!(body(&app).contains("👍"));
         assert!(app.reactions_pending.is_empty());
         // another one that Beeper refuses: gone again, and the status says so
-        press(&mut app, "+");
+        app.handle_key(Key::Ctrl('e'));
         press(&mut app, "2");
         assert!(body(&app).contains("❤️"));
         app.finish_reaction("m1", Err("Beeper refused".into()));
@@ -5894,5 +5908,29 @@ mod tests {
         press(&mut app, "j");
         assert!(app.handle_key(Key::Char('u')).is_none());
         assert!(app.status.contains("no connector"), "{}", app.status);
+    }
+
+    #[test]
+    fn y_copies_the_selected_message_as_shown_and_plus_no_longer_reacts() {
+        let mut app = App::new();
+        let mut chat = mail_thread("t3", "Ana", &["a@x.com"], 30);
+        chat.thread.source = haste_core::model::Source::Whatsapp;
+        app.set_threads(vec![chat.clone()]);
+        let body = "hello &amp; <b>bye</b>\n[reactions: 👍]";
+        app.show_thread(chat, vec![message("m1", "a@x.com", body, 10)], None);
+        assert_eq!(app.mode, Mode::Read);
+        let Some(Effect::CopyText { text }) = app.handle_key(Key::Char('y')) else {
+            panic!("expected CopyText");
+        };
+        assert!(text.starts_with("hello & "), "{text}");
+        assert!(
+            !text.contains("reactions") && !text.contains("&amp;"),
+            "{text}"
+        );
+        // the old key no longer reacts; Ctrl-e does
+        app.handle_key(Key::Char('+'));
+        assert_eq!(app.mode, Mode::Read);
+        app.handle_key(Key::Ctrl('e'));
+        assert!(matches!(app.mode, Mode::React { .. }));
     }
 }

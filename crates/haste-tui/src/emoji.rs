@@ -4,47 +4,48 @@
 /// The keyboard rows, as laid out on a QWERTY keyboard without `y` and `z`, each key with its
 /// emoji. The first eight digits keep the order of the old reaction picker.
 pub const ROWS: [&[(char, &str)]; 4] = [
+    // the everyday reactions on the digits
     &[
         ('1', "👍"),
         ('2', "❤️"),
-        ('3', "😂"),
-        ('4', "😮"),
-        ('5', "😢"),
-        ('6', "🙏"),
-        ('7', "🔥"),
-        ('8', "🎉"),
-        ('9', "👀"),
-        ('0', "✅"),
+        ('3', "🤣"),
+        ('4', "🙏"),
+        ('5', "🔥"),
+        ('6', "🎉"),
+        ('7', "👀"),
+        ('8', "✅"),
+        ('9', "🙌"),
+        ('0', "👌"),
     ],
     &[
-        ('q', "❓"),
+        ('q', "🤔"),
         ('w', "👋"),
         ('e', "😍"),
         ('r', "🚀"),
-        ('t', "🤝"),
-        ('u', "🆙"),
-        ('i', "💡"),
-        ('o', "👌"),
-        ('p', "🎊"),
+        ('t', "🤞"),
+        ('u', "🥺"),
+        ('i', "❗"),
+        ('o', "🙄"),
+        ('p', "💩"),
     ],
     &[
-        ('a', "😅"),
-        ('s', "😴"),
+        ('a', "🙈"),
+        ('s', "😄"),
         ('d', "💪"),
-        ('f', "🙌"),
-        ('g', "😁"),
-        ('h', "🤗"),
-        ('j', "🤣"),
-        ('k', "💋"),
+        ('f', "🫠"),
+        ('g', "😎"),
+        ('h', "🤝"),
+        ('j', "😉"),
+        ('k', "🤯"),
         ('l', "🥰"),
     ],
     &[
-        ('x', "❌"),
-        ('c', "👏"),
+        ('x', "🤬"),
+        ('c', "🔄"),
         ('v', "✌️"),
-        ('b', "🍺"),
-        ('n', "🙅"),
-        ('m', "💰"),
+        ('b', "🏸"),
+        ('n', "😳"),
+        ('m', "🫶"),
     ],
 ];
 
@@ -75,7 +76,7 @@ mod tests {
         let emoji: std::collections::BTreeSet<&str> = all.iter().map(|(_, e)| *e).collect();
         assert_eq!(emoji.len(), all.len(), "no two keys share an emoji");
         assert!(all.iter().all(|(_, e)| haste_core::reactions::valid_key(e)));
-        assert_eq!(emoji_for('Q'), Some("❓"));
+        assert_eq!(emoji_for('Q'), Some("🤔"));
         assert_eq!(emoji_for('1'), Some("👍"));
         assert_eq!(emoji_for('y'), None);
         assert_eq!(emoji_for('z'), None);

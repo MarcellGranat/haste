@@ -4932,7 +4932,7 @@ mod tests {
             press(&mut app, "q"),
             vec![Effect::React {
                 message_id: "m1".into(),
-                key: "❓".into()
+                key: "🤔".into()
             }]
         );
         app.handle_key(Key::Ctrl('o'));
@@ -4972,7 +4972,7 @@ mod tests {
         press(&mut app, "1");
         press(&mut app, "t");
         app.handle_key(Key::Ctrl('o'));
-        press(&mut app, "f");
+        press(&mut app, "9");
         let form = app.remind.as_ref().unwrap();
         assert_eq!(form.title, "🙌");
         app.handle_key(Key::Tab); // to the date
@@ -4986,7 +4986,7 @@ mod tests {
         assert!(matches!(app.mode, Mode::Emoji { .. }));
         press(&mut app, "5");
         assert_eq!(app.mode, Mode::Compose);
-        assert!(app.compose.as_ref().unwrap().focused_text().contains("😢"));
+        assert!(app.compose.as_ref().unwrap().focused_text().contains("🔥"));
     }
 
     #[test]

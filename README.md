@@ -1,12 +1,133 @@
 # haste
 
-A personal inbox hub (mail, chats, reminders, notes) driven from a vi-style TUI and
-operated by agents through a CLI. **Agents can read, propose and append to a few notes.
-They can never send; only you can, from the TUI: press `s`, and the send runs after a 5-second countdown you can cancel with any key.** Everything an agent asks for passes a policy gate in a local daemon.
+A personal inbox hub for mail, chats, reminders, a calendar and notes, driven from a vi-style
+terminal UI and operated by agents through a CLI. Agents can read, propose and append to a few
+notes. **They can never send**: only you can, from the TUI, and every send is confirmed with `y`,
+waits a few seconds and can be cancelled. Everything an agent asks for passes a policy gate in a
+local daemon.
 
-This repository contains the core (`core-policy-gate`: daemon, store, policy gate, proposals,
-approvals TUI, audit log, connector framework) and the first real connector (`gmail-connector`).
-The other connectors are separate, later changes (see the roadmap below).
+It is a **single-user tool for one Mac**. This README covers what you get, how to set it up from
+nothing, why it is built the way it is, and where it stops.
+
+## What you get
+
+- **One inbox** for Gmail, iCloud Mail, WhatsApp, Messenger, iMessage and Google Chat (the chats
+  through Beeper Desktop's local API), with priority senders, mute, snooze, set aside, archive,
+  labels, attachments, reactions and a text search over everything stored.
+- **Tasks and calendar**: Apple Reminders as your TODO list (overdue, snooze, early alerts,
+  priority), Google Calendar as a Monday-to-Friday week grid, and events that live only in haste.
+- **A reply box that works like a prompt** (`Enter` sends after a `y`), a short undo window after
+  every send, send-later, and an Outbox for drafts and scheduled sends.
+- **Agents on a leash.** Agents (Claude Code or anything that runs a shell command) read threads
+  and *propose* drafts, reminders, events and notes with the `haste` CLI. You approve; they never
+  send. Their results go back to them through [herdr](https://herdr.dev).
+- **Herdr integration**: an overdue-task / new-mail / connection-problem line in the herdr status
+  bar, and a key that opens the TUI in a popup that keeps running when you close it.
+
+## Set it up (from scratch)
+
+Plan on an hour, most of it spent in the Google Cloud console. Every connector is optional: start
+with the daemon and the TUI, then add one connector at a time.
+
+**You need**
+
+| | for |
+|---|---|
+| macOS (Apple silicon or Intel) with the Xcode command line tools | everything: haste uses the Keychain, launchd and EventKit |
+| a Rust toolchain (`rustup`) | building |
+| an Apple Development certificate (free Apple ID is enough) | optional: `scripts/deploy.sh` signs each binary so the Keychain's "Always Allow" survives rebuilds |
+| a Google Cloud project | Gmail and Google Calendar (see the Gmail section; set the consent screen to *In production*) |
+| an iCloud app-specific password | iCloud Mail |
+| Beeper Desktop with your chat accounts | WhatsApp, Messenger, iMessage, Google Chat |
+| herdr, and `tmux` for the popup | optional: agent status, the status-bar line and the popup |
+
+**Steps**
+
+1. **Build and start the daemon.** Follow *Install and run (macOS)* below: build `hasted`,
+   `haste-tui` and the two `haste` CLIs, install the launchd job. The first start creates your
+   `human` identity and token in the data folder (`~/Library/Application Support/haste`).
+2. **Open the TUI**: `haste-tui`. It is empty at first. `q` quits (`Ctrl-q` in the herdr popup).
+3. **Add mail.** *iCloud* is the quickest (an app-specific password, one command). *Gmail* needs the
+   Google Cloud steps once. Each connector starts **engaged** (stopped): release it with
+   `haste connector release <name>` or `R` on its row in the Channels tab.
+4. **Add chats.** Set up Beeper (see *Beeper* below), write `beeper.json`, release the sources. Pay
+   attention to the cloud-account and terms-of-service notes there.
+5. **Add reminders and a calendar.** Build the Reminders helper and allow the macOS dialog; set up
+   Google Calendar with the same Google client. Write `gcal.json` to choose the calendars.
+6. **Tune what is shown**: `priority_senders`, `.haste_ignore`, `filters.json`, `gmail_tabs.json`,
+   `calendar_colors.json` (the files are described in the sections below, all in the data folder).
+7. **Give an agent access**: `haste agent register <name> --allow read --allow draft ...`
+   (see *Token issuance flow*), then run the agent with `HASTE_AGENT=<name>`.
+8. **Herdr (optional)**: see *Using the TUI with herdr*.
+
+Everything you configure lives in the data folder and in the Keychain; nothing is installed
+outside your home folder except the launchd job.
+
+## Design choices
+
+- **Agents propose, humans send.** The policy gate denies every send to every non-human caller,
+  and the CLI has no send verb. A prompt-injected agent can at worst create proposals that wait for
+  you. Identity is the token alone; hints such as the herdr pane are routing information, never
+  authority.
+- **A local daemon owns everything.** `hasted` holds the SQLite store, the connectors, the audit
+  log and the secrets' use. The CLI and the TUI are thin clients over a Unix socket (mode 0700) and
+  link no HTTP, Keychain or database code, so they cannot bypass the gate.
+- **Sends happen at most once.** A send is `approved -> executing -> sent` with one request and no
+  retry at any layer. If the outcome is unknown the proposal stays `executing` as **NEEDS CHECK**
+  until you look at the real mailbox and settle it. A duplicate is considered worse than a lost
+  send you can see.
+- **A human send is slow on purpose.** You confirm with `y` (only `y`), the send waits 3 s for a
+  chat or 10 s for mail with a visible countdown, and `U` takes it back. A changed recipient or a
+  thread that changed since you looked asks again.
+- **Connectors are stopped until you say so, and stop themselves.** Risky or new sources start
+  *engaged* (stopped). A circuit breaker engages a connector's kill switch on an authorization
+  problem or a challenge and never releases it by itself.
+- **Haste keeps its own copy.** Threads and messages are mirrored into SQLite. Triage (archive for
+  chats, priority, set aside, mute, snooze, event moves, local events) is **local**; it changes
+  the provider only where the provider can do it (Gmail and iCloud archive) and only by a human
+  action. This is also why search is instant and archived threads stay readable.
+- **Least privilege at every provider.** Gmail scopes are read, compose and modify (labels only);
+  the calendar can create and update but never delete or invite; Reminders can add and complete but
+  never delete; iCloud over IMAP is read-only apart from the Sent copy of a send.
+- **Secrets never leave the Keychain or the helper that uses them.** The logs and the audit chain
+  carry numbers, fixed labels and ids, never a message, name, address or token; free text cannot be
+  passed to the logger by construction.
+- **Boring technology.** SQLite in WAL mode with one writer thread, length-prefixed JSON over a
+  Unix socket, forward-only migrations, launchd to keep the daemon up.
+- **Terminal-first.** The TUI is keyboard-only and vi-flavoured; herdr (not a GUI) is the window
+  manager around it.
+
+## Limitations
+
+- **One user, one Mac.** macOS only (Keychain, launchd, EventKit, Messages). No multi-user mode, no
+  network listener, no encryption at rest beyond file permissions. Another process running as you
+  can read `human.token`; see the threat model.
+- **Remote agents.** An agent on another machine cannot reach the hub's daemon yet: how the `haste`
+  CLI on a remote host would connect is out of scope. Herdr status for remote machines works.
+- **Chats are unofficial.** WhatsApp, Messenger and iMessage go through Beeper's local API. The
+  networks offer no official API for personal accounts, accounts can be suspended, and Beeper only
+  returns the messages it has stored locally. Cloud accounts need your explicit permission per
+  account. iMessage sends need the Messages app open (haste opens it when it is closed) and a send
+  to your own iMessage chat does not work.
+- **Mail is plain text.** HTML is reduced to text and never rendered; attachments are fetched only
+  when you ask; sending is one recipient (no Cc, Bcc or reply-all), plain text, a few attachments.
+  iCloud replies are matched by subject because no raw headers are stored.
+- **Gmail loads only some tabs.** Primary by default; Promotions, Social, Updates and Forums are
+  left out unless you list them in `gmail_tabs.json`. Archived mail is not read again after a
+  `haste connector resync gmail`. Google Cloud projects in *Testing* expire the sign-in after 7 days.
+- **Calendar and Reminders are partial.** No delete or cancel, no attendee change, recurring events
+  stay one master event, only 30 days back and 180 ahead are kept. Haste never deletes a reminder,
+  and an agent can only add or complete one.
+- **Local state stays local.** Mute, archive for chats, set aside, local events and the colour
+  choices are not written to any provider. A resync forgets haste's copy and reads the inbox again.
+- **A send is gone if you close the TUI during its wait.** The countdown runs in the TUI; closing it
+  leaves the draft in the Outbox. (Scheduled sends run in the daemon.)
+- **Search is a plain text match** (capitals fold only for plain letters), over what haste stored.
+- **Herdr is pinned to protocol 22.** A different version stops the machine's observation with a
+  notice until the schema copy is updated.
+- **Built for one person's setup.** Some choices (Primary-tab Gmail, a Monday-to-Friday calendar,
+  the emoji keyboard, key bindings) are opinions. Most are configurable by a file; the rest are in
+  the source and easy to change.
 
 ## Layout
 
@@ -17,13 +138,14 @@ The other connectors are separate, later changes (see the roadmap below).
 | `haste-store` | SQLite (WAL), single writer thread, migrations |
 | `hasted` | the daemon: Unix socket server, schedulers, result delivery |
 | `haste` | agent CLI. Build with `--features human` for the human-shell verbs |
-| `haste-tui` | ratatui interface (Catppuccin Mocha): Today, Channels, Calendar, plus approvals, connectors and agents |
+| `haste-tui` | ratatui interface (Catppuccin Mocha): Today, Channels (with the connectors), Calendar, Later, Outbox, Muted and Logs; also `--status` for herdr's status bar |
 | `haste-herdr` | herdr link: local socket feed, the hub's `--machine` CLI feed, safe command builder, pinned protocol schema |
 | `haste-connector-icloud` | iCloud Mail connector (read-only IMAP), authorization helper `haste-icloud-auth`, Keychain secret store |
 | `haste-connector-reminders` | Apple Reminders connector: typed helper protocol, runner, and the Swift EventKit helper (`helper/`) |
 | `haste-google-oauth` | shared Google OAuth (PKCE loopback, token refresh, Keychain store, error mapping); each connector brings its own scopes and Keychain service |
 | `haste-connector-gcal` | Google Calendar connector (incremental read, approved create/update, no delete), consent helper `haste-gcal-auth` |
-| `haste-connector-gmail` | Gmail connector (read + plain-text drafts), OAuth helper `haste-gmail-auth`, Keychain token store |
+| `haste-connector-gmail` | Gmail connector (read, plain-text drafts and sends, archive), OAuth helper `haste-gmail-auth`, Keychain token store |
+| `haste-connector-beeper` | WhatsApp, Messenger, iMessage and Google Chat through Beeper Desktop's local API, helper `haste-beeper-auth` |
 
 ```
  haste CLI (agents) ─┐                     ┌─ SQLite store (single writer)
@@ -84,9 +206,10 @@ connector cannot archive, label or delete. It only asks Google for the `gmail.re
 
 ### Sending (human only)
 
-Select an approved draft in Approvals and press `s`. haste first shows a **preview**: who it
+Write a reply in the TUI (`r` on a thread, then `Enter` and `y`), or select an approved draft in
+the Outbox and press `s`. haste first resolves a **preview**: who it
 goes to, the subject, how many sends you have left this hour, and whether the thread changed.
-It then counts down 5 seconds (any key cancels, nothing is sent if you do) and sends once. A stale thread, or recipients that changed after you looked, still ask for `y` instead. It refuses (`recipients_changed`) if the recipient it now
+It then waits (3 seconds for a chat, 10 for mail; `U` cancels, nothing is sent if you do) and sends once. A stale thread, or recipients that changed after you looked, still ask for `y` instead. It refuses (`recipients_changed`) if the recipient it now
 resolves differs from the one you were shown. The recipient is the draft's `to`, otherwise the last
 person in the thread who is not you; there is exactly one recipient (no Cc, no Bcc, no reply-all).
 
@@ -198,7 +321,7 @@ restriction or challenge, with no retry, and never releases it.
 1. `haste connector gmail auth` finishes and prints your address; `haste connector status` shows `gmail` running.
 2. After five minutes (or a daemon restart) `haste thread list --source gmail` shows recent threads.
 3. As an agent: `haste draft --thread <id> --body "Thanks, noon works."`
-4. In `haste-tui` approve the proposal: a plain-text draft appears in that Gmail thread, and the proposal's result reads `draft:<id>`.
+4. Approve the proposal with `haste proposal approve <id>` (the id is in the agent's output): a plain-text draft appears in that Gmail thread, and the proposal's result reads `draft:<id>`.
 5. `haste connector engage gmail`, wait one cycle: no new Gmail requests; `release` resumes it.
 
 On first use macOS may ask whether `hasted` may read the Keychain item created by the auth
@@ -267,7 +390,7 @@ one cycle, then waits for the next one, and never trips the breaker.
 
 ### Sending from iCloud (human only)
 
-The same flow as Gmail (preview, 5-second cancellable countdown, one recipient, at most once, NEEDS CHECK when the
+The same flow as Gmail (preview, short cancellable wait, one recipient, at most once, NEEDS CHECK when the
 outcome is unknown), over SMTP: `smtp.mail.me.com:587` with STARTTLS and certificate verification,
 logging in with the same app-specific password from the Keychain. The message is plain text with
 `From` set to your iCloud address. After the server accepts it, haste files one copy in your Sent
@@ -294,14 +417,13 @@ herdr has the saved SSH machines:
 Turn it off with `HASTE_HERDR=0`. `HASTE_HERDR_SOCKET` and `HASTE_HERDR_BIN` override the socket
 path and the `herdr` executable.
 
-### The Agents tab and blocked agents
+### Seeing agents and blocked agents
 
-`haste-tui` has an **Agents** tab: every machine with its state (connected, unreachable, or
-protocol mismatch) and, while it is connected, its workspaces and agents with their status and how
-long they have had it. An unreachable machine shows no rows rather than stale ones. Agents that
-herdr reports as `blocked` (waiting on an approval or question) also appear in the **Approvals**
-tab, in a read-only *Blocked agents* group, oldest first. Haste never sends keystrokes or reads
-pane output; the tab only shows who and where.
+`haste machine status` (human build) lists every machine with its state (connected, unreachable, or
+protocol mismatch) and, while it is connected, its workspaces and agents with their status. An
+unreachable machine shows no rows rather than stale ones. The TUI does not list agents any more;
+it shows you the notices below in its footer. Haste never sends keystrokes or reads pane output; it
+only shows who and where.
 
 You get a notice when an agent becomes blocked or done (rate limited: a burst of 3, then one per
 30 seconds per agent, blocked notices at most one per 10 seconds per machine). Starting haste
@@ -327,8 +449,7 @@ only threads tagged with a project that has a workspace on its own machine.
 When an agent proposes something from a herdr pane, the `haste` CLI sends two hints:
 `HERDR_PANE_ID` (herdr sets this) and `HASTE_MACHINE` (the herdr machine label; `local` if unset).
 The daemon looks the pane up and stores the pane's **workspace label as the proposal's project**,
-and the machine as its origin. In Approvals, press `P` to group by project instead of by agent;
-`/` also filters by project. Set `HASTE_MACHINE=m1` in the shell profile on machine `m1`.
+and the machine as its origin. Set `HASTE_MACHINE=m1` in the shell profile on machine `m1`.
 
 Hints are routing only. Who the caller is still comes from the token alone, and a hint can never
 grant anything. How the CLI on a *remote* machine reaches the hub's daemon is out of scope here.
@@ -358,7 +479,7 @@ audited or announced; the audit log records machine labels, ids and counts only.
 ### Manual smoke check (real hub)
 
 1. Start `hasted`; `haste machine status` lists `local` and each enabled saved machine as connected.
-2. Make an agent wait on an approval in a herdr pane: it appears under *Blocked agents* in Approvals.
+2. Make an agent wait on an approval in a herdr pane: `haste machine status` shows it blocked and the footer announces it.
 3. From an agent in workspace `haste`, run `haste draft --thread <id> --body hi`: the proposal row shows `[haste]`.
 4. `haste tag add <thread-id> haste` works; `haste tag add <thread-id> nonsense` is refused.
 
@@ -391,8 +512,8 @@ proposal **and** run it. haste never deletes or edits a reminder.
 
 - Leave a list out (groceries, say): `haste connector reminders exclude "Groceries"` (the name as Reminders shows it, any case). Its reminders are no longer read or shown, and what was stored from it disappears within a minute; no restart. `include` brings it back, `excluded` lists them. The setting is `reminders.json` in the data folder.
 - Email to reminder: `haste email to-reminder <thread-id> [--title ..] [--project ..] [--due ..]`
-  (or `T` on a thread in the TUI). It creates a proposal; approve it (`a`), then run it (`s`, or
-  `haste proposal execute <id>`).
+  (or `T` on a thread in the TUI). It creates a proposal; approve it (`haste proposal approve <id>`), then run it
+  (`haste proposal execute <id>`).
 - Agents: `haste reminder create --title ".." --from-thread <id>`, `haste reminder complete <id>`,
   `haste reminder list`. Their `project` defaults to the workspace of their herdr pane and must be
   a known workspace label.
@@ -452,7 +573,7 @@ target/human/release/haste connector gcal auth
 
 - Agents: `haste event list`, `haste event create --calendar primary --title ".." --start <unix> --end <unix>`,
   `haste event update <event-id> --title ".."`. Their `project` defaults to the workspace of their herdr pane.
-- You: approve (`a`), then run (`s` in the TUI, or `haste proposal execute <id>`). Tag an event with
+- You: approve (`haste proposal approve <id>`), then run (`haste proposal execute <id>`). Tag an event with
   `haste tag add-event <event-id> <project>`; a machine sees an event only if it is tagged with a
   workspace that exists on that machine.
 - An update proposed against an event that changed afterwards is marked STALE and needs your
@@ -535,7 +656,7 @@ a `---` line or a `<!-- haste:` marker. Machine principals never write notes.
 ### Reviewing
 
 - Notes land directly by default. To review an agent's notes first, run
-  `haste note mode <agent> approval`: its notes then wait in Approvals (`a` writes it, `r` drops it)
+  `haste note mode <agent> approval`: its notes then wait for `haste proposal approve <id>` (or `haste proposal reject <id>` to drop it)
   and nothing is written until you approve. `haste note mode <agent> auto` switches back.
 - `haste note show <path>` reads a note; `haste note log [--since <unix>]` lists writes (path,
   outcome, bytes or reason, never text).
@@ -549,37 +670,53 @@ the folder is not synced; if you move it into a synced location, test it first.
 
 ## The TUI
 
-`haste-tui` uses the Catppuccin Mocha palette (all colours live in `crates/haste-tui/src/theme.rs`)
-and has three main tabs, plus three secondary screens:
+`haste-tui` uses the Catppuccin Mocha palette (all colours live in `crates/haste-tui/src/theme.rs`).
+The header shows the screens; press the number to go there. `Esc` goes back, `q` quits (`Ctrl-q`
+sends it to the background in the herdr popup, `Ctrl-Q` or `Ctrl-c` quits there).
 
 | Key | Screen |
 |---|---|
-| `1` Today | Two panes. **Incoming** (top): every channel under the active filter, priority first, then newest; 25 rows at a time, `j`/`k` scrolls through the rest. **TODO** (below): open Apple Reminders due today (overdue included) or with no date. `Tab` switches the cursor between the two panes |
-| `2` Channels | The same inbox by channel (gmail, icloud, whatsapp, messenger, imessage, googlechat) with counts; `Enter` opens a channel, `Esc` goes back. `A` lists the archived threads too (they stay in haste's own copy, marked `⌂ archived`) |
-| `/` | search the threads on Today, Channels, Later and Muted: it narrows as you type over the subject, the people and the start of the newest message; `Enter` also looks through the text of every stored message, archived threads included; `Esc` ends the search |
-| `3` Calendar | The next 7 days of your calendar, grouped by day (read-only, your local time) |
-| `5` `6` `7` | Outbox, Muted, Logs (`Esc` returns to Today); the header shows the number of drafts waiting |
+| `1` Today | **Incoming** (top): every channel under the active filter, priority first, then newest. The row under the cursor opens into a three-line box with the start of the newest message. **TODO** (below): open Apple Reminders due today, overdue or without a date. `Tab` switches panes |
+| `2` Channels | The channels with counts, then the other connectors (calendar, reminders) with the time each was last read (`↻`, yellow when overdue, `stopped` in red). `Tab` switches between the list and a channel's threads; `u` reads the provider now, `R` releases and `E` stops a connector. Archived threads are listed too (`⌂ archived`); `A` hides them |
+| `3` Calendar | A Monday-to-Friday week (the coming week on a weekend). `[` `]` change week, `T` this week, `h` `l` move between days, `j` `k` between items. Today is marked and a red line shows the time now. Each calendar has its own colour. `c` adds an event (see below), `Enter` moves or resizes one **here only**, `x` deletes an event that lives only in haste |
+| `4` Later | Threads set aside or snoozed, and TODOs with a later date |
+| `5` Outbox | Drafts waiting to be sent and scheduled sends: `s` send now (asks `y`), `t` send later, `u` remove the send time, `d` discard, `m` / `b` settle a NEEDS CHECK send (`m` it is there, `b` it is not) |
+| `6` Muted | Mail from muted senders (hidden everywhere else): `b` lets a sender back, `d` deletes a mail from haste's copy |
+| `7` Logs | What the daemon and the TUI have been doing, for debugging (`w` shows warnings only) |
+| `/` | Search the threads on Today, Channels, Later and Muted: it narrows as you type over the subject, the people and the start of the newest message; `Enter` also searches the text of every stored message, archived threads included; `Esc` ends it |
 
 On a thread (Today, or inside a channel), only you can use these keys:
 
 | Key | Does |
 |---|---|
-| `Enter` | open the thread and read it: every message in a chat-style frame (yours on the right, links underlined, attachment names shown), oldest first, starting at the newest. the newest 6 messages are shown and `o` shows 6 more (older ones are already stored, nothing is read again), `j`/`k` move between messages, `g`/`G` first and last, opening a thread also reads its earlier history once (iCloud: the same subject in your folders and Archive; chats: up to 150 older messages; Gmail already gives whole threads), chat messages show their reactions under the text (`↳ 👍×2 ❤️`; they refresh when you open the chat, at most every 10 minutes), `+` reacts to the selected chat message (a human-only action: pick 1-8, sent once through your chat network, never retried, audited with counts only), links are clickable (Cmd-click in a terminal with hyperlink support; a long address is shown as `https://host/…` and the full one is opened), and HTML mail keeps each link's address next to its text, `r` reply, `n` note, `l` label, `e` archive, `Esc` closes. Message text is cleaned of terminal control and bidirectional characters before it is drawn, and is never written to the logs |
-| `e` | archive, **in haste only**: the thread leaves the inbox, nothing changes in Gmail, iCloud or the chat app |
-| `r` | write a reply in `$VISUAL`/`$EDITOR`; the text becomes a draft proposal (approve it in Approvals, then send as usual). A mail thread with several people asks first; **reply-all is not available yet** because sending addresses one recipient |
-| `g` | put aside / bring back (aside threads leave Today and show with `◌` in Channels) |
-| `p` | toggle priority (marked `★`, sorted first) |
-| `s` | snooze, whole hours or days only: `3h`, `2d` |
-| `t` | turn the thread into a TODO. One key picks when: `Enter` the suggestion (a `YYYY-MM-DD` date in the subject at 09:00, otherwise tomorrow morning), `m` tomorrow morning (09:00), `w` next week (Monday 09:00), `l` later (three hours from now), `n` no date, `c` type a date (`2026-11-20 14:30`, `tomorrow`, `+3d`). Times are your local time. The reminder is created at once: only agents' actions wait for approval |
+| `Enter` | open the thread: every message in a chat-style frame (yours on the right, links underlined and clickable with Cmd-click, attachment names shown), oldest first, starting at the newest. `j`/`k` move between messages, `g`/`G` first and last, `Ctrl-d`/`Ctrl-u` scroll, `o` shows older ones (opening a thread reads its earlier history once), `x` folds a long message, `u` marks mail read or unread, `a` lists attachments (`p` preview, `Enter` or `d` save), `y` copies the selected message to the clipboard, `Ctrl-o` reacts to a chat message (a human-only action, sent once, never retried), `r` replies, `l` labels, `e` archives, `Esc` closes. Message text is cleaned of terminal control and bidirectional characters before it is drawn and is never written to the logs |
+| `r` | write a reply under the thread (see below) |
+| `e` | archive: Gmail and iCloud archive at the provider too (only when that worked); chats are archived in haste only. The thread leaves the list at once and comes back if the provider refuses; a new message from the other side brings it back to the inbox |
+| `g` | put aside / bring back (aside threads show with `◌` in Channels and wait on the Later tab) |
+| `p` | toggle priority (`★`, sorted first); `P` makes the sender a priority sender |
+| `s` | snooze with a popup: In 3 hours, Tomorrow morning, Next Monday, or type `3h`, `2d`, `1w` |
+| `t` | turn the thread into a TODO. One key picks when: `Enter` the suggestion (a `YYYY-MM-DD` date in the subject at 09:00, otherwise tomorrow morning), `m` tomorrow morning, `w` next week, `l` in three hours, `n` no date, `c` type a date. The reminder is created at once: only agents' actions wait for approval |
 | `x` | mute: the sender goes into `.haste_ignore` and the thread leaves Today and Channels (see below) |
 | `f` | next preset filter |
 | `j` `k` `G` `0` | move, bottom, top |
 
-In the TODO pane: `Space` selects a task (several if you like), `e` marks the selected tasks, or the
-one under the cursor, as done. They stay listed, struck through, for **30 seconds** (`e` on one again
-takes it back); then haste completes them in Reminders and removes them. Closing the TUI finishes
-the ones still waiting instead of dropping them. Completing runs through the same audited steps as
-an approval (propose, approve, run).
+**The reply box** works like a prompt. `Enter` sends after a question (`y` sends; `n` or any other key goes back to the
+text), `Ctrl-j` or `Alt-Enter` starts a new line, `Ctrl-a` / `Ctrl-e` go to the start and end of the
+line, `Ctrl-o` opens the emoji keyboard (34 emojis on the digits and letters; the layout is in
+`crates/haste-tui/src/emoji.rs`), `Ctrl-g` writes it in `$EDITOR`, `Ctrl-l` sends later, `Ctrl-f` attaches a
+file, `Ctrl-x` removes the last file, `Ctrl-s` keeps a draft, `Ctrl-h` lists all of these, and `Esc`
+asks whether to keep a draft. After the `y` the send waits 3 s (chat) or 10 s (mail); `U` takes it back
+and opens the reply with the text again. A draft kept for a thread is there when you reopen it.
+
+**Calendar events** are made with `c`: one popup, the calendar first. **Local only** is the default
+(nothing goes to Google); the other choices are the Google calendars on screen, created through the
+same audited propose, approve and run steps as an agent's, with no guest ever emailed.
+
+In the TODO pane: `Space` selects tasks, `e` marks the selected ones (or the one under the cursor) as
+done. They stay listed, struck through, for **10 seconds** (`e` again takes it back); then haste
+completes them in Reminders. Closing the TUI finishes the ones still waiting. `c` makes a new TODO,
+`Enter` edits one (title, date, repeat, how long it takes on the calendar, early alert, priority,
+labels, files), `s` snoozes (the new due time is written to Reminders), `g` sets one aside (local).
 
 **Muting** is local: `.haste_ignore` in the data folder holds one regular expression per line
 (`#` starts a comment), matched case-insensitively against a thread's senders (for a chat, also its
@@ -602,6 +739,53 @@ the footer and the previous filters stay active; with no file there is one filte
 A thread matches when every key present matches; within one key any value may match. Keys:
 `sender` (part of a participant address), `subject`, `source`, `min_priority`. Gmail labels and an
 unread flag are not stored yet, so they are not filter keys.
+
+## Using the TUI with herdr
+
+Three small pieces connect `haste-tui` to [herdr](https://herdr.dev). All optional, all in
+`~/.config/herdr/config.toml` (then `herdr server reload-config`).
+
+**A status-bar line.** `haste-tui --status` prints one line and exits (no screen, no log file):
+`☐ <most important overdue task> +N`, `✉ N` (unread mail in the inbox: not archived, muted, aside,
+snoozed or from a sender not accepted yet) and `⚠ <connector>` (a stopped connector or one not read for 15 minutes).
+It prints nothing when there is nothing to say, so herdr hides the entry:
+
+```toml
+[ui]
+tab_bar_right = [
+  { type = "command", command = "haste-tui --status", interval_seconds = 15, timeout_seconds = 5 },
+  { type = "datetime", format = "%H:%M" },
+]
+```
+
+**A popup that keeps running.** A herdr popup is destroyed when its command ends, so
+`scripts/herdr-haste-popup.sh` runs `haste-tui` inside a small tmux session of its own (a separate
+socket, no status bar, no key bindings; `scripts/herdr-haste-tmux.conf`) and the popup only attaches
+to it. `Ctrl-q` in the TUI detaches (the popup closes, the TUI keeps running); `prefix+i` attaches
+again where you left off; `Ctrl-Q` or `Ctrl-c` quits it. Needs `tmux`.
+
+```sh
+cp scripts/herdr-haste-popup.sh ~/.config/herdr/haste-popup.sh
+cp scripts/herdr-haste-tmux.conf ~/.config/herdr/haste-tmux.conf
+chmod +x ~/.config/herdr/haste-popup.sh
+```
+
+```toml
+[[keys.command]]
+key = "prefix+i"
+type = "popup"
+command = "~/.config/herdr/haste-popup.sh"
+width = "92%"
+height = "90%"
+```
+
+Inside the popup you cannot select text with the mouse; `y` in a thread copies the selected message to the clipboard instead. If you would rather have
+the TUI in a tab of its own, `scripts/herdr-haste-toggle.py` (copy it to `~/.config/herdr/haste-toggle.py`)
+flips to a `haste` tab and back with one key (bind it as a `type = "shell"` command); `Ctrl-q` then
+returns to the previous tab.
+
+**Agents and projects** (the Agents panel, workspace names as project tags, results sent back to the
+agent) are described in *Herdr: agents, projects and machines* above.
 
 ## Logging and diagnosing problems
 
@@ -637,11 +821,13 @@ haste logs --json                            # raw lines
 
 `HASTE_LOG=debug` (set before starting `hasted`) records successful requests too. Times are UTC.
 
-## Beeper (WhatsApp, Messenger, iMessage)
+## Beeper (WhatsApp, Messenger, iMessage, Google Chat)
 
-WhatsApp, Messenger and iMessage come in through **Beeper Desktop's local API** (a loopback server
-on this Mac, `http://127.0.0.1:23373`). haste starts the three connectors **engaged**: nothing is
-requested until you release a source (`haste connector release whatsapp`, and so on).
+WhatsApp, Messenger, iMessage and Google Chat come in through **Beeper Desktop's local API** (a loopback server
+on this Mac, `http://127.0.0.1:23373`). haste starts the four connectors **engaged**: nothing is
+requested until you release a source (`haste connector release whatsapp`, `messenger`, `imessage`,
+`googlechat`). Google Chat and Messenger run in Beeper's cloud, so their accounts need
+`"allow_cloud": true` in `beeper.json` (see below).
 
 Read this before you turn it on:
 
@@ -656,7 +842,7 @@ Read this before you turn it on:
   reported cloud connection; `allow_cloud` is the only way to accept one.
 - **iMessage self-chat does not send.** A message to your own iMessage chat came back unconfirmed (NEEDS CHECK, nothing delivered); sends to other contacts work. WhatsApp and Messenger self-chats work.
 - **Agents never send.** They propose a reply; approving it creates nothing at Beeper. Only you can
-  send, from the TUI: the preview shows the chat name, the network and the remaining sends, and the send runs after a 5-second countdown you can cancel.
+  send, from the TUI: the preview shows the chat name, the network and the remaining sends, and the send runs after a 3-second wait you can cancel with `U`.
 
 ### Setup
 
@@ -686,7 +872,7 @@ Read this before you turn it on:
 
 ### Sending (human only)
 
-The same flow as email (preview, 5-second cancellable countdown, at most once, NEEDS CHECK when the outcome is
+The same flow as email (preview, short cancellable wait, at most once, NEEDS CHECK when the outcome is
 unknown) with chat limits: one chat per message, at most 4 KiB of text, **10 per hour for each
 network's account and 20 per day across all three**. The confirmation is bound to a digest of the chat id, the
 chat name and the text, so a changed chat is refused. A refused or failed send returns the

@@ -491,6 +491,22 @@ fn start_archive(app: &mut App, jobs: &Sender<ArchiveJob>, thread_id: String) {
 
 fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
     match effect {
+        Effect::Background => {
+            // hand the screen back to the tab before this one; the TUI stays up. Without the
+            // helper (or if it fails) it quits as `q` always did.
+            let sent = std::env::var_os("HASTE_HERDR_TOGGLE").is_some_and(|toggle| {
+                std::process::Command::new(toggle)
+                    .arg("--leave")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .is_ok_and(|s| s.success())
+            });
+            if !sent {
+                return run_effect(app, client, Effect::Quit);
+            }
+        }
         Effect::Quit => {
             // tasks marked done are finished, not dropped, when the TUI closes
             let ids = app.take_pending_done();
@@ -1443,6 +1459,7 @@ fn main() -> io::Result<()> {
     let events = client.subscribe();
     let mut app = App::new();
     app.calendar_colors = haste_tui::calendarcolors::CalendarColors::load(&base_dir());
+    app.background_mode = std::env::var_os("HASTE_HERDR_TAB").is_some();
     refresh(&mut app, &client);
     if app.calendar_colors.ignored > 0 {
         app.status = format!(

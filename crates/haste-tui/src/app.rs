@@ -348,6 +348,9 @@ pub enum Effect {
     DeleteEvent {
         event_id: String,
     },
+    /// `q` while the TUI lives in a tab of its own: go back to the tab before it and keep
+    /// running, so the next visit finds everything where it was left.
+    Background,
     /// Put this text on the clipboard.
     CopyText {
         text: String,
@@ -607,6 +610,9 @@ pub struct App {
     pub event_form: Option<Box<crate::eventedit::EventForm>>,
     /// The popup that adds an event, while `Mode::NewEvent`.
     pub new_event: Option<Box<crate::eventnew::NewEventForm>>,
+    /// Running in a Herdr tab of its own: `q` sends it to the background instead of quitting
+    /// (`Q` quits).
+    pub background_mode: bool,
     /// The colour of each calendar on the Calendar tab (`calendar_colors.json`).
     pub calendar_colors: crate::calendarcolors::CalendarColors,
     /// The duration popup while `Mode::TaskDuration`: reminder id, title, minutes.
@@ -786,6 +792,7 @@ impl App {
             remind: None,
             event_form: None,
             new_event: None,
+            background_mode: false,
             calendar_colors: crate::calendarcolors::CalendarColors::default(),
             task_duration: None,
             known_labels: Vec::new(),
@@ -1564,7 +1571,8 @@ impl App {
             || (self.view == View::Later && self.later_focus == TodayFocus::Inbox)
             || self.view == View::Muted;
         match key {
-            Key::Char('q') => return Some(Effect::Quit),
+            Key::Char('q') if self.background_mode => return Some(Effect::Background),
+            Key::Char('q' | 'Q') => return Some(Effect::Quit),
             Key::Tab | Key::BackTab if self.view == View::Today => {
                 self.today_focus = match self.today_focus {
                     TodayFocus::Inbox => TodayFocus::Todo,
@@ -5932,5 +5940,15 @@ mod tests {
         assert_eq!(app.mode, Mode::Read);
         app.handle_key(Key::Ctrl('e'));
         assert!(matches!(app.mode, Mode::React { .. }));
+    }
+
+    #[test]
+    fn q_sends_the_tui_to_the_background_in_a_herdr_tab_and_big_q_quits() {
+        let mut app = inbox_app();
+        // on its own, q quits as before
+        assert_eq!(app.handle_key(Key::Char('q')), Some(Effect::Quit));
+        app.background_mode = true;
+        assert_eq!(app.handle_key(Key::Char('q')), Some(Effect::Background));
+        assert_eq!(app.handle_key(Key::Char('Q')), Some(Effect::Quit));
     }
 }

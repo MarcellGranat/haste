@@ -3704,8 +3704,9 @@ mod tests {
         use haste_core::model::{RepeatFreq, RepeatRule};
         let mut app = App::new();
         let now = haste_core::time::now_secs();
-        let mut daily = reminder_view("daily", Some(on_a_weekday(now, 3_600)));
-        pin_week(&mut app, on_a_weekday(now, 3_600));
+        // times counted from the Monday of the week shown, so the test means the same on any day
+        let monday = inbox::week_start(now, app.tz_offset, 0);
+        let mut daily = reminder_view("daily", Some(monday + 9 * 3_600));
         daily.repeat = Some(RepeatRule {
             freq: RepeatFreq::Day,
             every: 1,
@@ -3714,10 +3715,10 @@ mod tests {
         done.reminder.completed = true;
         app.set_reminder_list(vec![
             daily,
-            reminder_view("once", Some(on_a_weekday(now, 2 * 86_400))),
-            reminder_view("old", Some(now - 5 * 86_400)),
+            reminder_view("once", Some(monday + 2 * 86_400 + 9 * 3_600)),
+            reminder_view("old", Some(monday - 3 * 86_400)),
             reminder_view("undated", None),
-            reminder_view("far", Some(now + 30 * 86_400)),
+            reminder_view("far", Some(monday + 30 * 86_400)),
             done,
         ]);
         let tasks: Vec<(&str, i64)> = app
@@ -5266,12 +5267,9 @@ mod tests {
     fn left_and_right_go_to_the_next_day_on_the_item_nearest_the_same_hour() {
         let mut app = App::new();
         let now = haste_core::time::now_secs();
-        // from tomorrow on, so no event is already past whatever the time of day is
-        let day1 = on_a_weekday(now + 86_400, 3_600);
-        pin_week(&mut app, day1);
-        let day1 = day1 - day1.rem_euclid(86_400);
-        let day2 = on_a_weekday(day1 + 86_400 + 1, 0);
-        let day2 = day2 - day2.rem_euclid(86_400);
+        // Tuesday and Wednesday of the week shown, so the test means the same on any day
+        let monday = inbox::week_start(now, app.tz_offset, 0);
+        let (day1, day2) = (monday + 86_400, monday + 2 * 86_400);
         let h = 3_600;
         app.set_events(vec![
             event_view("a-9", day1 + 9 * h, 60, false),
@@ -5281,6 +5279,7 @@ mod tests {
             event_view("b-17", day2 + 17 * h, 60, false),
         ]);
         press(&mut app, "3");
+        app.calendar_selected = 0;
         let id_at = |app: &App| match app.agenda()[app.calendar_selected] {
             AgendaItem::Event(e) => e.event.id.clone(),
             AgendaItem::Task { .. } => String::new(),

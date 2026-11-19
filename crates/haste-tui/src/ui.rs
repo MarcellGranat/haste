@@ -125,6 +125,28 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
     )
 }
 
+/// The few keys a reply box shows: the editor, send, and the list of the rest.
+fn reply_hint_line() -> Line<'static> {
+    let key = |k: &'static str| {
+        Span::styled(
+            k,
+            Style::new()
+                .fg(theme::HINT_KEY)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+    let text = |t: &'static str| Span::styled(t, Style::new().fg(theme::HINT_TEXT));
+    Line::from(vec![
+        text(" "),
+        key("Ctrl-g"),
+        text(" edit in $EDITOR · "),
+        key("Enter"),
+        text(" send · "),
+        key("Ctrl-h"),
+        text(" more keys "),
+    ])
+}
+
 /// The list of every key of the reply box, over it, closed by any key.
 fn draw_reply_help(frame: &mut Frame<'_>, over: Rect) {
     const KEYS: [(&str, &str); 12] = [
@@ -257,27 +279,11 @@ fn draw_compose(frame: &mut Frame<'_>, app: &App, area: Rect, docked: bool) {
     }
     frame.render_widget(Paragraph::new(attach), areas[n]);
     if matches!(c.kind, crate::compose::ComposeKind::Reply { .. }) {
-        // a reply shows two keys; Ctrl-h lists the others
-        let key = |k: &'static str| {
-            Span::styled(
-                k,
-                Style::new()
-                    .fg(theme::HINT_KEY)
-                    .add_modifier(Modifier::BOLD),
-            )
-        };
-        let text = |t: &'static str| Span::styled(t, Style::new().fg(theme::HINT_TEXT));
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                key("Ctrl-g"),
-                text(" edit in $EDITOR  "),
-                key("Enter"),
-                text(" send  "),
-                key("Ctrl-h"),
-                text(" more keys"),
-            ])),
-            areas[n + 1],
-        );
+        // a reply shows three keys, in the place the thread's keys had (under the thread);
+        // with no thread on screen they are here. Ctrl-h lists the others.
+        if app.reader.is_none() {
+            frame.render_widget(Paragraph::new(reply_hint_line()), areas[n + 1]);
+        }
         if c.help {
             draw_reply_help(frame, rect);
         }
@@ -2746,11 +2752,14 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(lines)
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
-            .block(if app.compose.is_some() {
-                // the reply box has its own keys; the thread's would only be in the way
-                block
-            } else {
-                block.title_bottom(hint)
+            .block(match &app.compose {
+                // a reply box open under the thread: its keys take the place of the thread's
+                Some(c) if matches!(c.kind, crate::compose::ComposeKind::Reply { .. }) => {
+                    block.title_bottom(reply_hint_line())
+                }
+                // any other box has its own keys; the thread's would only be in the way
+                Some(_) => block,
+                None => block.title_bottom(hint),
             }),
         area,
     );
@@ -3728,7 +3737,11 @@ mod tests {
             !text.contains("o older") && !text.contains("q quit"),
             "{text}"
         );
-        assert!(text.contains("Ctrl-g"), "its own keys stay: {text}");
+        // the reply's keys sit where the thread's were, under the thread
+        assert!(
+            text.contains("Ctrl-g") && text.contains("$EDITOR") && text.contains("Ctrl-h"),
+            "{text}"
+        );
         // the box is drawn in the reply colour
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         terminal.draw(|f| draw(f, &app)).unwrap();

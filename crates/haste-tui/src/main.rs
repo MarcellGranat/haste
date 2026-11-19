@@ -13,6 +13,14 @@ const POLL: Duration = Duration::from_millis(200);
 
 fn map_key(code: KeyCode, mods: KeyModifiers) -> Option<Key> {
     Some(match code {
+        // Ctrl-Shift-q is told apart from Ctrl-q where the terminal reports the Shift
+        KeyCode::Char(c)
+            if mods.contains(KeyModifiers::CONTROL)
+                && c.eq_ignore_ascii_case(&'q')
+                && (c == 'Q' || mods.contains(KeyModifiers::SHIFT)) =>
+        {
+            Key::Ctrl('Q')
+        }
         KeyCode::Char(c) if mods.contains(KeyModifiers::CONTROL) => {
             Key::Ctrl(c.to_ascii_lowercase())
         }

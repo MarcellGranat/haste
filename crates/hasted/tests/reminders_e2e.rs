@@ -262,7 +262,16 @@ async fn agent(r: &Rig) -> String {
     token
 }
 
+/// How many reads of Reminders the audit log has recorded so far.
+fn logged_syncs(r: &Rig) -> usize {
+    std::fs::read_to_string(r.daemon.state.config.data_dir.join("audit.jsonl"))
+        .unwrap_or_default()
+        .matches(r#""action":"reminders.sync""#)
+        .count()
+}
+
 async fn release_and_sync(r: &Rig) {
+    let before = logged_syncs(r);
     human(
         r,
         RequestBody::ConnectorRelease {
@@ -271,6 +280,14 @@ async fn release_and_sync(r: &Rig) {
     )
     .await;
     sync_once(&r.daemon.state, &r.connector).await.unwrap();
+    // Releasing also wakes the daemon's own sync loop. Let that read finish too, so it cannot
+    // land in the middle of what the test does next and put an older list over a change.
+    for _ in 0..500 {
+        if logged_syncs(r) >= before + 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 async fn propose(

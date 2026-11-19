@@ -1448,6 +1448,15 @@ impl App {
             };
             return None;
         }
+        // leaving the TUI: Ctrl-q goes to the background in a Herdr tab of its own (and quits
+        // anywhere else), Ctrl-Q and Ctrl-c quit. Only where nothing is being typed.
+        if matches!(self.mode, Mode::Normal | Mode::Read | Mode::Detail(_)) {
+            match key {
+                Key::Ctrl('q') if self.background_mode => return Some(Effect::Background),
+                Key::Ctrl('q' | 'Q' | 'c') => return Some(Effect::Quit),
+                _ => {}
+            }
+        }
         // U withdraws a send that is waiting out its delay
         if key == Key::Char('U')
             && self.pending_send.is_some()
@@ -1571,8 +1580,10 @@ impl App {
             || (self.view == View::Later && self.later_focus == TodayFocus::Inbox)
             || self.view == View::Muted;
         match key {
-            Key::Char('q') if self.background_mode => return Some(Effect::Background),
-            Key::Char('q' | 'Q') => return Some(Effect::Quit),
+            // in a Herdr tab of its own `q` is only for moving around: Ctrl-q sends the TUI to the
+            // background, Ctrl-Q or Ctrl-c quits (see `handle_key`)
+            Key::Char('q') if self.background_mode => {}
+            Key::Char('q') => return Some(Effect::Quit),
             Key::Tab | Key::BackTab if self.view == View::Today => {
                 self.today_focus = match self.today_focus {
                     TodayFocus::Inbox => TodayFocus::Todo,
@@ -5943,12 +5954,20 @@ mod tests {
     }
 
     #[test]
-    fn q_sends_the_tui_to_the_background_in_a_herdr_tab_and_big_q_quits() {
+    fn ctrl_q_sends_the_tui_to_the_background_in_a_herdr_tab_and_ctrl_big_q_or_c_quits() {
         let mut app = inbox_app();
-        // on its own, q quits as before
+        // on its own, q and Ctrl-q quit as before
         assert_eq!(app.handle_key(Key::Char('q')), Some(Effect::Quit));
+        assert_eq!(app.handle_key(Key::Ctrl('q')), Some(Effect::Quit));
+        // in a tab of its own q only navigates; Ctrl-q goes to the background
         app.background_mode = true;
-        assert_eq!(app.handle_key(Key::Char('q')), Some(Effect::Background));
-        assert_eq!(app.handle_key(Key::Char('Q')), Some(Effect::Quit));
+        assert_eq!(app.handle_key(Key::Char('q')), None);
+        assert_eq!(app.handle_key(Key::Ctrl('q')), Some(Effect::Background));
+        assert_eq!(app.handle_key(Key::Ctrl('Q')), Some(Effect::Quit));
+        assert_eq!(app.handle_key(Key::Ctrl('c')), Some(Effect::Quit));
+        // the same keys do nothing while text is being typed
+        app.mode = Mode::Filter;
+        assert_eq!(app.handle_key(Key::Ctrl('c')), None);
+        assert_eq!(app.handle_key(Key::Ctrl('q')), None);
     }
 }

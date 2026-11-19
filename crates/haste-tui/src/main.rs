@@ -1343,7 +1343,46 @@ fn run_draft(
     .map(|()| id)
 }
 
+/// `haste-tui --status`: the line for Herdr's status bar (see `haste_tui::statusline`), then
+/// exit. No screen, no log file, one read of what it needs from the daemon. Printing nothing is
+/// meaningful: Herdr then hides the entry.
+fn status_main() {
+    let client = match Client::from_base(&base_dir()) {
+        Ok(c) => c,
+        Err(_) => {
+            println!("{}", haste_tui::statusline::unreachable());
+            return;
+        }
+    };
+    let mut app = App::new();
+    app.refresh_tz();
+    match client.call(RequestBody::ThreadList {
+        sources: vec![],
+        include_archived: false,
+        include_snoozed: true,
+    }) {
+        Ok(Response::Threads { threads }) => app.set_threads(threads),
+        _ => {
+            println!("{}", haste_tui::statusline::unreachable());
+            return;
+        }
+    }
+    load_rules(&mut app, &client);
+    load_reminders(&mut app, &client);
+    if let Ok(Response::Connectors { connectors }) = client.call(RequestBody::ConnectorStatus) {
+        app.set_connectors(connectors);
+    }
+    println!(
+        "{}",
+        haste_tui::statusline::line(&app, haste_core::time::now_secs())
+    );
+}
+
 fn main() -> io::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--status") {
+        status_main();
+        return Ok(());
+    }
     let _ = haste_core::log::init(
         &base_dir(),
         "haste-tui",

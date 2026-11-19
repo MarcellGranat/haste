@@ -1,5 +1,5 @@
 //! The emoji keyboard: every letter and digit key but `y` and `z` stands for one emoji. Ctrl-o
-//! in a text field and Ctrl-e on a chat message open it; pressing a key picks its emoji.
+//! in a text field and on a chat message open it; pressing a key picks its emoji.
 
 /// The keyboard rows, as laid out on a QWERTY keyboard without `y` and `z`, each key with its
 /// emoji. The first eight digits keep the order of the old reaction picker.

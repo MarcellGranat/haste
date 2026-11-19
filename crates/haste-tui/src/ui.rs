@@ -751,6 +751,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         View::Channels => vec![
             ("Enter", "open"),
             ("j/k", "move"),
+            ("Tab", "channels/threads"),
             ("/", "search"),
             ("A", "archived"),
             ("u", "refresh"),
@@ -3833,8 +3834,9 @@ mod tests {
         old.triage.archived = true;
         app.set_threads(vec![old]);
         app.handle_key(Key::Char('2'));
+        app.handle_key(Key::Char('A')); // they are listed by default; A hides them
         app.handle_key(Key::Enter);
-        assert!(!render(&app).contains("subject-old"), "hidden at first");
+        assert!(!render(&app).contains("subject-old"), "hidden after A");
         app.handle_key(Key::Esc);
         app.handle_key(Key::Char('A'));
         app.handle_key(Key::Enter);

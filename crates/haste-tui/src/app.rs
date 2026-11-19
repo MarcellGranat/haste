@@ -698,7 +698,8 @@ pub struct App {
     pub filter: String,
     /// The threads the daemon found for the search by their message text (after Enter).
     pub search_hits: Option<std::collections::HashSet<String>>,
-    /// The Channels tab lists archived threads too (they stay in haste's own copy).
+    /// The Channels tab lists archived threads too (they stay in haste's own copy); `A` hides
+    /// them. Today never lists them.
     pub show_archived: bool,
     pub collapsed: BTreeSet<String>,
     pub marked: BTreeSet<String>,
@@ -856,7 +857,7 @@ impl App {
             blocked_collapsed: false,
             filter: String::new(),
             search_hits: None,
-            show_archived: false,
+            show_archived: true,
             collapsed: BTreeSet::new(),
             marked: BTreeSet::new(),
             notices: Vec::new(),
@@ -1110,10 +1111,10 @@ impl App {
     }
 
     /// Threads passing the active filter, best first: priority, then newest activity.
-    fn filtered_threads(&self, include_aside: bool) -> Vec<&ThreadView> {
+    fn filtered_threads(&self, include_aside: bool, with_archived: bool) -> Vec<&ThreadView> {
         let filter = self.active_filter();
         // a search looks through archived threads too
-        let archived_shown = self.show_archived || self.searching();
+        let archived_shown = with_archived || self.searching();
         let mut out: Vec<&ThreadView> = self
             .threads
             .iter()
@@ -1147,7 +1148,7 @@ impl App {
     /// Today's inbox: every channel under the active filter, nothing set aside.
     #[must_use]
     pub fn today_threads(&self) -> Vec<&ThreadView> {
-        self.filtered_threads(false)
+        self.filtered_threads(false, false)
     }
 
     /// Start of tomorrow, and of the day after (local midnight as unix seconds).
@@ -1236,7 +1237,7 @@ impl App {
         let Some(name) = inbox::CHANNELS.get(i) else {
             return Vec::new();
         };
-        self.filtered_threads(false)
+        self.filtered_threads(false, self.show_archived)
             .into_iter()
             .filter(|t| t.thread.source.as_name() == *name)
             .collect()
@@ -1670,6 +1671,18 @@ impl App {
                     TodayFocus::Inbox => TodayFocus::Todo,
                     TodayFocus::Todo => TodayFocus::Inbox,
                 };
+            }
+            // on Channels Tab moves between the channel list and its threads, as on Today
+            Key::Tab | Key::BackTab if self.view == View::Channels => {
+                if self.channel_inner {
+                    self.channel_inner = false;
+                } else if self.channels_selected < inbox::CHANNELS.len() {
+                    self.channel_inner = true;
+                    self.channel_thread_selected = 0;
+                } else {
+                    self.status =
+                        "this one has no threads, only a state (R releases, E stops)".into();
+                }
             }
             Key::Tab | Key::BackTab if self.view == View::Later => {
                 self.later_focus = match self.later_focus {
@@ -5814,10 +5827,12 @@ mod tests {
         assert_eq!((app.view, app.today_focus), (View::Today, TodayFocus::Todo));
         app.handle_key(Key::BackTab);
         assert_eq!(app.today_focus, TodayFocus::Inbox);
-        // the other tabs cycle backwards, and Tab undoes it
+        // Channels has two panes too; the Calendar cycles the tabs, backwards with Shift-Tab
         press(&mut app, "2");
         app.handle_key(Key::BackTab);
-        assert_eq!(app.view, View::Today);
+        assert_eq!((app.view, app.channel_inner), (View::Channels, true));
+        app.handle_key(Key::BackTab);
+        assert!(!app.channel_inner);
         press(&mut app, "3");
         app.handle_key(Key::Tab);
         assert_eq!(app.view, View::Later);
@@ -5841,12 +5856,16 @@ mod tests {
             (app.view, app.today_focus),
             (View::Today, TodayFocus::Inbox)
         );
-        // on the other tabs it cycles the tabs
+        // on Channels it moves between the channel list and its threads
         press(&mut app, "2");
-        for expected in [View::Calendar, View::Later] {
-            app.handle_key(Key::Tab);
-            assert_eq!(app.view, expected);
-        }
+        app.handle_key(Key::Tab);
+        assert_eq!((app.view, app.channel_inner), (View::Channels, true));
+        app.handle_key(Key::Tab);
+        assert!(!app.channel_inner);
+        // on the Calendar it cycles the tabs
+        press(&mut app, "3");
+        app.handle_key(Key::Tab);
+        assert_eq!(app.view, View::Later);
         // Later has two panes like Today: Tab switches between them
         app.handle_key(Key::Tab);
         assert_eq!((app.view, app.later_focus), (View::Later, TodayFocus::Todo));
@@ -6163,16 +6182,24 @@ mod tests {
                 .collect()
         };
         // Gmail is the first channel
-        assert_eq!(ids(&app), ["t3", "t1"], "archived mail is hidden");
-        press(&mut app, "A");
-        assert!(app.show_archived);
         assert_eq!(
             ids(&app),
             ["t3", "t1", "old"],
-            "A lists the archived ones too"
+            "Channels lists the archived ones too"
         );
+        // Today never lists them
+        let today: Vec<String> = app
+            .today_threads()
+            .iter()
+            .map(|t| t.thread.id.clone())
+            .collect();
+        assert_eq!(today, ["t3", "t1"]);
         press(&mut app, "A");
-        assert_eq!(ids(&app), ["t3", "t1"]);
+        assert!(!app.show_archived);
+        assert_eq!(ids(&app), ["t3", "t1"], "A hides them");
+        press(&mut app, "A");
+        assert_eq!(ids(&app), ["t3", "t1", "old"], "and shows them again");
+        press(&mut app, "A");
         // a search types after / and narrows at once; archived threads are searched too
         press(&mut app, "/");
         assert_eq!(app.mode, Mode::Filter);
@@ -6231,5 +6258,36 @@ mod tests {
         app.handle_key(Key::Backspace);
         press(&mut app, "bela");
         assert_eq!(today(&app), ["b"], "a person");
+    }
+
+    #[test]
+    fn tab_on_channels_moves_between_the_channel_list_and_its_threads() {
+        let mut app = inbox_app();
+        press(&mut app, "2");
+        assert!(!app.channel_inner);
+        app.handle_key(Key::Tab);
+        assert!(app.channel_inner, "Tab goes to the threads");
+        assert_eq!(app.view, View::Channels, "and does not leave the tab");
+        app.handle_key(Key::Tab);
+        assert!(
+            !app.channel_inner,
+            "Tab again goes back to the channel list"
+        );
+        app.handle_key(Key::BackTab);
+        assert!(app.channel_inner);
+        app.handle_key(Key::BackTab);
+        assert!(!app.channel_inner);
+        assert_eq!(app.view, View::Channels);
+        // a connector row has no threads to go to
+        app.set_connectors(vec![haste_proto::ConnectorView {
+            source: "gcal".into(),
+            engaged: false,
+            registered: true,
+            last_synced: None,
+        }]);
+        press(&mut app, "G");
+        app.handle_key(Key::Tab);
+        assert!(!app.channel_inner);
+        assert!(app.status.contains("no threads"), "{}", app.status);
     }
 }

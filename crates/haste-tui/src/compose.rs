@@ -36,6 +36,8 @@ pub struct Compose {
     pub focus: usize,
     pub attachments: Vec<PathBuf>,
     pub picker: Option<FilePicker>,
+    /// The list of all keys is open (`Ctrl-h` in a reply).
+    pub help: bool,
 }
 
 /// What a key did to the form.
@@ -70,6 +72,7 @@ impl Compose {
             focus: 0,
             attachments: Vec::new(),
             picker: None,
+            help: false,
         }
     }
 
@@ -81,13 +84,13 @@ impl Compose {
             },
             heading: format!("Reply · {subject}"),
             fields: vec![Field {
-                label:
-                    "Reply · Ctrl-S or Ctrl-Enter sends (chat 3 s, mail 10 s) · Ctrl-L later · Esc keeps a draft",
+                label: "Reply",
                 area: TextArea::new("", true),
             }],
             focus: 0,
             attachments: Vec::new(),
             picker: None,
+            help: false,
         }
     }
 
@@ -119,6 +122,7 @@ impl Compose {
             focus: 0,
             attachments: Vec::new(),
             picker: None,
+            help: false,
         }
     }
 
@@ -154,6 +158,28 @@ impl Compose {
         self.picker = Some(FilePicker::new(files));
     }
 
+    /// The keys of a reply, which works like a terminal prompt: Enter sends (after a question),
+    /// Ctrl-j or Alt-Enter starts a new line, Ctrl-a and Ctrl-e go to the start and end of the
+    /// line, Ctrl-g edits it in `$EDITOR`, Ctrl-h lists the rest. `None` leaves the key to the
+    /// text box and the shared keys.
+    fn handle_reply_key(&mut self, key: Key) -> Option<ComposeOutcome> {
+        match key {
+            Key::Enter => Some(ComposeOutcome::Send),
+            Key::Ctrl('h') => {
+                self.help = true;
+                Some(ComposeOutcome::Continue)
+            }
+            // a new line (Ctrl-Enter and Alt-Enter arrive as `CtrlEnter`)
+            Key::Ctrl('j') | Key::CtrlEnter => {
+                self.fields[self.focus].area.handle(Key::Enter);
+                Some(ComposeOutcome::Continue)
+            }
+            // Ctrl-s keeps it as a draft without leaving
+            Key::Ctrl('s') => Some(ComposeOutcome::Save),
+            _ => None,
+        }
+    }
+
     pub fn handle(&mut self, key: Key) -> ComposeOutcome {
         if let Some(picker) = &mut self.picker {
             match picker.handle(key) {
@@ -167,6 +193,16 @@ impl Compose {
                 }
             }
             return ComposeOutcome::Continue;
+        }
+        if self.help {
+            // the key list closes on any key
+            self.help = false;
+            return ComposeOutcome::Continue;
+        }
+        if matches!(self.kind, ComposeKind::Reply { .. }) {
+            if let Some(outcome) = self.handle_reply_key(key) {
+                return outcome;
+            }
         }
         match key {
             Key::Esc => return ComposeOutcome::Cancel,

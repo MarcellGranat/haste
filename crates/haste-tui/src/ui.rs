@@ -2,7 +2,7 @@
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState, Wrap,
@@ -81,8 +81,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     {
         draw_snooze(frame, app, frame.area(), (thread_id, input, *todo, *pick));
     }
-    if matches!(base, Mode::Compose | Mode::ConfirmDiscardCompose)
-        || (matches!(base, Mode::SendAt { .. }) && app.compose.is_some())
+    if matches!(
+        base,
+        Mode::Compose | Mode::ConfirmDiscardCompose | Mode::ConfirmReply
+    ) || (matches!(base, Mode::SendAt { .. }) && app.compose.is_some())
     {
         let replying = app
             .compose
@@ -121,6 +123,45 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
         w,
         h,
     )
+}
+
+/// The list of every key of the reply box, over it, closed by any key.
+fn draw_reply_help(frame: &mut Frame<'_>, over: Rect) {
+    const KEYS: [(&str, &str); 12] = [
+        ("Enter", "send (asks y or n first; only y sends)"),
+        ("Ctrl-j / Alt-Enter", "new line"),
+        ("Ctrl-a / Ctrl-e", "start / end of the line"),
+        ("Ctrl-u", "delete from here to the start of the line"),
+        ("Ctrl-o", "emoji keyboard"),
+        ("Ctrl-l", "send later, at a time you choose"),
+        ("Ctrl-f", "attach a file"),
+        ("Ctrl-x", "remove the last attached file"),
+        ("Ctrl-s", "keep it as a draft"),
+        ("Ctrl-g", "write it in $EDITOR"),
+        ("Esc", "close the box (keep a draft, or discard)"),
+        ("any key", "closes this list"),
+    ];
+    let height = u16::try_from(KEYS.len() + 2).unwrap_or(14);
+    let rect = centered(over, 64.min(over.width.saturating_sub(4)), height);
+    frame.render_widget(Clear, rect);
+    let block = theme::panel(" Reply keys ").border_style(pane_border(true));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let lines: Vec<Line<'_>> = KEYS
+        .iter()
+        .map(|(k, what)| {
+            Line::from(vec![
+                Span::styled(
+                    format!(" {k:<18}"),
+                    Style::new()
+                        .fg(theme::HINT_KEY)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(*what, Style::new().fg(theme::TEXT)),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_compose(frame: &mut Frame<'_>, app: &App, area: Rect, docked: bool) {
@@ -202,6 +243,33 @@ fn draw_compose(frame: &mut Frame<'_>, app: &App, area: Rect, docked: bool) {
         )));
     }
     frame.render_widget(Paragraph::new(attach), areas[n]);
+    if matches!(c.kind, crate::compose::ComposeKind::Reply { .. }) {
+        // a reply shows two keys; Ctrl-h lists the others
+        let key = |k: &'static str| {
+            Span::styled(
+                k,
+                Style::new()
+                    .fg(theme::HINT_KEY)
+                    .add_modifier(Modifier::BOLD),
+            )
+        };
+        let text = |t: &'static str| Span::styled(t, Style::new().fg(theme::HINT_TEXT));
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                key("Ctrl-g"),
+                text(" edit in $EDITOR  "),
+                key("Enter"),
+                text(" send  "),
+                key("Ctrl-h"),
+                text(" more keys"),
+            ])),
+            areas[n + 1],
+        );
+        if c.help {
+            draw_reply_help(frame, rect);
+        }
+        return;
+    }
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -646,7 +714,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
                 ("d", "duration"),
                 ("c", "new"),
                 ("Space", "select"),
-                ("e", "done (30 s to undo)"),
+                ("e", "done (10 s to undo)"),
                 ("Tab", "to incoming"),
                 ("j/k", "move"),
             ]
@@ -684,7 +752,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
                 h.extend([
                     ("Enter", "edit"),
                     ("d", "duration"),
-                    ("e", "done (30 s to undo)"),
+                    ("e", "done (10 s to undo)"),
                 ]);
             }
             h.push(("Tab", "next tab"));
@@ -695,7 +763,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ("d", "duration"),
             ("c", "new"),
             ("Space", "select"),
-            ("e", "done (30 s to undo)"),
+            ("e", "done (10 s to undo)"),
             ("Tab", "to threads"),
             ("j/k", "move"),
         ],
@@ -833,6 +901,7 @@ fn thread_line(
     blocked: bool,
     tag: Option<String>,
     draft: bool,
+    expanded: bool,
 ) -> ListItem<'static> {
     let source = t.thread.source.as_name();
     let star = if priority { "★" } else { " " };
@@ -915,10 +984,12 @@ fn thread_line(
         if last.has_attachment {
             spans.push(Span::styled(" ◫", Style::new().fg(theme::PEACH)));
         }
-        spans.push(Span::styled(
-            format!("  {aside}{who}{}", inbox::sanitize(&last.snippet)),
-            Style::new().fg(theme::MUTED),
-        ));
+        if !expanded {
+            spans.push(Span::styled(
+                format!("  {aside}{who}{}", inbox::sanitize(&last.snippet)),
+                Style::new().fg(theme::MUTED),
+            ));
+        }
     } else if !aside.is_empty() {
         spans.push(Span::styled(
             format!(" {aside}"),
@@ -939,8 +1010,39 @@ fn thread_line(
             });
         }
     }
+    // The row under the cursor is a bigger box: the line itself, then the start of the newest
+    // message in full width and a blank line to breathe. (A terminal has one font size, so
+    // the box is what can grow.)
+    let item = if expanded {
+        let preview = t.last.as_ref().map_or_else(String::new, |l| {
+            let who = if is_mail {
+                String::new()
+            } else {
+                l.sender
+                    .as_deref()
+                    .map(inbox::short_sender)
+                    .map(|s| format!("{s}: "))
+                    .unwrap_or_default()
+            };
+            format!("{aside}{who}{}", inbox::sanitize(&l.snippet))
+        });
+        let ink = if priority && !blocked {
+            theme::PRIORITY_INK
+        } else {
+            theme::TEXT
+        };
+        ListItem::new(Text::from(vec![
+            Line::from(spans),
+            Line::from(Span::styled(
+                format!("      {preview}"),
+                Style::new().fg(ink),
+            )),
+            Line::default(),
+        ]))
+    } else {
+        ListItem::new(Line::from(spans))
+    };
     // one background per row: blocked, priority, answered, unread, in that order of weight
-    let item = ListItem::new(Line::from(spans));
     if blocked {
         item.style(Style::new().bg(theme::BLOCKED_BG))
     } else if priority {
@@ -971,8 +1073,12 @@ fn pane_border(active: bool) -> Style {
     })
 }
 
+/// Lines the selected thread row takes: the row, its preview and a blank one.
+const THREAD_ROW_LINES: usize = 3;
+
 /// A scrolling list: the window start is remembered in `offset` so the list moves only when the
 /// cursor leaves the visible rows.
+#[allow(clippy::too_many_arguments)]
 fn draw_scrolling(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -981,10 +1087,16 @@ fn draw_scrolling(
     selected: Option<usize>,
     offset: &std::cell::Cell<usize>,
     rows_out: &std::cell::Cell<usize>,
+    selected_lines: usize,
 ) {
     let rows = usize::from(area.height.saturating_sub(2));
     rows_out.set(rows);
-    let start = inbox::window_start(offset.get(), selected.unwrap_or(0), rows);
+    // the selected item may be taller than the others: keep all of it on screen
+    let start = inbox::window_start(
+        offset.get(),
+        selected.unwrap_or(0),
+        rows.saturating_sub(selected_lines.saturating_sub(1)).max(1),
+    );
     offset.set(start);
     let mut state = ListState::default()
         .with_offset(start)
@@ -1002,18 +1114,20 @@ fn draw_scrolling(
         if sel >= start && sel - start < rows {
             if let Ok(y) = u16::try_from(y) {
                 let buf = frame.buffer_mut();
-                for x in area.x.saturating_add(1)..area.right().saturating_sub(1) {
-                    if let Some(cell) = buf.cell_mut((x, y)) {
-                        let style = cell.style();
-                        cell.set_style(
-                            Style::new()
-                                .bg(theme::lifted(
-                                    style.bg.unwrap_or(ratatui::style::Color::Reset),
-                                ))
-                                .add_modifier(Modifier::BOLD),
-                        );
-                        if let Some(fg) = theme::readable_on_selection(style.fg) {
-                            cell.set_fg(fg);
+                for row in 0..u16::try_from(selected_lines).unwrap_or(1) {
+                    for x in area.x.saturating_add(1)..area.right().saturating_sub(1) {
+                        if let Some(cell) = buf.cell_mut((x, y.saturating_add(row))) {
+                            let style = cell.style();
+                            cell.set_style(
+                                Style::new()
+                                    .bg(theme::lifted(
+                                        style.bg.unwrap_or(ratatui::style::Color::Reset),
+                                    ))
+                                    .add_modifier(Modifier::BOLD),
+                            );
+                            if let Some(fg) = theme::readable_on_selection(style.fg) {
+                                cell.set_fg(fg);
+                            }
                         }
                     }
                 }
@@ -1355,6 +1469,7 @@ fn draw_logs(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Some(app.logs_selected),
         &app.logs_offset,
         &app.list_rows,
+        1,
     );
 }
 
@@ -1379,7 +1494,8 @@ fn draw_muted(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
     let items: Vec<ListItem<'_>> = threads
         .iter()
-        .map(|t| thread_line(t, now, false, true, None, false))
+        .enumerate()
+        .map(|(i, t)| thread_line(t, now, false, true, None, false, i == app.muted_selected))
         .collect();
     draw_scrolling(
         frame,
@@ -1389,6 +1505,7 @@ fn draw_muted(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Some(app.muted_selected),
         &app.muted_offset,
         &app.list_rows,
+        THREAD_ROW_LINES,
     );
 }
 
@@ -1401,7 +1518,8 @@ fn draw_later(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let threads = app.later_threads();
     let items: Vec<ListItem<'_>> = threads
         .iter()
-        .map(|t| {
+        .enumerate()
+        .map(|(i, t)| {
             let tag = match t.triage.snoozed_until {
                 Some(until) if until > now => {
                     Some(format!("⏰ back {}", inbox::stamp(until, app.tz_offset)))
@@ -1415,6 +1533,7 @@ fn draw_later(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 app.is_blocked(t),
                 tag,
                 app.draft_for(&t.thread.id).is_some(),
+                inbox_focus && i == app.later_selected,
             )
         })
         .collect();
@@ -1440,6 +1559,7 @@ fn draw_later(frame: &mut Frame<'_>, app: &App, area: Rect) {
             (inbox_focus).then_some(app.later_selected),
             &app.later_offset,
             &app.list_rows,
+            1,
         );
     }
     let todos = app.later_todos();
@@ -1464,6 +1584,7 @@ fn draw_later(frame: &mut Frame<'_>, app: &App, area: Rect) {
         (!inbox_focus && !todos.is_empty()).then_some(app.later_todo_selected),
         &app.later_todo_offset,
         &app.list_rows,
+        1,
     );
 }
 
@@ -1612,7 +1733,8 @@ fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
     let items: Vec<ListItem<'_>> = threads
         .iter()
-        .map(|t| {
+        .enumerate()
+        .map(|(i, t)| {
             thread_line(
                 t,
                 now,
@@ -1620,6 +1742,7 @@ fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 app.is_blocked(t),
                 None,
                 app.draft_for(&t.thread.id).is_some(),
+                inbox_focus && i == app.today_selected,
             )
         })
         .collect();
@@ -1631,6 +1754,7 @@ fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
         (inbox_focus && !threads.is_empty()).then_some(app.today_selected),
         &app.inbox_offset,
         &app.list_rows,
+        THREAD_ROW_LINES,
     );
 
     // TODOs for today, tomorrow and without a date
@@ -1656,6 +1780,7 @@ fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
         (!inbox_focus && !todos.is_empty()).then_some(app.todo_selected),
         &app.todo_offset,
         &app.list_rows,
+        1,
     );
 }
 
@@ -1725,7 +1850,8 @@ fn draw_channels(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let threads = app.channel_threads(app.channels_selected);
     let items: Vec<ListItem<'_>> = threads
         .iter()
-        .map(|t| {
+        .enumerate()
+        .map(|(i, t)| {
             thread_line(
                 t,
                 now,
@@ -1733,6 +1859,7 @@ fn draw_channels(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 app.is_blocked(t),
                 None,
                 app.draft_for(&t.thread.id).is_some(),
+                app.channel_inner && i == app.channel_thread_selected,
             )
         })
         .collect();
@@ -1745,6 +1872,7 @@ fn draw_channels(frame: &mut Frame<'_>, app: &App, area: Rect) {
         (app.channel_inner && !threads.is_empty()).then_some(app.channel_thread_selected),
         &app.channel_offset,
         &app.list_rows,
+        THREAD_ROW_LINES,
     );
 }
 
@@ -2657,7 +2785,7 @@ fn draw_approvals(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if items.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "nothing waits here: Ctrl-Enter sends a reply, Ctrl-S keeps it as a draft, Ctrl-L sends it later",
+                "nothing waits here: Enter sends a reply (after y), Ctrl-s keeps it as a draft, Ctrl-l sends it later",
                 theme::muted(),
             )))
             .block(theme::panel(&title)),
@@ -2673,6 +2801,7 @@ fn draw_approvals(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Some(app.approvals_selected),
         &app.approvals_offset,
         &app.list_rows,
+        1,
     );
 }
 
@@ -2789,6 +2918,7 @@ mod tests {
                         Some(0),
                         &std::cell::Cell::new(0),
                         &std::cell::Cell::new(0),
+                        1,
                     );
                 })
                 .unwrap();
@@ -2884,9 +3014,10 @@ mod tests {
         let text = render(&app);
         assert!(text.contains("showing 25 of 40"), "{text}");
         assert!(text.contains("TODO"));
-        // newest first: subject-39 is visible, the oldest are scrolled out
-        assert!(text.contains("subject-39") && text.contains("subject-15"));
-        assert!(!text.contains("subject-14"), "only 25 rows are shown");
+        // newest first: subject-39 is visible, the oldest are scrolled out. The row under the
+        // cursor is a three-line box, so 23 rows fit with it.
+        assert!(text.contains("subject-39") && text.contains("subject-17"));
+        assert!(!text.contains("subject-16"), "only 23 rows are shown");
         // scrolling down to the 30th item brings it into view
         for _ in 0..29 {
             app.handle_key(Key::Char('j'));
@@ -3515,6 +3646,78 @@ mod tests {
         );
         assert!(text.contains('—'), "never read since the start: {text}");
         assert!(text.contains('↻'), "{text}");
+    }
+
+    #[test]
+    fn the_row_under_the_cursor_is_a_bigger_box_with_the_message_start_on_its_own_line() {
+        let mut app = App::new();
+        let thread = |id: &str, snippet: &str, at: i64| haste_proto::ThreadView {
+            thread: haste_core::model::Thread {
+                id: id.into(),
+                source: haste_core::model::Source::Whatsapp,
+                external_id: id.into(),
+                subject: format!("subject-{id}"),
+                participants: vec![],
+                last_activity_at: at,
+                version: 1,
+            },
+            triage: haste_core::model::Triage::new(id, haste_core::model::ObjectKind::Thread),
+            tags: vec![],
+            last: Some(haste_proto::LastMessage {
+                sender: Some("Ana".into()),
+                snippet: snippet.into(),
+                has_attachment: false,
+            }),
+            unread: false,
+            replied: false,
+            sender_known: true,
+            sender: None,
+        };
+        app.set_threads(vec![
+            thread("one", "FIRST-PREVIEW", 20),
+            thread("two", "SECOND-PREVIEW", 10),
+        ]);
+        let text = render(&app);
+        // the cursor is on the newest: its preview has a line of its own, the other stays inline
+        assert!(text.contains("│        Ana: FIRST-PREVIEW"), "{text}");
+        assert!(!text.contains("│        Ana: SECOND-PREVIEW"), "{text}");
+        assert!(text.contains("SECOND-PREVIEW"), "{text}");
+        // moving the cursor moves the box
+        app.handle_key(Key::Char('j'));
+        let text = render(&app);
+        assert!(text.contains("│        Ana: SECOND-PREVIEW"), "{text}");
+        assert!(!text.contains("│        Ana: FIRST-PREVIEW"), "{text}");
+    }
+
+    #[test]
+    fn the_reply_box_shows_only_send_and_more_keys_and_ctrl_h_lists_the_rest() {
+        let mut app = App::new();
+        app.set_threads(vec![]);
+        app.compose = Some(Box::new(crate::compose::Compose::reply("t1", "Plan")));
+        app.mode = crate::app::Mode::Compose;
+        let text = render(&app);
+        assert!(
+            text.contains("Ctrl-g") && text.contains("send") && text.contains("Ctrl-h"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("Ctrl-S") && !text.contains("Ctrl-F"),
+            "{text}"
+        );
+        app.handle_key(Key::Ctrl('h'));
+        let text = render(&app);
+        for needle in [
+            "Reply keys",
+            "new line",
+            "emoji keyboard",
+            "send later",
+            "only y sends",
+        ] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
+        // any key closes the list again
+        app.handle_key(Key::Char('x'));
+        assert!(!render(&app).contains("Reply keys"));
     }
 
     #[test]

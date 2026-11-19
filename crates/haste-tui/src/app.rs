@@ -147,7 +147,7 @@ impl AgendaItem<'_> {
 
 /// How long a task marked done stays in the list (struck through, undoable) before it is
 /// completed in Reminders and removed.
-pub const DONE_GRACE: Duration = Duration::from_secs(30);
+pub const DONE_GRACE: Duration = Duration::from_secs(10);
 
 /// How often the local time zone offset is read again.
 const TZ_REFRESH: Duration = Duration::from_secs(600);
@@ -501,6 +501,8 @@ pub enum Mode {
     },
     /// Esc in the editor with something written: save it as a draft?
     ConfirmDiscardCompose,
+    /// Enter in a reply asked "send it?": only `y` sends.
+    ConfirmReply,
     /// Choosing when a reply goes out (the editor, or an Outbox draft).
     SendAt {
         target: SendAtTarget,
@@ -555,7 +557,7 @@ pub enum Mode {
     NewEvent,
     /// How long a task takes on the calendar (`app.task_duration`).
     TaskDuration,
-    /// The emoji keyboard, opened with Ctrl-e in a text field: a key types its emoji into the
+    /// The emoji keyboard, opened with Ctrl-o in a text field: a key types its emoji into the
     /// field of `back`, Esc goes back without one.
     Emoji {
         back: Box<Mode>,
@@ -1441,8 +1443,8 @@ impl App {
 
     /// Handle one key press; returns an effect for the caller to run against the daemon.
     pub fn handle_key(&mut self, key: Key) -> Option<Effect> {
-        // Ctrl-e in a text field opens the emoji keyboard
-        if key == Key::Ctrl('e') && self.takes_emoji() {
+        // Ctrl-o in a text field opens the emoji keyboard (Ctrl-e is the end of the line)
+        if key == Key::Ctrl('o') && self.takes_emoji() {
             self.mode = Mode::Emoji {
                 back: Box::new(self.mode.clone()),
             };
@@ -1512,6 +1514,7 @@ impl App {
                 },
             ),
             Mode::ConfirmDiscardCompose => self.key_discard_compose(key),
+            Mode::ConfirmReply => self.key_confirm_reply(key),
             Mode::ConfirmDiscardDraft(id) => self.confirm(key, Effect::Reject { id }),
             Mode::ConfirmDeleteEvent { event_id, .. } => {
                 self.confirm(key, Effect::DeleteEvent { event_id })
@@ -2561,6 +2564,15 @@ impl App {
                 text: c.focused_text(),
             }),
             ComposeOutcome::Save => self.finish_compose(AfterSave::Draft),
+            ComposeOutcome::Send if matches!(c.kind, ComposeKind::Reply { .. }) => {
+                // a reply asks first: y sends, anything else goes back to the text
+                if c.has_content() {
+                    self.mode = Mode::ConfirmReply;
+                } else {
+                    self.status = "the reply is empty".into();
+                }
+                None
+            }
             ComposeOutcome::Send => self.finish_compose(AfterSave::Send),
             ComposeOutcome::Later => {
                 if !matches!(c.kind, ComposeKind::Reply { .. }) {
@@ -2685,6 +2697,17 @@ impl App {
     }
 
     /// The answer to "save the draft?" after Esc.
+    /// The answer to "send this reply?": only `y` sends it.
+    fn key_confirm_reply(&mut self, key: Key) -> Option<Effect> {
+        self.mode = Mode::Compose;
+        if key == Key::Char('y') {
+            self.finish_compose(AfterSave::Send)
+        } else {
+            self.status = "not sent".into();
+            None
+        }
+    }
+
     fn key_discard_compose(&mut self, key: Key) -> Option<Effect> {
         match key {
             Key::Char('y' | 'Y') => {
@@ -2924,7 +2947,7 @@ impl App {
                 self.status = "not done after all".into();
             } else {
                 self.pending_done.insert(id, self.now + DONE_GRACE);
-                self.status = "marked done; it is completed in 30 s (e again to undo)".into();
+                self.status = "marked done; it is completed in 10 s (e again to undo)".into();
             }
         } else {
             let ids: Vec<String> = std::mem::take(&mut self.todo_marked).into_iter().collect();
@@ -2932,7 +2955,7 @@ impl App {
             for id in ids {
                 self.pending_done.insert(id, self.now + DONE_GRACE);
             }
-            self.status = format!("{n} marked done; they are completed in 30 s");
+            self.status = format!("{n} marked done; they are completed in 10 s");
         }
     }
 
@@ -3402,6 +3425,7 @@ impl App {
             Mode::ConfirmDiscardCompose => {
                 Some("Save the draft? y save · n discard · any other key keeps editing".into())
             }
+            Mode::ConfirmReply => Some("Send this reply?  y yes · n no".into()),
             Mode::ConfirmSend {
                 recipients,
                 subject,
@@ -3804,7 +3828,7 @@ mod tests {
         assert_eq!(app.later_focus, TodayFocus::Todo);
         assert!(matches!(
             press(&mut app, "e").as_slice(),
-            [] // marks it done for 30 s, no effect yet
+            [] // marks it done for 10 s, no effect yet
         ));
         assert!(app.pending_done.contains_key("later"));
         press(&mut app, "K");
@@ -4166,14 +4190,14 @@ mod tests {
     }
 
     #[test]
-    fn e_marks_a_task_done_for_30_seconds_then_it_is_completed_and_removed() {
+    fn e_marks_a_task_done_for_10_seconds_then_it_is_completed_and_removed() {
         let mut app = todo_app();
         let t0 = Instant::now();
         app.tick(t0);
         assert!(press(&mut app, "e").is_empty());
         assert_eq!(app.pending_done.len(), 1);
         assert_eq!(app.todos().len(), 3, "still listed, struck through");
-        assert!(app.tick(t0 + Duration::from_secs(29)).is_none(), "not yet");
+        assert!(app.tick(t0 + Duration::from_secs(9)).is_none(), "not yet");
         let effect = app.tick(t0 + DONE_GRACE + Duration::from_secs(1));
         assert_eq!(
             effect,
@@ -4501,7 +4525,8 @@ mod tests {
         let mut app = inbox_app();
         app.open_reply_form("t1");
         assert_eq!(app.mode, Mode::Compose);
-        assert!(app.handle_key(Key::Ctrl('s')).is_none(), "empty reply");
+        assert!(app.handle_key(Key::Enter).is_none(), "empty reply");
+        assert_eq!(app.mode, Mode::Compose);
         // attaching works in a reply too: the picker opens, and a chosen file goes with the draft
         assert!(app.handle_key(Key::Ctrl('f')).is_none());
         assert!(app.compose.as_ref().unwrap().picker.is_some());
@@ -4512,16 +4537,55 @@ mod tests {
             .attachments
             .push(std::path::PathBuf::from("/a/report.pdf"));
         press(&mut app, "thanks");
+        // Ctrl-s keeps it as a draft
         assert_eq!(
             app.handle_key(Key::Ctrl('s')),
             Some(Effect::SaveReply {
                 thread_id: "t1".into(),
                 body: "thanks".into(),
                 attachments: vec![std::path::PathBuf::from("/a/report.pdf")],
-                then: AfterSave::Send,
+                then: AfterSave::Draft,
                 replaces: None,
             })
         );
+    }
+
+    #[test]
+    fn a_reply_works_like_a_prompt_enter_asks_and_ctrl_j_adds_a_line_and_ctrl_h_lists_keys() {
+        let mut app = inbox_app();
+        app.open_reply_form("t1");
+        press(&mut app, "ab");
+        app.handle_key(Key::Ctrl('j'));
+        press(&mut app, "cd");
+        let c = app.compose.as_ref().unwrap();
+        assert_eq!(c.focused_text(), "ab\ncd", "Ctrl-j is a new line");
+        // Ctrl-a and Ctrl-e move to the start and the end of the line
+        app.handle_key(Key::Ctrl('a'));
+        press(&mut app, "X");
+        app.handle_key(Key::Ctrl('e'));
+        press(&mut app, "Y");
+        assert_eq!(app.compose.as_ref().unwrap().focused_text(), "ab\nXcdY");
+        // Ctrl-g still writes it in $EDITOR
+        assert!(matches!(
+            app.handle_key(Key::Ctrl('g')),
+            Some(Effect::ExternalEdit { .. })
+        ));
+        // Ctrl-h opens the list of keys; any key closes it (and does nothing else)
+        app.handle_key(Key::Ctrl('h'));
+        assert!(app.compose.as_ref().unwrap().help);
+        app.handle_key(Key::Char('z'));
+        assert!(!app.compose.as_ref().unwrap().help);
+        assert_eq!(app.compose.as_ref().unwrap().focused_text(), "ab\nXcdY");
+        // Enter asks; only y sends
+        app.handle_key(Key::Enter);
+        assert_eq!(app.mode, Mode::ConfirmReply);
+        assert!(matches!(
+            app.handle_key(Key::Char('y')),
+            Some(Effect::SaveReply {
+                then: AfterSave::Send,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -4554,10 +4618,19 @@ mod tests {
             panic!("expected a save");
         };
         assert_eq!(then, AfterSave::Draft);
-        // Ctrl-Enter (or Ctrl-J) sends
+        // Enter asks first: any key but y goes back to the text, y sends
         app.open_reply_form("t1");
         press(&mut app, "hello");
-        let Some(Effect::SaveReply { then, .. }) = app.handle_key(Key::CtrlEnter) else {
+        assert!(app.handle_key(Key::Enter).is_none());
+        assert_eq!(app.mode, Mode::ConfirmReply);
+        assert!(app.confirm_prompt().unwrap().contains("Send this reply?"));
+        assert!(app.handle_key(Key::Enter).is_none());
+        assert_eq!(app.mode, Mode::Compose);
+        assert!(app.handle_key(Key::Enter).is_none());
+        assert!(app.handle_key(Key::Char('n')).is_none());
+        assert_eq!(app.mode, Mode::Compose, "n does not send");
+        app.handle_key(Key::Enter);
+        let Some(Effect::SaveReply { then, .. }) = app.handle_key(Key::Char('y')) else {
             panic!("expected a send");
         };
         assert_eq!(then, AfterSave::Send);
@@ -4759,15 +4832,15 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_e_opens_the_emoji_keyboard_in_a_text_field_and_a_key_types_its_emoji() {
+    fn ctrl_o_opens_the_emoji_keyboard_in_a_text_field_and_a_key_types_its_emoji() {
         let mut app = inbox_app();
         // not in a list: nothing opens
-        assert!(app.handle_key(Key::Ctrl('e')).is_none());
+        assert!(app.handle_key(Key::Ctrl('o')).is_none());
         assert_eq!(app.mode, Mode::Normal);
         // the filter line is a text field
         app.mode = Mode::Filter;
         press(&mut app, "ab");
-        app.handle_key(Key::Ctrl('e'));
+        app.handle_key(Key::Ctrl('o'));
         assert!(matches!(app.mode, Mode::Emoji { .. }));
         // y has none; Esc goes back without inserting
         press(&mut app, "y");
@@ -4776,7 +4849,7 @@ mod tests {
         assert_eq!(app.mode, Mode::Filter);
         assert_eq!(app.filter, "ab");
         // a key types its emoji
-        app.handle_key(Key::Ctrl('e'));
+        app.handle_key(Key::Ctrl('o'));
         press(&mut app, "1");
         assert_eq!(app.mode, Mode::Filter);
         assert_eq!(app.filter, "ab👍");
@@ -4784,18 +4857,18 @@ mod tests {
         app.handle_key(Key::Enter);
         press(&mut app, "1");
         press(&mut app, "t");
-        app.handle_key(Key::Ctrl('e'));
+        app.handle_key(Key::Ctrl('o'));
         press(&mut app, "f");
         let form = app.remind.as_ref().unwrap();
         assert_eq!(form.title, "🙌");
         app.handle_key(Key::Tab); // to the date
-        app.handle_key(Key::Ctrl('e'));
+        app.handle_key(Key::Ctrl('o'));
         assert_eq!(app.mode, Mode::RemindForm, "no emoji keyboard on a date");
         // an emoji in a mail reply: the compose form
         app.handle_key(Key::Esc);
         app.open_reply_form("t2");
         assert_eq!(app.mode, Mode::Compose);
-        app.handle_key(Key::Ctrl('e'));
+        app.handle_key(Key::Ctrl('o'));
         assert!(matches!(app.mode, Mode::Emoji { .. }));
         press(&mut app, "5");
         assert_eq!(app.mode, Mode::Compose);

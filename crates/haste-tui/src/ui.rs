@@ -751,6 +751,8 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         View::Channels => vec![
             ("Enter", "open"),
             ("j/k", "move"),
+            ("/", "search"),
+            ("A", "archived"),
             ("u", "refresh"),
             ("R", "release a stopped one"),
             ("E", "stop one"),
@@ -1082,11 +1084,26 @@ fn thread_line(
 
 fn filter_title(app: &App, what: &str) -> String {
     format!(
-        " {what} · filter: {} ({}/{}) ",
+        " {what} · filter: {} ({}/{}){} ",
         app.active_filter().name,
         app.filter_index + 1,
-        app.filters.len()
+        app.filters.len(),
+        search_suffix(app)
     )
+}
+
+/// ` · /text` while a search is active.
+fn search_suffix(app: &App) -> String {
+    if app.searching() {
+        format!(" · /{}", inbox::sanitize(app.filter.trim()))
+    } else {
+        String::new()
+    }
+}
+
+/// The mark of an archived thread in a list.
+fn archived_tag(t: &ThreadView) -> Option<String> {
+    t.triage.archived.then(|| "⌂ archived".to_owned())
 }
 
 fn pane_border(active: bool) -> Style {
@@ -1750,10 +1767,11 @@ fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
         format!("{}", threads.len())
     };
     let title = format!(
-        " Incoming · {shown} · filter: {} ({}/{}) ",
+        " Incoming · {shown} · filter: {} ({}/{}){} ",
         app.active_filter().name,
         app.filter_index + 1,
-        app.filters.len()
+        app.filters.len(),
+        search_suffix(app)
     );
     let items: Vec<ListItem<'_>> = threads
         .iter()
@@ -1764,7 +1782,7 @@ fn draw_today(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 now,
                 app.is_priority(t),
                 app.is_blocked(t),
-                None,
+                archived_tag(t),
                 app.draft_for(&t.thread.id).is_some(),
                 inbox_focus && i == app.today_selected,
             )
@@ -1881,17 +1899,23 @@ fn draw_channels(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 now,
                 app.is_priority(t),
                 app.is_blocked(t),
-                None,
+                archived_tag(t),
                 app.draft_for(&t.thread.id).is_some(),
                 app.channel_inner && i == app.channel_thread_selected,
             )
         })
         .collect();
     let title = CHANNELS.get(app.channels_selected).copied().unwrap_or("");
+    let archived = if app.show_archived {
+        " · with archived"
+    } else {
+        ""
+    };
     draw_scrolling(
         frame,
         right,
-        theme::panel(&format!(" {title} ")).border_style(pane_border(app.channel_inner)),
+        theme::panel(&format!(" {title}{archived}{} ", search_suffix(app)))
+            .border_style(pane_border(app.channel_inner)),
         items,
         (app.channel_inner && !threads.is_empty()).then_some(app.channel_thread_selected),
         &app.channel_offset,
@@ -3783,6 +3807,51 @@ mod tests {
         // any key closes the list again
         app.handle_key(Key::Char('x'));
         assert!(!render(&app).contains("Reply keys"));
+    }
+
+    #[test]
+    fn an_archived_thread_is_marked_in_the_list_and_the_search_shows_in_the_footer_and_title() {
+        let mut app = App::new();
+        let mut old = haste_proto::ThreadView {
+            thread: haste_core::model::Thread {
+                id: "old".into(),
+                source: haste_core::model::Source::Gmail,
+                external_id: "old".into(),
+                subject: "subject-old".into(),
+                participants: vec![],
+                last_activity_at: 5,
+                version: 1,
+            },
+            triage: haste_core::model::Triage::new("old", haste_core::model::ObjectKind::Thread),
+            tags: vec![],
+            last: None,
+            unread: false,
+            replied: false,
+            sender_known: true,
+            sender: None,
+        };
+        old.triage.archived = true;
+        app.set_threads(vec![old]);
+        app.handle_key(Key::Char('2'));
+        app.handle_key(Key::Enter);
+        assert!(!render(&app).contains("subject-old"), "hidden at first");
+        app.handle_key(Key::Esc);
+        app.handle_key(Key::Char('A'));
+        app.handle_key(Key::Enter);
+        let text = render(&app);
+        assert!(
+            text.contains("subject-old") && text.contains("⌂ archived"),
+            "{text}"
+        );
+        assert!(text.contains("with archived"), "{text}");
+        // the typed search is in the footer, then in the title
+        app.handle_key(Key::Char('/'));
+        for c in "old".chars() {
+            app.handle_key(Key::Char(c));
+        }
+        assert!(render(&app).contains("/old"), "typing shows the search");
+        app.handle_key(Key::Enter);
+        assert!(render(&app).contains("· /old"), "the title keeps it");
     }
 
     #[test]

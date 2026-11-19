@@ -159,6 +159,11 @@ pub enum RequestBody {
     },
     /// Human-only: list connectors and whether their kill switch is engaged.
     ConnectorStatus,
+    /// The ids of the threads whose subject or any stored message contains this text (capitals
+    /// do not matter for plain letters), archived ones included, newest first. Local only.
+    ThreadSearch {
+        query: String,
+    },
     /// Human-only: read a running connector's provider now instead of at the next poll.
     ConnectorRefresh {
         source: String,
@@ -699,6 +704,10 @@ pub enum Response {
         path: String,
         name: String,
         bytes: usize,
+    },
+    /// The ids of the threads a search found.
+    ThreadIds {
+        ids: Vec<String>,
     },
     Threads {
         threads: Vec<ThreadView>,

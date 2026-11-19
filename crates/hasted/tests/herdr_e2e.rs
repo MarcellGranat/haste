@@ -888,6 +888,7 @@ enum Kind {
 fn kind(body: &RequestBody) -> Kind {
     match body {
         RequestBody::ThreadList { .. }
+        | RequestBody::ThreadSearch { .. }
         | RequestBody::ThreadShow { .. }
         | RequestBody::ProposalStatus { .. }
         | RequestBody::ProposalList { .. }

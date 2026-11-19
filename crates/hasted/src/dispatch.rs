@@ -55,6 +55,7 @@ fn map_store(e: &StoreError) -> Response {
 fn action_for(body: &RequestBody) -> Action {
     match body {
         RequestBody::ThreadList { .. }
+        | RequestBody::ThreadSearch { .. }
         | RequestBody::ThreadShow { .. }
         | RequestBody::ProposalStatus { .. }
         | RequestBody::ProposalList { .. }
@@ -127,6 +128,7 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::TagRemove { .. } => "tag_remove",
         RequestBody::TagList => "tag_list",
         RequestBody::ThreadRefresh { .. } => "thread_refresh",
+        RequestBody::ThreadSearch { .. } => "thread_search",
         RequestBody::ReminderNew { .. } => "reminder_new",
         RequestBody::ReminderEdit { .. } => "reminder_edit",
         RequestBody::ConnectorStatus => "connector_status",
@@ -354,6 +356,28 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
                         })
                         .collect(),
                 },
+                Err(e) => map_store(&e),
+            }
+        }
+        RequestBody::ThreadSearch { query } => {
+            let query = query.trim();
+            if query.is_empty() || query.chars().count() > 200 {
+                return err(ErrorCode::Validation, "a search is 1 to 200 characters");
+            }
+            match state.store.search_thread_ids(query, 300) {
+                Ok(ids) => {
+                    // the same scope filter as the thread list: a machine sees only its projects
+                    let tags = state.store.all_thread_tags().unwrap_or_default();
+                    let machine_labels = machine_labels_for(state, principal);
+                    let ids = ids
+                        .into_iter()
+                        .filter(|id| {
+                            let own = tags.get(id).cloned().unwrap_or_default();
+                            visible_to(principal, &own, machine_labels.as_ref())
+                        })
+                        .collect();
+                    Response::ThreadIds { ids }
+                }
                 Err(e) => map_store(&e),
             }
         }

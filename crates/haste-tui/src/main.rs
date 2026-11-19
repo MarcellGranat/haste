@@ -131,7 +131,7 @@ fn refresh(app: &mut App, client: &Client) {
     load_reminders(app, client);
     match client.call(RequestBody::ThreadList {
         sources: vec![],
-        include_archived: false,
+        include_archived: true,
         include_snoozed: true,
     }) {
         Ok(Response::Threads { threads }) => app.set_threads(threads),
@@ -640,6 +640,22 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 Ok(()) => format!("the task takes {} on the calendar", inbox_minutes(minutes)),
                 Err(e) => e,
             };
+        }
+        Effect::SearchThreads { query } => {
+            match client.call(RequestBody::ThreadSearch {
+                query: query.clone(),
+            }) {
+                Ok(Response::ThreadIds { ids }) => {
+                    app.status = format!("{} threads contain \"{}\"", ids.len(), query);
+                    app.set_search_hits(ids);
+                }
+                other => {
+                    app.status = describe(other)
+                        .err()
+                        .unwrap_or_else(|| "the search found nothing to show".into());
+                }
+            }
+            return false;
         }
         Effect::CopyText { text } => {
             app.status = match copy_to_clipboard(&text) {

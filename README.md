@@ -555,7 +555,8 @@ and has three main tabs, plus three secondary screens:
 | Key | Screen |
 |---|---|
 | `1` Today | Two panes. **Incoming** (top): every channel under the active filter, priority first, then newest; 25 rows at a time, `j`/`k` scrolls through the rest. **TODO** (below): open Apple Reminders due today (overdue included) or with no date. `Tab` switches the cursor between the two panes |
-| `2` Channels | The same inbox by channel (gmail, icloud, whatsapp, messenger, imessage) with counts; `Enter` opens a channel, `Esc` goes back |
+| `2` Channels | The same inbox by channel (gmail, icloud, whatsapp, messenger, imessage, googlechat) with counts; `Enter` opens a channel, `Esc` goes back. `A` lists the archived threads too (they stay in haste's own copy, marked `⌂ archived`) |
+| `/` | search the threads on Today, Channels, Later and Muted: it narrows as you type over the subject, the people and the start of the newest message; `Enter` also looks through the text of every stored message, archived threads included; `Esc` ends the search |
 | `3` Calendar | The next 7 days of your calendar, grouped by day (read-only, your local time) |
 | `5` `6` `7` | Outbox, Muted, Logs (`Esc` returns to Today); the header shows the number of drafts waiting |
 

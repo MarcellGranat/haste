@@ -351,6 +351,10 @@ pub enum Effect {
     /// `q` while the TUI lives in a tab of its own: go back to the tab before it and keep
     /// running, so the next visit finds everything where it was left.
     Background,
+    /// Search the stored messages for this text.
+    SearchThreads {
+        query: String,
+    },
     /// Put this text on the clipboard.
     CopyText {
         text: String,
@@ -690,7 +694,12 @@ pub struct App {
     pub reminder_list: Vec<ReminderView>,
     pub group_by: GroupBy,
     pub blocked_collapsed: bool,
+    /// The search typed after `/` (the lists show what matches it).
     pub filter: String,
+    /// The threads the daemon found for the search by their message text (after Enter).
+    pub search_hits: Option<std::collections::HashSet<String>>,
+    /// The Channels tab lists archived threads too (they stay in haste's own copy).
+    pub show_archived: bool,
     pub collapsed: BTreeSet<String>,
     pub marked: BTreeSet<String>,
     pub notices: Vec<String>,
@@ -846,6 +855,8 @@ impl App {
             group_by: GroupBy::Agent,
             blocked_collapsed: false,
             filter: String::new(),
+            search_hits: None,
+            show_archived: false,
             collapsed: BTreeSet::new(),
             marked: BTreeSet::new(),
             notices: Vec::new(),
@@ -1064,15 +1075,54 @@ impl App {
         (0..self.proposals.len()).map(Row::Item).collect()
     }
 
+    /// Is a search active (something typed after `/`)?
+    #[must_use]
+    pub fn searching(&self) -> bool {
+        !self.filter.trim().is_empty()
+    }
+
+    /// Does this thread match the search: the text is in its subject, its people or the start of
+    /// its newest message, or the daemon found it by its message text. Everything matches when
+    /// there is no search.
+    #[must_use]
+    pub fn search_matches(&self, t: &ThreadView) -> bool {
+        if !self.searching() {
+            return true;
+        }
+        let needle = self.filter.trim().to_lowercase();
+        let has = |s: &str| s.to_lowercase().contains(&needle);
+        has(&t.thread.subject)
+            || t.thread.participants.iter().any(|p| has(p))
+            || t.sender.as_deref().is_some_and(has)
+            || t.last
+                .as_ref()
+                .is_some_and(|l| has(&l.snippet) || l.sender.as_deref().is_some_and(has))
+            || self
+                .search_hits
+                .as_ref()
+                .is_some_and(|hits| hits.contains(&t.thread.id))
+    }
+
+    /// The daemon's answer to a search by message text.
+    pub fn set_search_hits(&mut self, ids: Vec<String>) {
+        self.search_hits = Some(ids.into_iter().collect());
+        self.clamp();
+    }
+
     /// Threads passing the active filter, best first: priority, then newest activity.
     fn filtered_threads(&self, include_aside: bool) -> Vec<&ThreadView> {
         let filter = self.active_filter();
+        // a search looks through archived threads too
+        let archived_shown = self.show_archived || self.searching();
         let mut out: Vec<&ThreadView> = self
             .threads
             .iter()
             .filter(|t| {
-                !t.triage.archived && (include_aside || !t.triage.set_aside) && !self.is_snoozed(t)
+                (!t.triage.archived || archived_shown)
+                    && (include_aside || !t.triage.set_aside)
+                    && !self.is_snoozed(t)
             })
+            .filter(|t| self.search_matches(t))
             .filter(|t| inbox::matches(filter, t))
             // a muted sender's mail is only on the last screen
             .filter(|t| !self.is_muted(t))
@@ -1228,7 +1278,7 @@ impl App {
         let mut out: Vec<&ThreadView> = self
             .threads
             .iter()
-            .filter(|t| !t.triage.archived && self.is_muted(t))
+            .filter(|t| !t.triage.archived && self.is_muted(t) && self.search_matches(t))
             .collect();
         out.sort_by_key(|t| std::cmp::Reverse(t.thread.last_activity_at));
         out
@@ -1242,7 +1292,7 @@ impl App {
             .threads
             .iter()
             .filter(|t| !t.triage.archived && (t.triage.set_aside || self.is_snoozed(t)))
-            .filter(|t| !self.is_muted(t))
+            .filter(|t| !self.is_muted(t) && self.search_matches(t))
             .collect();
         out.sort_by_key(|t| {
             (
@@ -1560,12 +1610,22 @@ impl App {
         }
     }
 
+    /// Typing a search after `/`: the lists narrow as you type; Enter also looks through the
+    /// text of every stored message; Esc ends the search.
     fn key_filter(&mut self, key: Key) -> Option<Effect> {
         match key {
-            Key::Enter => self.mode = Mode::Normal,
-            Key::Esc => {
-                self.filter.clear();
+            Key::Enter => {
                 self.mode = Mode::Normal;
+                if self.searching() {
+                    return Some(Effect::SearchThreads {
+                        query: self.filter.trim().to_owned(),
+                    });
+                }
+                return None;
+            }
+            Key::Esc => {
+                self.end_search();
+                return None;
             }
             Key::Backspace => {
                 self.filter.pop();
@@ -1573,8 +1633,26 @@ impl App {
             Key::Char(c) => self.filter.push(c),
             _ => {}
         }
-        self.approvals_selected = 0;
+        // what the daemon found is for the text that was searched
+        self.search_hits = None;
+        self.reset_thread_cursors();
         None
+    }
+
+    /// Leave the search: the lists show everything again.
+    fn end_search(&mut self) {
+        self.filter.clear();
+        self.search_hits = None;
+        self.mode = Mode::Normal;
+        self.reset_thread_cursors();
+    }
+
+    fn reset_thread_cursors(&mut self) {
+        self.today_selected = 0;
+        self.channel_thread_selected = 0;
+        self.later_selected = 0;
+        self.muted_selected = 0;
+        self.clamp();
     }
 
     fn key_normal(&mut self, key: Key) -> Option<Effect> {
@@ -1627,6 +1705,29 @@ impl App {
             }
             // a first Esc dismisses the red notice in the footer
             Key::Esc if !self.notices.is_empty() => self.notices.clear(),
+            // Esc first ends a search
+            Key::Esc if self.searching() => self.end_search(),
+            // `/` searches the threads: the subject, the people, the start of the newest message
+            // and (after Enter) every stored message, archived threads included
+            Key::Char('/')
+                if matches!(
+                    self.view,
+                    View::Today | View::Channels | View::Later | View::Muted
+                ) =>
+            {
+                self.mode = Mode::Filter;
+            }
+            // the Channels tab lists the archived threads too, and `A` again hides them
+            Key::Char('A') if self.view == View::Channels => {
+                self.show_archived = !self.show_archived;
+                self.status = if self.show_archived {
+                    "archived threads are listed too (A hides them)".into()
+                } else {
+                    "archived threads are hidden".into()
+                };
+                self.channel_thread_selected = 0;
+                self.clamp();
+            }
             Key::Esc if !self.view.is_tab() => self.view = View::Today,
             Key::Enter | Key::Char('l') if self.view == View::Channels && !self.channel_inner => {
                 self.channel_inner = true;
@@ -4853,8 +4954,8 @@ mod tests {
         press(&mut app, "1");
         assert_eq!(app.mode, Mode::Filter);
         assert_eq!(app.filter, "ab👍");
-        // the reminder popup: in the title and the notes, not in the date
-        app.handle_key(Key::Enter);
+        // the reminder popup: in the title and the notes, not in the date (Esc ends the search)
+        app.handle_key(Key::Esc);
         press(&mut app, "1");
         press(&mut app, "t");
         app.handle_key(Key::Ctrl('o'));
@@ -6042,5 +6143,93 @@ mod tests {
         app.mode = Mode::Filter;
         assert_eq!(app.handle_key(Key::Ctrl('c')), None);
         assert_eq!(app.handle_key(Key::Ctrl('q')), None);
+    }
+
+    #[test]
+    fn archived_threads_show_in_channels_with_a_and_a_search_finds_them_too() {
+        let mut app = App::new();
+        let mut old = mail_thread("old", "Invoice 2025", &["bank@x.com"], 5);
+        old.triage.archived = true;
+        app.set_threads(vec![
+            mail_thread("t1", "Quarterly plan", &["a@x.com"], 10),
+            old,
+            mail_thread("t3", "Team lunch", &["b@x.com"], 20),
+        ]);
+        press(&mut app, "2");
+        let ids = |app: &App| -> Vec<String> {
+            app.channel_threads(0)
+                .iter()
+                .map(|t| t.thread.id.clone())
+                .collect()
+        };
+        // Gmail is the first channel
+        assert_eq!(ids(&app), ["t3", "t1"], "archived mail is hidden");
+        press(&mut app, "A");
+        assert!(app.show_archived);
+        assert_eq!(
+            ids(&app),
+            ["t3", "t1", "old"],
+            "A lists the archived ones too"
+        );
+        press(&mut app, "A");
+        assert_eq!(ids(&app), ["t3", "t1"]);
+        // a search types after / and narrows at once; archived threads are searched too
+        press(&mut app, "/");
+        assert_eq!(app.mode, Mode::Filter);
+        press(&mut app, "invoice");
+        assert_eq!(ids(&app), ["old"], "found among the archived, by subject");
+        // Enter asks the daemon for the message text too, and what it finds is added
+        let Some(Effect::SearchThreads { query }) = app.handle_key(Key::Enter) else {
+            panic!("expected a search");
+        };
+        assert_eq!(query, "invoice");
+        assert_eq!(app.mode, Mode::Normal);
+        app.set_search_hits(vec!["t1".into()]);
+        assert_eq!(
+            ids(&app),
+            ["t1", "old"],
+            "a hit by message text is listed too"
+        );
+        // Esc ends the search first
+        app.handle_key(Key::Esc);
+        assert!(!app.searching() && app.search_hits.is_none());
+        assert_eq!(ids(&app), ["t3", "t1"]);
+        // an empty search does not ask the daemon
+        press(&mut app, "/");
+        assert!(app.handle_key(Key::Enter).is_none());
+    }
+
+    #[test]
+    fn a_search_also_narrows_today_and_matches_people_and_the_message_start() {
+        let mut app = App::new();
+        let mut a = mail_thread("a", "Plan", &["ana@x.com"], 10);
+        a.last = Some(haste_proto::LastMessage {
+            sender: Some("Ana".into()),
+            snippet: "see the budget sheet".into(),
+            has_attachment: false,
+        });
+        app.set_threads(vec![a, mail_thread("b", "Lunch", &["bela@x.com"], 20)]);
+        let today = |app: &App| -> Vec<String> {
+            app.today_threads()
+                .iter()
+                .map(|t| t.thread.id.clone())
+                .collect()
+        };
+        assert_eq!(today(&app), ["b", "a"]);
+        press(&mut app, "/");
+        press(&mut app, "BUDGET");
+        assert_eq!(
+            today(&app),
+            ["a"],
+            "the start of the newest message, any capitals"
+        );
+        app.handle_key(Key::Backspace);
+        app.handle_key(Key::Backspace);
+        app.handle_key(Key::Backspace);
+        app.handle_key(Key::Backspace);
+        app.handle_key(Key::Backspace);
+        app.handle_key(Key::Backspace);
+        press(&mut app, "bela");
+        assert_eq!(today(&app), ["b"], "a person");
     }
 }

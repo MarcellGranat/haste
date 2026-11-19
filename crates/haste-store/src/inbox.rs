@@ -293,6 +293,32 @@ impl Store {
         })
     }
 
+    /// The ids of the threads whose subject or any message text contains `query` (plain letters
+    /// without regard to capitals), newest activity first, archived ones included.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn search_thread_ids(&self, query: &str, limit: usize) -> StoreResult<Vec<String>> {
+        // % and _ are wildcards in LIKE: the typed text is matched as it is
+        let escaped = query
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.read(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT t.id FROM threads t WHERE t.id IN ( \
+                    SELECT thread_id FROM messages WHERE body_text LIKE ?1 ESCAPE '\\' \
+                    UNION SELECT id FROM threads WHERE subject LIKE ?1 ESCAPE '\\') \
+                 ORDER BY t.last_activity_at DESC LIMIT ?2",
+            )?;
+            let rows =
+                stmt.query_map(rusqlite::params![pattern, limit], |r| r.get::<_, String>(0))?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+    }
+
     /// # Errors
     /// Database errors.
     pub fn messages_for_thread(&self, thread_id: &str) -> StoreResult<Vec<Message>> {
@@ -981,5 +1007,52 @@ mod tests {
         // reading it later flips the mark
         store.set_unread(&[(unread.id.clone(), false)], 2).unwrap();
         assert!(store.unread_threads().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_search_finds_threads_by_subject_or_message_text_archived_ones_too() {
+        let (_d, s) = test_store();
+        let a = thread(&s, "e1", Source::Gmail, "Quarterly plan", 10);
+        let b = thread(&s, "e2", Source::Gmail, "Lunch", 20);
+        let c = thread(&s, "e3", Source::Whatsapp, "Ana", 30);
+        let message = |thread: &Thread, ext: &str, body: &str| Message {
+            id: String::new(),
+            thread_id: thread.id.clone(),
+            source: thread.source.clone(),
+            external_id: ext.into(),
+            sender_person_id: None,
+            sender_identifier: Some("x@y".into()),
+            body_text: body.into(),
+            sent_at: 5,
+            is_own: false,
+        };
+        s.upsert_message(&message(&b, "m1", "the invoice 100% paid"))
+            .unwrap();
+        s.upsert_message(&message(&c, "m2", "see you at the INVOICE desk"))
+            .unwrap();
+        s.set_triage(
+            &c.id,
+            haste_core::model::ObjectKind::Thread,
+            &TriageUpdate {
+                archived: Some(true),
+                ..TriageUpdate::default()
+            },
+            50,
+        )
+        .unwrap();
+        // subject, and message text without regard to capitals, newest first; archived included
+        assert_eq!(
+            s.search_thread_ids("invoice", 10).unwrap(),
+            vec![c.id.clone(), b.id.clone()]
+        );
+        assert_eq!(s.search_thread_ids("plan", 10).unwrap(), vec![a.id.clone()]);
+        // % is a character here, not a wildcard
+        assert_eq!(s.search_thread_ids("100%", 10).unwrap(), vec![b.id.clone()]);
+        assert!(s.search_thread_ids("1%0", 10).unwrap().is_empty());
+        assert!(s
+            .search_thread_ids("nothing like it", 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(s.search_thread_ids("invoice", 1).unwrap().len(), 1);
     }
 }

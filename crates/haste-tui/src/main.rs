@@ -1450,8 +1450,9 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 /// exit. No screen, no log file, one read of what it needs from the daemon. Printing nothing is
 /// meaningful: Herdr then hides the entry.
 fn status_main() {
+    // herdr gives this a few seconds: a daemon that does not answer is "unreachable" in time
     let client = match Client::from_base(&base_dir()) {
-        Ok(c) => c,
+        Ok(c) => c.with_timeout(Duration::from_secs(4)),
         Err(_) => {
             println!("{}", haste_tui::statusline::unreachable());
             return;

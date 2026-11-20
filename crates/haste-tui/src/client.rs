@@ -29,7 +29,14 @@ pub struct Client {
     socket: PathBuf,
     token: String,
     connection: std::sync::Mutex<Option<UnixStream>>,
+    /// How long a request waits for the daemon's answer. A send can take most of a minute at the
+    /// provider, so the default is generous; it only has to end a wait on a connection that died
+    /// without saying so (an ssh forward to another machine that lost its network).
+    timeout: Duration,
 }
+
+/// The default wait for an answer.
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(90);
 
 impl Clone for Client {
     fn clone(&self) -> Self {
@@ -37,6 +44,7 @@ impl Clone for Client {
             socket: self.socket.clone(),
             token: self.token.clone(),
             connection: std::sync::Mutex::new(None),
+            timeout: self.timeout,
         }
     }
 }
@@ -90,6 +98,7 @@ impl Client {
             socket: base.join("run").join("hasted.sock"),
             token,
             connection: std::sync::Mutex::new(None),
+            timeout: ANSWER_TIMEOUT,
         })
     }
 
@@ -129,9 +138,18 @@ impl Client {
         }
     }
 
+    /// Wait at most this long for an answer (the default is 90 seconds).
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
     fn connect(&self) -> Result<UnixStream, String> {
         match UnixStream::connect(&self.socket) {
             Ok(s) => {
+                let _ = s.set_read_timeout(Some(self.timeout));
+                let _ = s.set_write_timeout(Some(Duration::from_secs(10)));
                 if DAEMON_DOWN.swap(false, Ordering::Relaxed) {
                     haste_core::log::info("tui", "daemon_reachable_again", &[]);
                 }
@@ -304,5 +322,28 @@ mod tests {
         assert_eq!(client2.call(RequestBody::AgentList), Ok(Response::Done));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn a_daemon_that_never_answers_ends_the_wait() {
+        let dir = temp("silent");
+        let sock = dir.join("run");
+        std::fs::create_dir_all(&sock).unwrap();
+        let listener = UnixListener::bind(sock.join("hasted.sock")).unwrap();
+        thread::spawn(move || {
+            // take every connection and say nothing
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                held.push(stream);
+            }
+        });
+        std::fs::write(dir.join("human.token"), "t\n").unwrap();
+        let client = Client::from_base(&dir)
+            .unwrap()
+            .with_timeout(Duration::from_millis(300));
+        let started = std::time::Instant::now();
+        assert!(client.call(RequestBody::AgentList).is_err());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

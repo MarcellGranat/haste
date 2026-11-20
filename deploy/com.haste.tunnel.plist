@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.haste.tunnel.__HOST__</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__SCRIPT__</string>
+        <string>__HOST__</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <!-- wait a little between attempts when the other machine is asleep or away -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+    </dict>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/haste-tunnel-__HOST__.log</string>
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/haste-tunnel-__HOST__.log</string>
+</dict>
+</plist>

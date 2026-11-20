@@ -787,6 +787,33 @@ returns to the previous tab.
 **Agents and projects** (the Agents panel, workspace names as project tags, results sent back to the
 agent) are described in *Herdr: agents, projects and machines* above.
 
+## Running the TUI on another machine
+
+The TUI and the daemon are separate programs, so the daemon can live on one machine (the **hub**)
+and the TUI can run on any other machine you can reach over ssh, for example on your tailnet. This
+shares only `hasted`'s Unix socket through an ssh forward; there is still no network listener, and
+every request still needs the token.
+
+1. **On the other machine, build and install the TUI.** Copy the source (no `.env`, no `target/`),
+   then `cargo build --release -p haste-tui` and put `target/release/haste-tui` on the PATH. It builds
+   on Linux (the clipboard key `y` uses `wl-copy` or `xclip`) as well as macOS. Use the same version
+   as the hub: the protocol is checked and a mismatch is refused.
+2. **Share the socket.** On the hub run `scripts/haste-tunnel.sh <ssh-host>`. It makes
+   `~/.haste-remote/run/hasted.sock` on the other machine (mode 0600 in a 0700 folder) and forwards
+   it to the hub's socket. It exits when the connection drops. To keep it up, install
+   `deploy/com.haste.tunnel.plist` as a launchd job with `KeepAlive` (fill in `__SCRIPT__`, `__HOST__`
+   and `__HOME__`, then `launchctl bootstrap gui/$(id -u) ...`).
+3. **Give the TUI its token.** Copy the hub's `human.token` to `~/.haste-remote/human.token` on the
+   other machine (`scp`, then `chmod 600`). This is your full human token: whoever holds the file
+   can send as you. Treat that machine like the hub.
+4. **Run it** there with `HASTE_HOME=~/.haste-remote haste-tui` (or a one-line wrapper).
+
+What does not work from another machine, because the daemon reads and writes the *hub's* files:
+attaching files to a reply, saving or previewing attachments, and the Logs tab. Everything else
+(reading, replying, archiving, search, calendar, reminders, the status line) goes through the socket.
+Closing the tunnel or the hub being asleep shows up as "cannot reach the daemon". A native network
+mode with a token per device is the next step if this is used a lot.
+
 ## Logging and diagnosing problems
 
 Two logs, with different jobs:

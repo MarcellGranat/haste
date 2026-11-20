@@ -498,6 +498,17 @@ fn start_archive(app: &mut App, jobs: &Sender<ArchiveJob>, thread_id: String) {
 }
 
 fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
+    // opening or reloading a thread, loading older messages or copying text change none of the
+    // lists, so they do not ask the daemon for all of them again (over a slow link that is the
+    // difference between a thread opening at once and seconds later)
+    let changes_no_list = matches!(
+        effect,
+        Effect::OpenThread { .. }
+            | Effect::ReloadThread { .. }
+            | Effect::LoadOlder { .. }
+            | Effect::CopyText { .. }
+            | Effect::OpenAndReply { .. }
+    );
     match effect {
         Effect::Background => {
             // hand the screen back to the tab before this one; the TUI stays up. Without the
@@ -1170,7 +1181,9 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
             };
         }
     }
-    refresh(app, client);
+    if !changes_no_list {
+        refresh(app, client);
+    }
     false
 }
 

@@ -24,6 +24,29 @@ nothing, why it is built the way it is, and where it stops.
 - **Herdr integration**: an overdue-task / new-mail / connection-problem line in the herdr status
   bar, and a key that opens the TUI in a popup that keeps running when you close it.
 
+## Screenshots
+
+All of it is made up: the TUI drawn by its own renderer with invented data (a cast of comic-book
+characters writing about the usual office trouble; no affiliation, just a joke). Nick Fury is a
+priority sender, so his mail is the orange row, opened into a bigger box with the start of the
+message. `cargo run -p haste-tui --example screenshots` redraws them into `docs/screenshots/`.
+
+**Today**: incoming mail and chats on top (priority first), your TODOs below, overdue ones in red.
+
+![Today: Nick Fury's urgent mail is the orange priority row; the TODO list below has some overdue items](docs/screenshots/today.svg)
+
+**Channels**: every channel and connector with the time it was last read; the iMessage one has been stopped by its circuit breaker.
+
+![Channels: the channel list with last-read times on the left, the Gmail threads on the right](docs/screenshots/channels.svg)
+
+**Calendar**: a Monday-to-Friday week, one colour per calendar, the time now in red.
+
+![Calendar: a week grid with colour-coded events](docs/screenshots/calendar.svg)
+
+**Reading and replying**: the thread above, the reply box (in green) below it, its few keys where the thread's keys were.
+
+![A thread with the reply box open under it](docs/screenshots/reply.svg)
+
 ## Set it up (from scratch)
 
 Plan on an hour, most of it spent in the Google Cloud console. Every connector is optional: start

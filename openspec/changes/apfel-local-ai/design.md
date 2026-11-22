@@ -137,7 +137,7 @@ New request kinds, all denied to agent and machine principals in the policy gate
 ## Follow-up decisions
 - **Prompts are files.** `prompts/draft.txt`, `todo.txt`, `rewrite.txt` and `rewrite_modes.txt` in the data directory; defaults are constants in `hasted/src/prompts.rs`, written when missing and never overwritten, re-read when the modification time changes. A file that is empty, unreadable or lacks a required placeholder falls back to the default with one warning naming only the file.
 - **Hungarian.** The default templates tell the model to follow the language of the message or draft and to restore missing Hungarian accents; this is part of the editable text, not hard-coded elsewhere.
-- **Auto jobs stay mail-only.** A chat thread (WhatsApp, Messenger) is never "approved", even for a listed name; the new `suggest` log line says `not_approved` with the source, so this is visible.
+- **Auto jobs also run for chats.** Decided after the first deploy: WhatsApp, Messenger, iMessage and Google Chat threads are approved through the same `allowed_senders` file, matched against the newest non-own sender's identifier (phone or handle) and display name, plus the chat title when the chat has one other person (a group's title never approves it). Chats use `prompts/draft_chat.txt` and `todo_chat.txt` (short, informal; written when missing, so existing users get them without losing edits). The reader shows ghost text, `Tab`/`Right`, `Ctrl-r` and `t` for chats exactly as for mail; `t` now also works in the open thread (mail and chat). The `suggest` log line keeps saying `not_approved` with the source when a chat is not listed.
 
 ## Open Questions
 

@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Automatic draft only for approved senders
-When the user opens a thread whose sender matches the `allowed_senders` file, the daemon SHALL enqueue a background draft job for that thread. For any other thread it SHALL NOT enqueue one. The draft context SHALL be the latest inbound message and at most 4 earlier loaded messages of the thread, oldest first, plus matching memories.
+When the user opens a mail or chat thread whose newest non-own sender matches the `allowed_senders` file (for a chat: the sender's identifier or display name, or, in a chat with one other person, the chat title; in a group only the newest sender counts), the daemon SHALL enqueue a background draft job for that thread. For any other thread it SHALL NOT enqueue one. The draft context SHALL be the latest inbound message and at most 4 earlier loaded messages of the thread, oldest first, plus matching memories.
 
 #### Scenario: Approved sender opened
 - **WHEN** the user opens a thread from an approved sender

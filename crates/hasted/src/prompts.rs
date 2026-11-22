@@ -1,14 +1,15 @@
 //! The prompt templates of the AI helpers, as plain text files the user can edit:
-//! `<data-dir>/prompts/draft.txt`, `todo.txt`, `rewrite.txt` and `rewrite_modes.txt`.
+//! `<data-dir>/prompts/draft.txt`, `todo.txt`, `rewrite.txt` and `rewrite_modes.txt`, plus
+//! `draft_chat.txt` and `todo_chat.txt` for chats (WhatsApp, Messenger, iMessage, Google Chat).
 //!
 //! The daemon writes the built-in defaults when a file is missing and never overwrites an edited
 //! one. A file is read again when its modification time changes (no restart). A file that is
 //! empty, unreadable or lacks a required placeholder is replaced by the built-in default for as
 //! long as it stays broken, with one warning that names the file and the reason, never its text.
 //!
-//! Placeholders (in `draft.txt`, `todo.txt`, `rewrite.txt`):
+//! Placeholders (in `draft.txt`, `todo.txt`, `rewrite.txt` and the two chat files):
 //! * `{{memories}}`: the notes of the matching memories (empty when none); required.
-//! * `{{today}}`: today's date as YYYY-MM-DD; required in `todo.txt`.
+//! * `{{today}}`: today's date as YYYY-MM-DD; required in `todo.txt` and `todo_chat.txt`.
 //! * `{{instruction}}`: what the rewrite mode asks for; required in `rewrite.txt`.
 //!
 //! `rewrite_modes.txt` has one `mode: instruction` line per mode (`grammar`, `formal`, `fluent`,
@@ -58,6 +59,30 @@ English. Hungarian is often written without accents (for example \"koszonom szep
 accents (á é í ó ö ő ú ü ű).\n\
 {{memories}}";
 
+/// Default of `draft_chat.txt`.
+pub const DEFAULT_DRAFT_CHAT: &str = "You write the reply of the user (\"Me\") to the latest \
+message of a chat (WhatsApp, Messenger, iMessage or similar). Write only the text of the message, \
+without explanations and without placeholders. Chats are short and informal: one to three short \
+sentences, no greeting line, no sign-off, an emoji only if the other person uses them.\n\
+Language: reply in the language of the latest message. The text is Hungarian or English. Hungarian \
+is often written without accents (for example \"koszonom szepen\" for \"köszönöm szépen\"): \
+understand it anyway and write the reply in correct Hungarian with all accents \
+(á é í ó ö ő ú ü ű).\n\
+{{memories}}";
+
+/// Default of `todo_chat.txt`.
+pub const DEFAULT_TODO_CHAT: &str = "Decide whether the latest message of a chat asks the user \
+(\"Me\") to do something that should become a task, or contains a commitment or an appointment \
+the user must remember. has_task is false for small talk, thanks, greetings and anything that \
+needs no action. title is a short imperative phrase (at most 120 characters). notes holds the key \
+details (at most 500 characters). due is a date as YYYY-MM-DD when the message states or implies a \
+deadline (today is {{today}}), else null. priority is none, low, medium or high.\n\
+Language: write title and notes in the language of the latest message. The text is Hungarian or \
+English. Hungarian is often written without accents (for example \"koszonom szepen\" for \
+\"köszönöm szépen\"): understand it anyway and write title and notes in correct Hungarian with all \
+accents (á é í ó ö ő ú ü ű).\n\
+{{memories}}";
+
 /// Default of `rewrite.txt`.
 pub const DEFAULT_REWRITE: &str = "You edit the draft reply of the user (\"Me\"). \
 Instruction: {{instruction}}\n\
@@ -83,6 +108,8 @@ friendly: Rewrite in a warmer, friendlier tone, and restore missing Hungarian ac
 pub enum Template {
     Draft,
     Todo,
+    DraftChat,
+    TodoChat,
     Rewrite,
     Modes,
 }
@@ -93,6 +120,8 @@ impl Template {
         match self {
             Self::Draft => "draft.txt",
             Self::Todo => "todo.txt",
+            Self::DraftChat => "draft_chat.txt",
+            Self::TodoChat => "todo_chat.txt",
             Self::Rewrite => "rewrite.txt",
             Self::Modes => MODES_FILE,
         }
@@ -103,6 +132,8 @@ impl Template {
         match self {
             Self::Draft => DEFAULT_DRAFT,
             Self::Todo => DEFAULT_TODO,
+            Self::DraftChat => DEFAULT_DRAFT_CHAT,
+            Self::TodoChat => DEFAULT_TODO_CHAT,
             Self::Rewrite => DEFAULT_REWRITE,
             Self::Modes => DEFAULT_MODES,
         }
@@ -110,8 +141,8 @@ impl Template {
 
     fn required(self) -> &'static [&'static str] {
         match self {
-            Self::Draft => &[MEMORIES_PLACEHOLDER],
-            Self::Todo => &[MEMORIES_PLACEHOLDER, TODAY_PLACEHOLDER],
+            Self::Draft | Self::DraftChat => &[MEMORIES_PLACEHOLDER],
+            Self::Todo | Self::TodoChat => &[MEMORIES_PLACEHOLDER, TODAY_PLACEHOLDER],
             Self::Rewrite => &[MEMORIES_PLACEHOLDER, INSTRUCTION_PLACEHOLDER],
             Self::Modes => &[],
         }
@@ -192,6 +223,8 @@ impl PromptStore {
         for template in [
             Template::Draft,
             Template::Todo,
+            Template::DraftChat,
+            Template::TodoChat,
             Template::Rewrite,
             Template::Modes,
         ] {
@@ -293,6 +326,24 @@ impl PromptStore {
         )
     }
 
+    /// The `draft` system prompt for a chat.
+    #[must_use]
+    pub fn draft_chat(&self, memories: &str) -> String {
+        fill(
+            &self.text(Template::DraftChat),
+            &[(MEMORIES_PLACEHOLDER, memories)],
+        )
+    }
+
+    /// The `todo` system prompt for a chat.
+    #[must_use]
+    pub fn todo_chat(&self, memories: &str, today: &str) -> String {
+        fill(
+            &self.text(Template::TodoChat),
+            &[(MEMORIES_PLACEHOLDER, memories), (TODAY_PLACEHOLDER, today)],
+        )
+    }
+
     /// The `rewrite` system prompt for this instruction and these notes.
     #[must_use]
     pub fn rewrite(&self, memories: &str, instruction: &str) -> String {
@@ -346,6 +397,8 @@ mod tests {
         for t in [
             Template::Draft,
             Template::Todo,
+            Template::DraftChat,
+            Template::TodoChat,
             Template::Rewrite,
             Template::Modes,
         ] {
@@ -360,6 +413,37 @@ mod tests {
             fs::read_to_string(p.join("draft.txt")).unwrap(),
             "my own {{memories}}"
         );
+    }
+
+    #[test]
+    fn the_chat_files_are_added_for_a_user_who_already_has_the_mail_files() {
+        let (dir, s) = store();
+        let p = dir.path().join(PROMPTS_DIR);
+        fs::create_dir_all(&p).unwrap();
+        fs::write(p.join("draft.txt"), "old {{memories}}").unwrap();
+        s.ensure_defaults();
+        assert_eq!(
+            fs::read_to_string(p.join("draft.txt")).unwrap(),
+            "old {{memories}}"
+        );
+        assert_eq!(
+            fs::read_to_string(p.join("draft_chat.txt")).unwrap(),
+            DEFAULT_DRAFT_CHAT
+        );
+        assert_eq!(
+            fs::read_to_string(p.join("todo_chat.txt")).unwrap(),
+            DEFAULT_TODO_CHAT
+        );
+        // a chat uses its own file, mail keeps its own
+        fs::write(p.join("draft_chat.txt"), "Chat: {{memories}}").unwrap();
+        assert_eq!(s.draft_chat("N"), "Chat: N");
+        assert_eq!(s.draft("N"), "old N");
+        // a broken chat file falls back to the chat default, not the mail one
+        fs::write(p.join("todo_chat.txt"), "no placeholders").unwrap();
+        assert_eq!(s.text(Template::TodoChat), DEFAULT_TODO_CHAT);
+        assert!(s
+            .todo_chat("", "2026-11-22")
+            .contains("today is 2026-11-22"));
     }
 
     #[test]
@@ -447,6 +531,8 @@ mod tests {
             ("draft", DEFAULT_DRAFT),
             ("todo", DEFAULT_TODO),
             ("rewrite", DEFAULT_REWRITE),
+            ("draft_chat", DEFAULT_DRAFT_CHAT),
+            ("todo_chat", DEFAULT_TODO_CHAT),
         ] {
             assert!(text.contains("Hungarian"), "{name}");
             assert!(text.contains("accents"), "{name}");
@@ -454,6 +540,9 @@ mod tests {
             assert!(text.contains("köszönöm szépen"), "{name}");
         }
         assert!(DEFAULT_DRAFT.contains("language of the latest message"));
+        assert!(DEFAULT_DRAFT_CHAT.contains("language of the latest message"));
+        assert!(DEFAULT_DRAFT_CHAT.contains("informal"));
+        assert!(DEFAULT_TODO_CHAT.contains("language of the latest message"));
         assert!(DEFAULT_TODO.contains("language of the latest message"));
         assert!(DEFAULT_REWRITE.contains("keep the language of the draft"));
         let modes = parse_modes(DEFAULT_MODES);

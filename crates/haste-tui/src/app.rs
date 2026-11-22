@@ -2581,6 +2581,8 @@ impl App {
                 }
             }
             Key::Char('l') => return Some(Effect::OpenLabels { thread_id }),
+            // the reminder popup for this thread, prefilled by the model when the helpers are on
+            Key::Char('t') => return self.start_remind_for_ai(&thread_id),
             Key::Char('r') => return Some(Effect::Reply { thread_id }),
             Key::Char('e') => {
                 self.close_reader();
@@ -4788,7 +4790,7 @@ mod tests {
         );
         assert_eq!(app.mode, Mode::Read);
         // other thread keys do nothing in the reader
-        for keys in ["g", "p", "x", "s", "t"] {
+        for keys in ["g", "p", "x", "s"] {
             assert!(press(&mut app, keys).is_empty(), "{keys}");
         }
         assert_eq!(app.mode, Mode::Read);
@@ -6506,6 +6508,67 @@ mod tests {
         );
         // never sent by taking it
         assert_eq!(app.mode, Mode::Compose);
+    }
+
+    /// An open chat thread (WhatsApp) with one message, as the reader shows it.
+    fn open_chat(app: &mut App, id: &str) {
+        let mut chat = mail_thread(id, "Kata Biró", &["+36301234567"], 30);
+        chat.thread.source = haste_core::model::Source::Whatsapp;
+        app.set_threads(vec![chat.clone()]);
+        app.show_thread(
+            chat,
+            vec![message("m1", "+36301234567", "Szia, tudsz segiteni?", 30)],
+            None,
+        );
+    }
+
+    #[test]
+    fn a_chat_shows_the_ghost_text_and_tab_takes_it_like_in_mail() {
+        use haste_proto::AiState;
+        let mut app = App::new();
+        open_chat(&mut app, "c1");
+        app.set_ai(ai_for("c1", AiState::Ready, Some("Szia! Persze, segitek.")));
+        app.open_reply_form("c1");
+        let c = app.compose.as_ref().unwrap();
+        assert_eq!(c.suggestion.as_deref(), Some("Szia! Persze, segitek."));
+        assert!(app.handle_key(Key::Tab).is_none());
+        assert_eq!(
+            app.compose.as_ref().unwrap().focused_text(),
+            "Szia! Persze, segitek."
+        );
+        // the draft arrives after the box was opened: a poll is wanted, then the ghost appears
+        let mut app = App::new();
+        open_chat(&mut app, "c1");
+        app.set_ai(ai_for("c1", AiState::Pending, None));
+        app.open_reply_form("c1");
+        assert_eq!(app.wants_ai_poll().as_deref(), Some("c1"));
+        app.set_ai(ai_for("c1", AiState::Ready, Some("Persze!")));
+        assert_eq!(
+            app.compose.as_ref().unwrap().suggestion.as_deref(),
+            Some("Persze!")
+        );
+    }
+
+    #[test]
+    fn ctrl_r_and_t_work_in_an_open_chat() {
+        let mut app = App::new();
+        open_chat(&mut app, "c1");
+        // t in the open thread asks for the stored suggestion when the helpers are on
+        app.ai_prefill = true;
+        let Some(Effect::TodoSuggest { thread_id }) = app.handle_key(Key::Char('t')) else {
+            panic!("expected a request for the suggestion");
+        };
+        assert_eq!(thread_id, "c1");
+        // off: the popup opens at once
+        app.ai_prefill = false;
+        assert!(app.handle_key(Key::Char('t')).is_none());
+        assert_eq!(app.mode, Mode::RemindForm);
+        app.handle_key(Key::Esc);
+        // Ctrl-r in the chat's reply box opens the rewrite popup
+        app.open_reply_form("c1");
+        press(&mut app, "szia koszonom");
+        assert!(app.handle_key(Key::Ctrl('r')).is_none());
+        assert_eq!(app.mode, Mode::Rewrite);
     }
 
     #[test]

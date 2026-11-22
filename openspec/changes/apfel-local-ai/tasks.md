@@ -63,3 +63,10 @@
 - [x] 8.1 Log one `apfel` `suggest` line per suggestion request (decision off, not_found, not_approved, answered, cached, queued, full; tool, hashed thread, source name) so the log shows why a thread got no suggestion; a regression test shows a chat thread is never approved
 - [x] 8.2 Move the draft, TODO and rewrite prompts and the rewrite mode lines to editable files in `prompts/` (defaults written when missing, re-read on change, broken file falls back with a file-name-only warning), with tests
 - [x] 8.3 Make the default prompts handle Hungarian and English and repair missing Hungarian accents, with tests, and document the files and placeholders in the README
+
+## 9. Follow-up: chats
+
+- [x] 9.1 Approve chat threads (WhatsApp, Messenger, iMessage, Google Chat) through `allowed_senders`: match the newest non-own sender's identifier and display name, and the chat title in a one-to-one chat; a group title never approves; tests for name, phone, title, group, not listed, answered and a rerun only on a new message
+- [x] 9.2 Add `draft_chat.txt` and `todo_chat.txt` (short, informal, Hungarian and accents), written when missing so existing users get them, with fallback and tests
+- [x] 9.3 Make `t` work in the open thread (mail and chat) and test ghost text, `Tab`, `Ctrl-r` and `t` for a chat in the reader
+- [x] 9.4 Update the README (who is approved, chat files, `t` in the thread)

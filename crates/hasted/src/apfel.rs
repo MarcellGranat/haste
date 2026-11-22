@@ -3,7 +3,7 @@
 //! or memory text on the command line, caches results by thread version and writes one log line
 //! and one audit record per call, with fixed labels and numbers only.
 //!
-//! Three tools: `draft` and `todo` (background, only for mail from approved senders, only when the
+//! Three tools: `draft` and `todo` (background, only for mail and chats from approved senders, only when the
 //! machine has room) and `rewrite` (the human asked, always runs).
 
 use std::collections::HashMap;
@@ -654,7 +654,9 @@ struct Ctx {
     messages: Vec<Message>,
     channel: String,
     senders: Vec<String>,
-    /// Mail from a sender on `allowed_senders`.
+    /// A chat (WhatsApp, Messenger, iMessage, Google Chat), not mail.
+    chat: bool,
+    /// The latest message from the other side is from a sender on `allowed_senders`.
     approved: bool,
     /// Index of the latest message from the other side.
     latest_inbound: Option<usize>,
@@ -670,6 +672,45 @@ impl Ctx {
 
 fn is_mail(source: &Source) -> bool {
     matches!(source, Source::Gmail | Source::Icloud)
+}
+
+/// The chat sources (read through Beeper).
+fn is_chat(source: &Source) -> bool {
+    matches!(
+        source,
+        Source::Imessage | Source::Whatsapp | Source::Messenger | Source::GoogleChat
+    )
+}
+
+/// What an `allowed_senders` line is matched against for a chat: the identifier (phone number or
+/// handle) and the display name of the newest sender who is not the human, and, in a chat with
+/// one other person, the chat's title (which is that person's name). In a group chat only the
+/// newest sender counts: the group's title never approves it.
+fn chat_subjects(
+    thread: &Thread,
+    latest: &Message,
+    person_name: Option<String>,
+    other_senders: usize,
+) -> Vec<String> {
+    let mut subjects: Vec<String> = Vec::new();
+    subjects.extend(latest.sender_identifier.clone());
+    subjects.extend(person_name.filter(|n| !n.trim().is_empty()));
+    if other_senders <= 1 && !thread.subject.trim().is_empty() {
+        subjects.push(thread.subject.clone());
+    }
+    subjects
+}
+
+/// How many different people (other than the human) wrote in the thread.
+fn other_sender_count(messages: &[Message]) -> usize {
+    let mut seen: Vec<&str> = Vec::new();
+    for m in messages.iter().filter(|m| !m.is_own) {
+        let who = m.sender_identifier.as_deref().unwrap_or("");
+        if !seen.contains(&who) {
+            seen.push(who);
+        }
+    }
+    seen.len()
 }
 
 fn load_ctx(state: &State, thread_id: &str) -> Option<Ctx> {
@@ -703,19 +744,36 @@ fn load_ctx(state: &State, thread_id: &str) -> Option<Ctx> {
             }
         }
     }
-    let approved = is_mail(&thread.source) && {
+    let chat = is_chat(&thread.source);
+    let approved = (is_mail(&thread.source) || chat) && {
         let text = fs::read_to_string(state.config.data_dir.join(ALLOWED_FILE)).unwrap_or_default();
         let (allowed, _) = IgnoreList::parse(&text);
-        // the same subject the TUI matches: the newest sender who is not the human
-        latest_inbound
-            .and_then(|i| messages[i].sender_identifier.as_deref())
-            .is_some_and(|s| allowed.is_muted(&[s]))
+        // the newest sender who is not the human
+        latest_inbound.is_some_and(|i| {
+            let latest = &messages[i];
+            if chat {
+                let person_name = latest
+                    .sender_person_id
+                    .as_deref()
+                    .and_then(|id| state.store.get_person(id).ok().flatten())
+                    .map(|p| p.display_name);
+                let subjects =
+                    chat_subjects(&thread, latest, person_name, other_sender_count(&messages));
+                allowed.is_muted(&subjects)
+            } else {
+                latest
+                    .sender_identifier
+                    .as_deref()
+                    .is_some_and(|s| allowed.is_muted(&[s]))
+            }
+        })
     };
     Some(Ctx {
         channel: thread.source.as_name(),
         thread,
         messages,
         senders,
+        chat,
         approved,
         latest_inbound,
     })
@@ -788,16 +846,26 @@ fn transcript(parts: &PromptParts, latest_title: &str) -> String {
     s
 }
 
-fn draft_prompt(parts: &PromptParts, prompts: &PromptStore) -> Prompt {
+fn draft_prompt(parts: &PromptParts, chat: bool, prompts: &PromptStore) -> Prompt {
+    let memories = memory_block(&parts.memories);
     Prompt {
-        system: prompts.draft(&memory_block(&parts.memories)),
+        system: if chat {
+            prompts.draft_chat(&memories)
+        } else {
+            prompts.draft(&memories)
+        },
         user: transcript(parts, "Latest message (reply to this)"),
     }
 }
 
-fn todo_prompt(parts: &PromptParts, now: i64, prompts: &PromptStore) -> Prompt {
+fn todo_prompt(parts: &PromptParts, now: i64, chat: bool, prompts: &PromptStore) -> Prompt {
+    let memories = memory_block(&parts.memories);
     Prompt {
-        system: prompts.todo(&memory_block(&parts.memories), &today(now)),
+        system: if chat {
+            prompts.todo_chat(&memories, &today(now))
+        } else {
+            prompts.todo(&memories, &today(now))
+        },
         user: transcript(parts, "Latest message"),
     }
 }
@@ -924,9 +992,10 @@ fn run_job(state: &State, job: &Job, sample: Sample) {
     let settings = apfel.settings();
     let now = now_secs();
     let prompts = &apfel.prompts;
+    let chat = ctx.chat;
     let build: Box<dyn Fn(&PromptParts) -> Prompt + '_> = match job.tool {
-        Tool::Todo => Box::new(move |p| todo_prompt(p, now, prompts)),
-        _ => Box::new(move |p| draft_prompt(p, prompts)),
+        Tool::Todo => Box::new(move |p| todo_prompt(p, now, chat, prompts)),
+        _ => Box::new(move |p| draft_prompt(p, chat, prompts)),
     };
     let result = match fit(
         runner.as_ref(),
@@ -1094,7 +1163,7 @@ pub fn suggestion_get(state: &State, thread_id: &str) -> Response {
         return err(ErrorCode::NotFound, "thread not found");
     };
     if !ctx.approved {
-        // approved means: mail, and the newest sender who is not the human is on allowed_senders
+        // approved means: mail or a chat, and the newest sender who is not the human is on allowed_senders
         log_suggest("not_approved", "all", thread_id, &ctx.channel);
         return Response::AiSuggestion {
             draft_state: AiState::None,

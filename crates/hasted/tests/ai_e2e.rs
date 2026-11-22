@@ -396,8 +396,9 @@ async fn background_jobs_wait_while_the_machine_is_busy() {
     let h = boot().await;
     h.allow(r"^kata@x\.org$");
     let thread = h.seed("kata@x.org", 3);
-    h.suggestion(&thread).await;
+    // busy before the job exists: the daemon's own tick loop may fire at any moment
     h.sampler.busy.store(true, Ordering::SeqCst);
+    h.suggestion(&thread).await;
     h.tick();
     assert_eq!(h.runner.completes.load(Ordering::SeqCst), 0, "busy machine");
     assert_eq!(
@@ -540,46 +541,182 @@ async fn nothing_runs_while_the_helpers_are_switched_off() {
     assert_eq!(h.runner.completes.load(Ordering::SeqCst), 0);
 }
 
+impl Harness {
+    /// A chat thread (`source`) titled `title`; `messages` are (sender identifier, person id,
+    /// is_own) in order. Returns the thread id.
+    fn seed_chat(
+        &self,
+        source: Source,
+        ext: &str,
+        title: &str,
+        messages: &[(&str, Option<&str>, bool)],
+    ) -> String {
+        let store = &self.daemon.state.store;
+        let thread = store.upsert_thread(&source, ext, title, &[], 200).unwrap();
+        for (i, (sender, person, own)) in messages.iter().enumerate() {
+            store
+                .upsert_message(&Message {
+                    id: String::new(),
+                    thread_id: thread.id.clone(),
+                    source: source.clone(),
+                    external_id: format!("{ext}-m{i}"),
+                    sender_person_id: person.map(str::to_owned),
+                    sender_identifier: Some((*sender).to_owned()),
+                    body_text: format!("{SECRET} chat {i}"),
+                    sent_at: 200 + i as i64,
+                    is_own: *own,
+                })
+                .unwrap();
+        }
+        thread.id
+    }
+
+    fn person(&self, name: &str) -> String {
+        self.daemon.state.store.create_person(name, &[]).unwrap().id
+    }
+}
+
 #[tokio::test]
-async fn a_chat_thread_is_never_approved_even_from_a_sender_that_is_listed() {
-    // Auto draft and TODO are for mail from `allowed_senders`. A WhatsApp or Messenger thread
-    // from the same person queues nothing (the daemon log says `not_approved` for it).
+async fn a_chat_from_an_allowed_name_gets_a_draft_and_a_todo_with_the_chat_prompts() {
     let h = boot().await;
-    h.allow(r"kata");
-    let store = &h.daemon.state.store;
-    let thread = store
-        .upsert_thread(
-            &Source::Whatsapp,
-            "wa-kata",
-            "Kata Biró",
-            &["Kata Biró".into()],
-            200,
-        )
-        .unwrap();
-    store
+    // matched against the sender's display name (the person), not only a phone number
+    h.allow(r"kata\s+bir[oó]");
+    let kata = h.person("Kata Biró");
+    let thread = h.seed_chat(
+        Source::Whatsapp,
+        "wa-kata",
+        "Kata Biró",
+        &[("+36301234567", Some(&kata), false)],
+    );
+    assert_eq!(
+        states(&h.suggestion(&thread).await),
+        (AiState::Pending, AiState::Pending)
+    );
+    h.tick();
+    assert_eq!(h.runner.completes.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        states(&h.suggestion(&thread).await),
+        (AiState::Ready, AiState::Ready)
+    );
+    {
+        let prompts = h.runner.prompts.lock().unwrap();
+        assert!(
+            prompts
+                .iter()
+                .all(|(p, _)| p.system.contains("informal") || p.system.contains("of a chat")),
+            "the chat templates were used"
+        );
+        assert!(prompts
+            .iter()
+            .all(|(p, _)| p.system.contains("köszönöm szépen") && !p.system.contains("{{")));
+    }
+    // opening it again with no new message calls apfel no more
+    h.suggestion(&thread).await;
+    h.tick();
+    assert_eq!(h.runner.completes.load(Ordering::SeqCst), 2);
+
+    // a new inbound message is a new version: asked again, once
+    h.daemon
+        .state
+        .store
         .upsert_message(&Message {
             id: String::new(),
-            thread_id: thread.id.clone(),
+            thread_id: thread.clone(),
             source: Source::Whatsapp,
-            external_id: "wa-1".into(),
-            sender_person_id: None,
-            sender_identifier: Some("Kata Biró".into()),
-            body_text: "Szia, tudsz segiteni?".into(),
-            sent_at: 200,
+            external_id: "wa-kata-new".into(),
+            sender_person_id: Some(kata.clone()),
+            sender_identifier: Some("+36301234567".into()),
+            body_text: "Es meg valami".into(),
+            sent_at: 900,
             is_own: false,
         })
         .unwrap();
     assert_eq!(
-        states(&h.suggestion(&thread.id).await),
+        states(&h.suggestion(&thread).await),
+        (AiState::Pending, AiState::Pending)
+    );
+    h.tick();
+    assert_eq!(h.runner.completes.load(Ordering::SeqCst), 4);
+    h.suggestion(&thread).await;
+    h.tick();
+    assert_eq!(h.runner.completes.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn a_chat_is_approved_by_phone_number_or_by_a_one_to_one_chat_title() {
+    let h = boot().await;
+    h.allow("^\\+36301234567$\n^Kata Biró$");
+    let by_phone = h.seed_chat(
+        Source::Messenger,
+        "ms-1",
+        "Somebody",
+        &[("+36301234567", None, false)],
+    );
+    assert_eq!(
+        states(&h.suggestion(&by_phone).await),
+        (AiState::Pending, AiState::Pending)
+    );
+    // a 1:1 chat whose title is the allowed name
+    let by_title = h.seed_chat(
+        Source::Imessage,
+        "im-1",
+        "Kata Biró",
+        &[("someone@icloud.com", None, false)],
+    );
+    assert_eq!(
+        states(&h.suggestion(&by_title).await),
+        (AiState::Pending, AiState::Pending)
+    );
+}
+
+#[tokio::test]
+async fn a_chat_from_anyone_else_or_a_group_by_its_title_queues_nothing() {
+    let h = boot().await;
+    h.allow(r"kata\s+bir[oó]");
+    let stranger = h.person("Peter Nagy");
+    let other = h.seed_chat(
+        Source::Whatsapp,
+        "wa-peter",
+        "Peter Nagy",
+        &[("+36209999999", Some(&stranger), false)],
+    );
+    assert_eq!(
+        states(&h.suggestion(&other).await),
+        (AiState::None, AiState::None)
+    );
+    // a group named after her: only the newest sender counts, and that is somebody else
+    let kata = h.person("Kata Biró");
+    let group = h.seed_chat(
+        Source::GoogleChat,
+        "gc-group",
+        "Kata Biró fan club",
+        &[
+            ("+36301234567", Some(&kata), false),
+            ("+36209999999", Some(&stranger), false),
+        ],
+    );
+    assert_eq!(
+        states(&h.suggestion(&group).await),
         (AiState::None, AiState::None)
     );
     h.tick();
     assert_eq!(h.runner.completes.load(Ordering::SeqCst), 0);
-    // the same name on a mail thread is approved
-    let mail = h.seed("kata@x.org", 2);
+}
+
+#[tokio::test]
+async fn an_answered_chat_needs_no_draft_but_still_gets_a_todo() {
+    let h = boot().await;
+    h.allow(r"kata\s+bir[oó]");
+    let kata = h.person("Kata Biró");
+    let thread = h.seed_chat(
+        Source::Whatsapp,
+        "wa-answered",
+        "Kata Biró",
+        &[("+36301234567", Some(&kata), false), ("me", None, true)],
+    );
     assert_eq!(
-        states(&h.suggestion(&mail).await),
-        (AiState::Pending, AiState::Pending)
+        states(&h.suggestion(&thread).await),
+        (AiState::None, AiState::Pending)
     );
 }
 
@@ -591,7 +728,14 @@ async fn the_prompt_files_are_written_and_edits_are_used_without_a_restart() {
     h.suggestion(&thread).await;
     h.tick();
     let dir = h.daemon.state.config.data_dir.join("prompts");
-    for file in ["draft.txt", "todo.txt", "rewrite.txt", "rewrite_modes.txt"] {
+    for file in [
+        "draft.txt",
+        "todo.txt",
+        "draft_chat.txt",
+        "todo_chat.txt",
+        "rewrite.txt",
+        "rewrite_modes.txt",
+    ] {
         assert!(dir.join(file).exists(), "{file}");
     }
     {

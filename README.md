@@ -855,15 +855,24 @@ restart); a changed install of the binary needs `hasted` restarted as usual.
 
 | Helper | What it does |
 |---|---|
-| **Draft** | Opening a mail thread from an approved sender (`allowed_senders`; mail only) queues a suggested reply. In the reply box it is dimmed text: `Tab`, or `Right` at the end, puts it in; typing drops it. It is never sent by itself. Not made when you already answered the last message. |
+| **Draft** | Opening a mail or chat thread (WhatsApp, Messenger, iMessage, Google Chat) from an approved sender (`allowed_senders`, see below) queues a suggested reply. In the reply box it is dimmed text: `Tab`, or `Right` at the end, puts it in; typing drops it. It is never sent by itself. Not made when you already answered the last message; in a chat it is short and informal. |
 | **Rewrite** | `Ctrl-r` in the reply box: custom command, check grammar, more formal, more fluent, more friendly. You see the result and `Enter` takes it (`Ctrl-z` puts your text back; `Esc` leaves it). Runs whenever you ask, whatever the load. |
-| **TODO** | The same approved-sender threads get a structured guess (task or not, title, notes, due date, priority). `t` on a thread opens the usual TODO popup filled with it, every field editable; nothing is created until you save it. |
+| **TODO** | The same approved-sender threads get a structured guess (task or not, title, notes, due date, priority). `t` on a thread in the list, or in the open thread (mail and chat), opens the usual TODO popup filled with it, every field editable; nothing is created until you save it. |
+
+**Who is approved.** The same `allowed_senders` file (one regular expression per line,
+case-insensitive) decides for mail and for chats, but it is matched against the newest message that
+is not yours:
+- **Mail:** the sender's address, as before.
+- **Chat:** the sender's phone number or handle, their display name, and, in a chat with one other
+  person, the chat's title (which is that person's name). In a **group** only the newest sender
+  counts, so a group named after someone never approves itself. A line such as `kata\s+bir[oó]`
+  therefore works for her WhatsApp and Messenger chats, and `^\+36301234567$` for her number.
 
 The draft and the TODO are background jobs: they run only when the machine has room (one-minute
 load per core below `max_load_per_core`, at least `min_free_mb` free, memory pressure not critical,
 no rewrite waiting; an unreadable value counts as busy). A job that is held back waits 5 minutes and
 is dropped after a day. Results are cached by thread version and memory set: opening the thread
-again with no new mail never calls the model again, and a refusal is not asked twice. Calls get at
+again with no new message never calls the model again, and a refusal is not asked twice. Calls get at
 most the latest message plus 4 earlier ones (rewrite: 2), trimmed oldest first to
 `prompt_token_budget` tokens (the model's window is 4096).
 
@@ -884,13 +893,16 @@ A memory applies when its channel is listed **or** a sender pattern matches; wit
 applies. A bad file or pattern is skipped and logged by file name and reason.
 
 **Prompts are plain files you can edit.** The first time the helpers run, `hasted` writes the
-built-in defaults to `prompts/` in the data folder and never overwrites a file afterwards. Edit them
+built-in defaults to `prompts/` in the data folder, including any file a newer version added (such
+as the chat ones), and never overwrites a file afterwards. Edit them
 freely; a changed file is read again by the next call (no restart).
 
 | File | What it is | Placeholders |
 |---|---|---|
-| `draft.txt` | the instructions for the suggested reply | `{{memories}}` (required) |
-| `todo.txt` | the instructions for the TODO guess (the answer shape itself is fixed by a schema) | `{{memories}}`, `{{today}}` (both required) |
+| `draft.txt` | the instructions for the suggested reply to a mail | `{{memories}}` (required) |
+| `draft_chat.txt` | the same for a chat (short, informal) | `{{memories}}` (required) |
+| `todo.txt` | the instructions for the TODO guess for a mail (the answer shape itself is fixed by a schema) | `{{memories}}`, `{{today}}` (both required) |
+| `todo_chat.txt` | the same for a chat | `{{memories}}`, `{{today}}` (both required) |
 | `rewrite.txt` | the instructions for a rewrite | `{{memories}}`, `{{instruction}}` (both required) |
 | `rewrite_modes.txt` | one `mode: instruction` line per popup option: `grammar`, `formal`, `fluent`, `friendly` (`#` starts a comment; your typed custom command is not listed) | none |
 

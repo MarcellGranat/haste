@@ -6,6 +6,7 @@ pub mod filters;
 pub mod herdr;
 pub mod notes;
 pub mod notifier;
+pub mod prompts;
 pub mod scheduler;
 pub mod state;
 

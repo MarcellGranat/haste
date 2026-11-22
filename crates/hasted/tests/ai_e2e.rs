@@ -539,3 +539,90 @@ async fn nothing_runs_while_the_helpers_are_switched_off() {
     h.tick();
     assert_eq!(h.runner.completes.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn a_chat_thread_is_never_approved_even_from_a_sender_that_is_listed() {
+    // Auto draft and TODO are for mail from `allowed_senders`. A WhatsApp or Messenger thread
+    // from the same person queues nothing (the daemon log says `not_approved` for it).
+    let h = boot().await;
+    h.allow(r"kata");
+    let store = &h.daemon.state.store;
+    let thread = store
+        .upsert_thread(
+            &Source::Whatsapp,
+            "wa-kata",
+            "Kata Biró",
+            &["Kata Biró".into()],
+            200,
+        )
+        .unwrap();
+    store
+        .upsert_message(&Message {
+            id: String::new(),
+            thread_id: thread.id.clone(),
+            source: Source::Whatsapp,
+            external_id: "wa-1".into(),
+            sender_person_id: None,
+            sender_identifier: Some("Kata Biró".into()),
+            body_text: "Szia, tudsz segiteni?".into(),
+            sent_at: 200,
+            is_own: false,
+        })
+        .unwrap();
+    assert_eq!(
+        states(&h.suggestion(&thread.id).await),
+        (AiState::None, AiState::None)
+    );
+    h.tick();
+    assert_eq!(h.runner.completes.load(Ordering::SeqCst), 0);
+    // the same name on a mail thread is approved
+    let mail = h.seed("kata@x.org", 2);
+    assert_eq!(
+        states(&h.suggestion(&mail).await),
+        (AiState::Pending, AiState::Pending)
+    );
+}
+
+#[tokio::test]
+async fn the_prompt_files_are_written_and_edits_are_used_without_a_restart() {
+    let h = boot().await;
+    h.allow(r"^kata@x\.org$");
+    let thread = h.seed("kata@x.org", 2);
+    h.suggestion(&thread).await;
+    h.tick();
+    let dir = h.daemon.state.config.data_dir.join("prompts");
+    for file in ["draft.txt", "todo.txt", "rewrite.txt", "rewrite_modes.txt"] {
+        assert!(dir.join(file).exists(), "{file}");
+    }
+    {
+        let prompts = h.runner.prompts.lock().unwrap();
+        // the defaults carry the language and accent rule
+        assert!(prompts
+            .iter()
+            .all(|(p, _)| p.system.contains("köszönöm szépen")));
+        assert!(prompts.iter().all(|(p, _)| !p.system.contains("{{")));
+    }
+
+    // an edited rewrite mode line is used by the next rewrite
+    fs::write(
+        dir.join("rewrite_modes.txt"),
+        "grammar: ONLY-FIX-COMMAS in my way.\n",
+    )
+    .unwrap();
+    let r = h
+        .call(
+            &h.human,
+            RequestBody::AiRewrite {
+                thread_id: thread.clone(),
+                draft: "koszonom szepen".into(),
+                mode: RewriteMode::Grammar,
+                instruction: None,
+            },
+        )
+        .await;
+    assert!(matches!(r, Response::AiRewritten { .. }), "{r:?}");
+    let prompts = h.runner.prompts.lock().unwrap();
+    let (p, _) = prompts.last().unwrap();
+    assert!(p.system.contains("ONLY-FIX-COMMAS in my way."));
+    assert!(p.system.contains("repair the missing accents"));
+}

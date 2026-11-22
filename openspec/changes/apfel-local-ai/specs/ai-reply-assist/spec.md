@@ -66,3 +66,28 @@ Every rewrite SHALL be started by a user key press and SHALL NOT be enqueued in 
 #### Scenario: No background rewrite
 - **WHEN** a thread is opened
 - **THEN** no rewrite call is made
+
+### Requirement: Editable prompt files
+The three prompts SHALL live in plain text files `prompts/draft.txt`, `todo.txt`, `rewrite.txt` and `rewrite_modes.txt` in the data directory. The daemon SHALL write the defaults for missing files, SHALL NOT overwrite an existing file, SHALL use an edited file on the next call, and SHALL use the built-in default (with one warning that names only the file) for a file that is empty, unreadable or lacks a required placeholder.
+
+#### Scenario: Edited mode line
+- **WHEN** the user edits the `grammar` line of `rewrite_modes.txt`
+- **THEN** the next grammar rewrite uses that line without a restart
+
+#### Scenario: Broken file
+- **WHEN** `draft.txt` is empty
+- **THEN** the built-in default is used and a warning names `draft.txt` but not its text
+
+### Requirement: Hungarian and English
+The default prompts SHALL answer in the language of the latest message (or of the draft for a rewrite) and SHALL restore missing Hungarian accents in replies, TODO text and every rewrite mode.
+
+#### Scenario: Unaccented Hungarian draft
+- **WHEN** the draft is "koszonom szepen" and the mode is grammar
+- **THEN** the prompt asks for correct Hungarian with accents
+
+### Requirement: Suggestion decisions are logged
+Every request for suggestions SHALL write one `apfel` `suggest` log line with a decision (`off`, `not_found`, `not_approved`, `answered`, `cached`, `queued`, `full`), the tool, the hashed thread id and the source name, never message or memory text.
+
+#### Scenario: Chat thread
+- **WHEN** the TUI asks for suggestions of a WhatsApp thread
+- **THEN** the log line says `not_approved` with source `whatsapp`

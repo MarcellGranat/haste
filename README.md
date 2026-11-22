@@ -883,9 +883,30 @@ text: |
 A memory applies when its channel is listed **or** a sender pattern matches; with neither it never
 applies. A bad file or pattern is skipped and logged by file name and reason.
 
+**Prompts are plain files you can edit.** The first time the helpers run, `hasted` writes the
+built-in defaults to `prompts/` in the data folder and never overwrites a file afterwards. Edit them
+freely; a changed file is read again by the next call (no restart).
+
+| File | What it is | Placeholders |
+|---|---|---|
+| `draft.txt` | the instructions for the suggested reply | `{{memories}}` (required) |
+| `todo.txt` | the instructions for the TODO guess (the answer shape itself is fixed by a schema) | `{{memories}}`, `{{today}}` (both required) |
+| `rewrite.txt` | the instructions for a rewrite | `{{memories}}`, `{{instruction}}` (both required) |
+| `rewrite_modes.txt` | one `mode: instruction` line per popup option: `grammar`, `formal`, `fluent`, `friendly` (`#` starts a comment; your typed custom command is not listed) | none |
+
+`{{memories}}` becomes the notes of the matching memories (nothing when none match), `{{today}}` the
+date as YYYY-MM-DD and `{{instruction}}` the line of the chosen mode. The messages of the thread are
+added by the daemon after the template. A file that is empty, unreadable or lacks a required
+placeholder is ignored for as long as it stays that way: the built-in default is used and one
+warning names the file (never its text). Delete a file to get the default back.
+
+The defaults handle Hungarian and English: a reply, a TODO or a rewrite follows the language of the
+message or draft, and Hungarian that arrives without accents (`koszonom szepen`) is understood and
+written back with them (`köszönöm szépen`; á é í ó ö ő ú ü ű), in every rewrite mode.
+
 **Logging guarantee.** Every call writes one `apfel` line to the operational log (tool, a 10-character
 hash of the thread id, duration, outcome, queue depth, load, free MB) and one `ai.call` audit record;
-held-back attempts are logged as `gated`. Message text, memory text, instructions, the model's
+held-back attempts are logged as `gated`, and every request for suggestions logs one `suggest` line saying why a thread got or did not get one (`off`, `not_found`, `not_approved` with the source, `answered`, `cached`, `queued`, `full`). Message text, memory text, instructions, the model's
 answer and the real thread id never reach either. `prompt` text goes only through stdin or a private
 (0600) file that is deleted after the call, never an argument. Outcomes: `ok`, `timeout`, `refused`,
 `invalid_output`, `too_long`, `gated`, `unavailable`, `busy`, `error`.

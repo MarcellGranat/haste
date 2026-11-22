@@ -27,6 +27,7 @@ use haste_core::time::now_secs;
 use haste_proto::{AiMemoryView, AiState, ErrorCode, Response};
 use serde::Deserialize;
 
+use crate::prompts::PromptStore;
 use crate::state::State;
 
 // ---------------------------------------------------------------------------------------------
@@ -511,6 +512,7 @@ pub struct Apfel {
     unavailable: AtomicBool,
     checked: AtomicBool,
     last_memory_warnings: Mutex<Vec<String>>,
+    prompts: PromptStore,
 }
 
 impl Apfel {
@@ -531,6 +533,7 @@ impl Apfel {
             unavailable: AtomicBool::new(false),
             checked: AtomicBool::new(false),
             last_memory_warnings: Mutex::new(Vec::new()),
+            prompts: PromptStore::new(data_dir),
         }
     }
 
@@ -607,6 +610,7 @@ impl Apfel {
         }
         if !self.checked.swap(true, Ordering::SeqCst) {
             let dir = self.run_dir.join(APFEL_RUN_SUBDIR);
+            self.prompts.ensure_defaults();
             let schema_ok = ensure_private_dir(&dir).is_ok()
                 && write_private(&dir.join(TODO_SCHEMA_FILE), ai::TODO_SCHEMA).is_ok();
             if !schema_ok || !self.runner().available() {
@@ -784,40 +788,23 @@ fn transcript(parts: &PromptParts, latest_title: &str) -> String {
     s
 }
 
-fn draft_prompt(parts: &PromptParts) -> Prompt {
+fn draft_prompt(parts: &PromptParts, prompts: &PromptStore) -> Prompt {
     Prompt {
-        system: format!(
-            "You write the reply of the user (\"Me\") to the latest email. Write only the body of the \
-             reply, in the language of the latest message, without a subject line, without \
-             explanations and without placeholders. Keep it short and polite.{}",
-            memory_block(&parts.memories)
-        ),
+        system: prompts.draft(&memory_block(&parts.memories)),
         user: transcript(parts, "Latest message (reply to this)"),
     }
 }
 
-fn todo_prompt(parts: &PromptParts, now: i64) -> Prompt {
+fn todo_prompt(parts: &PromptParts, now: i64, prompts: &PromptStore) -> Prompt {
     Prompt {
-        system: format!(
-            "Decide whether the latest email asks the user (\"Me\") to do something that should become a \
-             task. has_task is false for newsletters, notices, receipts and anything that needs no action. \
-             title is a short imperative phrase (at most 120 characters). notes holds the key details (at \
-             most 500 characters). due is a date as YYYY-MM-DD when the mail states or implies a deadline \
-             (today is {}), else null. priority is none, low, medium or high.{}",
-            today(now),
-            memory_block(&parts.memories)
-        ),
+        system: prompts.todo(&memory_block(&parts.memories), &today(now)),
         user: transcript(parts, "Latest message"),
     }
 }
 
-fn rewrite_prompt(parts: &PromptParts, instruction: &str) -> Prompt {
+fn rewrite_prompt(parts: &PromptParts, instruction: &str, prompts: &PromptStore) -> Prompt {
     Prompt {
-        system: format!(
-            "You edit the draft reply of the user (\"Me\"). Instruction: {instruction} Return only the \
-             edited text of the reply, nothing else: no quotes, no comments.{}",
-            memory_block(&parts.memories)
-        ),
+        system: prompts.rewrite(&memory_block(&parts.memories), instruction),
         user: transcript(parts, "Draft to edit"),
     }
 }
@@ -936,9 +923,10 @@ fn run_job(state: &State, job: &Job, sample: Sample) {
     let runner = apfel.runner();
     let settings = apfel.settings();
     let now = now_secs();
-    let build: Box<dyn Fn(&PromptParts) -> Prompt> = match job.tool {
-        Tool::Todo => Box::new(move |p| todo_prompt(p, now)),
-        _ => Box::new(draft_prompt),
+    let prompts = &apfel.prompts;
+    let build: Box<dyn Fn(&PromptParts) -> Prompt + '_> = match job.tool {
+        Tool::Todo => Box::new(move |p| todo_prompt(p, now, prompts)),
+        _ => Box::new(move |p| draft_prompt(p, prompts)),
     };
     let result = match fit(
         runner.as_ref(),
@@ -1072,6 +1060,22 @@ fn err(code: ErrorCode, msg: &str) -> Response {
 }
 
 /// `AiSuggestionGet`: what is stored for the thread, queueing the jobs that are missing.
+/// One log line per decision of [`suggestion_get`]: fixed words, the source name and the hashed
+/// thread, so the log shows why a thread got (or did not get) a suggestion.
+fn log_suggest(decision: &'static str, tool: &'static str, thread_id: &str, channel: &str) {
+    log::event(
+        log::Level::Info,
+        "apfel",
+        "suggest",
+        &[
+            log::l("decision", decision),
+            log::l("tool", tool),
+            log::id("thread", &ai::short_hash(thread_id)),
+            log::d("channel", channel),
+        ],
+    );
+}
+
 pub fn suggestion_get(state: &State, thread_id: &str) -> Response {
     let apfel = &state.apfel;
     apfel.reload_settings();
@@ -1082,12 +1086,16 @@ pub fn suggestion_get(state: &State, thread_id: &str) -> Response {
         todo: None,
     };
     if !apfel.usable() {
+        log_suggest("off", "all", thread_id, "");
         return unavailable;
     }
     let Some(ctx) = load_ctx(state, thread_id) else {
+        log_suggest("not_found", "all", thread_id, "");
         return err(ErrorCode::NotFound, "thread not found");
     };
     if !ctx.approved {
+        // approved means: mail, and the newest sender who is not the human is on allowed_senders
+        log_suggest("not_approved", "all", thread_id, &ctx.channel);
         return Response::AiSuggestion {
             draft_state: AiState::None,
             draft: None,
@@ -1100,6 +1108,7 @@ pub fn suggestion_get(state: &State, thread_id: &str) -> Response {
     let now = now_secs();
     let lookup = |tool: Tool| -> (AiState, Option<String>) {
         if answered(&ctx, tool) {
+            log_suggest("answered", tool.label(), thread_id, &ctx.channel);
             return (AiState::None, None);
         }
         let key = haste_store::AiKey {
@@ -1111,16 +1120,26 @@ pub fn suggestion_get(state: &State, thread_id: &str) -> Response {
         let stored = state.store.ai_result_get(&key).ok().flatten();
         match stored {
             Some(row) if row.outcome == AiOutcome::Ok.as_str() => {
+                log_suggest("cached", tool.label(), thread_id, &ctx.channel);
                 (AiState::Ready, Some(row.payload))
             }
             // refused: asked once for this version, not again
-            Some(_) => (AiState::None, None),
+            Some(_) => {
+                log_suggest("cached", tool.label(), thread_id, &ctx.channel);
+                (AiState::None, None)
+            }
             None => {
                 let queued = apfel
                     .queue
                     .lock()
                     .map(|mut q| q.enqueue(tool, thread_id, ctx.thread.version, now))
                     .unwrap_or(Enqueued::Full);
+                match queued {
+                    // a job already waiting is asked about again every few seconds: not logged
+                    Enqueued::Added => log_suggest("queued", tool.label(), thread_id, &ctx.channel),
+                    Enqueued::Full => log_suggest("full", tool.label(), thread_id, &ctx.channel),
+                    Enqueued::Duplicate => {}
+                }
                 if queued == Enqueued::Full {
                     // not queued: logged as a gated attempt, shown as nothing yet
                     record_gated(
@@ -1201,7 +1220,7 @@ pub fn rewrite(
     if custom.chars().count() > ai::INSTRUCTION_MAX {
         return err(ErrorCode::Validation, "the instruction is too long");
     }
-    let instruction = mode.instruction(custom);
+    let instruction = apfel.prompts.instruction(mode, custom);
     if instruction.is_empty() {
         return err(ErrorCode::Validation, "the instruction is empty");
     }
@@ -1232,7 +1251,7 @@ pub fn rewrite(
     let runner = apfel.runner();
     let settings = apfel.settings();
     let sample = apfel.sampler().sample();
-    let build = |p: &PromptParts| rewrite_prompt(p, &instruction);
+    let build = |p: &PromptParts| rewrite_prompt(p, &instruction, &apfel.prompts);
     let call = match fit(runner.as_ref(), parts, settings.prompt_token_budget, &build) {
         Ok(prompt) => runner.complete(&prompt, None, APFEL_MAX_ANSWER_TOKENS),
         Err(outcome) => CallResult {

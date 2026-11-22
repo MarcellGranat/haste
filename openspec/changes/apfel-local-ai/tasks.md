@@ -57,3 +57,9 @@
 - [ ] 7.3 Manual smoke check (needs the live daemon and a deploy; left for the owner): open an approved-sender thread, see ghost text, accept with Right, run each rewrite mode, press `t`, and confirm the operational log and audit show only numbers and hashed ids
 - [x] 7.4 Add an "AI helpers (apfel)" section to README covering setup, memories format, the settings file, and the logging guarantees
 - [ ] 7.5 (owner, after deploy) Restart `hasted` after installing the new binaries and say so in the hand-off
+
+## 8. Follow-up: trigger log, prompt files, Hungarian
+
+- [x] 8.1 Log one `apfel` `suggest` line per suggestion request (decision off, not_found, not_approved, answered, cached, queued, full; tool, hashed thread, source name) so the log shows why a thread got no suggestion; a regression test shows a chat thread is never approved
+- [x] 8.2 Move the draft, TODO and rewrite prompts and the rewrite mode lines to editable files in `prompts/` (defaults written when missing, re-read on change, broken file falls back with a file-name-only warning), with tests
+- [x] 8.3 Make the default prompts handle Hungarian and English and repair missing Hungarian accents, with tests, and document the files and placeholders in the README

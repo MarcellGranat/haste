@@ -125,15 +125,21 @@ impl RewriteMode {
         match self {
             Self::Custom => custom.trim().to_owned(),
             Self::Grammar => {
-                "Fix grammar, spelling and punctuation only. Keep the wording, tone and meaning."
+                "Fix grammar, spelling and punctuation, and restore missing Hungarian \
+                accents. Keep the wording, tone and meaning."
                     .into()
             }
-            Self::Formal => "Rewrite in a more formal, polite tone. Keep the meaning.".into(),
-            Self::Fluent => {
-                "Rewrite so that it reads more fluently and naturally. Keep the meaning and tone."
+            Self::Formal => "Rewrite in a more formal, polite tone, and restore missing Hungarian \
+                accents. Keep the meaning."
+                .into(),
+            Self::Fluent => "Rewrite so that it reads more fluently and naturally, and restore \
+                missing Hungarian accents. Keep the meaning and tone."
+                .into(),
+            Self::Friendly => {
+                "Rewrite in a warmer, friendlier tone, and restore missing Hungarian \
+                accents. Keep the meaning."
                     .into()
             }
-            Self::Friendly => "Rewrite in a warmer, friendlier tone. Keep the meaning.".into(),
         }
     }
 }

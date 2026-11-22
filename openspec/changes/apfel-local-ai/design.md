@@ -134,6 +134,11 @@ New request kinds, all denied to agent and machine principals in the policy gate
 - `t` is bound on the lists only; the reader deliberately ignores it (a test says so), so it stays that way.
 - A draft is not made when the human already wrote after the latest message from the other side (nothing to answer).
 
+## Follow-up decisions
+- **Prompts are files.** `prompts/draft.txt`, `todo.txt`, `rewrite.txt` and `rewrite_modes.txt` in the data directory; defaults are constants in `hasted/src/prompts.rs`, written when missing and never overwritten, re-read when the modification time changes. A file that is empty, unreadable or lacks a required placeholder falls back to the default with one warning naming only the file.
+- **Hungarian.** The default templates tell the model to follow the language of the message or draft and to restore missing Hungarian accents; this is part of the editable text, not hard-coded elsewhere.
+- **Auto jobs stay mail-only.** A chat thread (WhatsApp, Messenger) is never "approved", even for a listed name; the new `suggest` log line says `not_approved` with the source, so this is visible.
+
 ## Open Questions
 
 1. **Context size.** Measure `--count-tokens` on real threads to set `PROMPT_TOKEN_BUDGET` (4 and 2 messages are the requested caps).

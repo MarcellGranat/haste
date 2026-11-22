@@ -123,10 +123,11 @@ New request kinds, all denied to agent and machine principals in the policy gate
 - **Approved senders:** reuse `allowed_senders`; no separate file.
 - **Memory format:** YAML files (`memories/*.yml`) parsed with `serde_yaml_ng`; no YAML crate exists in `vendor/` or `Cargo.lock` yet, so this adds one dependency.
 
+- **Auto TODO reruns only on new mail:** the job is keyed by the thread version; a reopen with no new inbound message uses the cached result and never calls apfel again. Auto draft follows the same rule.
+- **Refusals:** apfel exit codes are 3 guardrail blocked (outcome `refused`), 4 context overflow (`too_long`), 5 model unavailable (`unavailable`), 6 rate limited or busy (`busy`, retried later), 1 runtime error (`error`). A refusal is cached for that thread version so it is not retried.
+- **Settings:** `apfel.json` in the data directory (same style as `gmail_tabs.json`).
+
 ## Open Questions
 
-1. **Context size.** The on-device model's window is small. Measure `--count-tokens` on real threads to set `PROMPT_TOKEN_BUDGET` and the message counts (4 and 2 are the requested caps).
-2. **Calibration.** Core count and typical load on this Mac, and the free-memory level at which swapping starts, are needed to set `BACKGROUND_MAX_LOAD_PER_CORE` and `BACKGROUND_MIN_FREE_MB`.
-3. **TODO on new mail only.** Should the auto TODO run when a thread is opened only if there is a new inbound message since the last suggestion, or every open (cache makes it cheap)?
-4. **Refusal exit code.** Confirm apfel's exit code for guardrail refusals and for `--schema` failures; the outcome mapping in D13 depends on it.
-5. **Settings file.** `apfel.json` (proposed, matches `gmail_tabs.json` style) or constants only?
+1. **Context size.** Measure `--count-tokens` on real threads to set `PROMPT_TOKEN_BUDGET` (4 and 2 messages are the requested caps).
+2. **Calibration.** Core count and typical load on this Mac set `BACKGROUND_MAX_LOAD_PER_CORE` and `BACKGROUND_MIN_FREE_MB`.

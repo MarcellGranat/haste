@@ -38,6 +38,11 @@ pub struct Compose {
     pub picker: Option<FilePicker>,
     /// The list of all keys is open (`Ctrl-h` in a reply).
     pub help: bool,
+    /// A reply the local model suggests, shown dimmed after the text. Right (at the end of the
+    /// text) or Tab takes it; typing a character drops it. It is never sent by itself.
+    pub suggestion: Option<String>,
+    /// The reply as it was before a rewrite was accepted (`Ctrl-z` puts it back).
+    pub before_rewrite: Option<String>,
 }
 
 /// What a key did to the form.
@@ -55,6 +60,8 @@ pub enum ComposeOutcome {
     External,
     /// `Ctrl-F`: the caller lists files and opens the picker.
     Attach,
+    /// `Ctrl-R` in a reply: the caller opens the rewrite popup.
+    Rewrite,
 }
 
 impl Compose {
@@ -73,6 +80,8 @@ impl Compose {
             attachments: Vec::new(),
             picker: None,
             help: false,
+            suggestion: None,
+            before_rewrite: None,
         }
     }
 
@@ -91,6 +100,8 @@ impl Compose {
             attachments: Vec::new(),
             picker: None,
             help: false,
+            suggestion: None,
+            before_rewrite: None,
         }
     }
 
@@ -123,6 +134,8 @@ impl Compose {
             attachments: Vec::new(),
             picker: None,
             help: false,
+            suggestion: None,
+            before_rewrite: None,
         }
     }
 
@@ -137,6 +150,7 @@ impl Compose {
     /// Replace the focused field's text (after `$EDITOR`).
     pub fn set_focused_text(&mut self, text: &str) {
         let multiline = self.fields[self.focus].area.lines().len() > 1
+            || matches!(self.kind, ComposeKind::Reply { .. })
             || self.fields[self.focus].label.starts_with("Note")
             || self.fields[self.focus].label.starts_with("Add");
         let text = text.trim_end_matches('\n');
@@ -176,8 +190,61 @@ impl Compose {
             }
             // Ctrl-s keeps it as a draft without leaving
             Key::Ctrl('s') => Some(ComposeOutcome::Save),
+            // the local model rewrites the reply (a popup chooses how)
+            Key::Ctrl('r') => Some(ComposeOutcome::Rewrite),
+            // the rewrite taken by mistake is put back
+            Key::Ctrl('z') => {
+                if let Some(before) = self.before_rewrite.take() {
+                    self.set_focused_text(&before);
+                }
+                Some(ComposeOutcome::Continue)
+            }
+            // the suggested reply goes in; Right does it only at the end of the text, so it
+            // still moves the cursor elsewhere
+            Key::Tab if self.suggestion.is_some() => {
+                self.accept_suggestion();
+                Some(ComposeOutcome::Continue)
+            }
+            Key::Right if self.suggestion.is_some() && self.cursor_at_end() => {
+                self.accept_suggestion();
+                Some(ComposeOutcome::Continue)
+            }
+            // typing a character means the suggestion is not wanted; the character still goes in
+            Key::Char(c) if !c.is_control() => {
+                self.suggestion = None;
+                None
+            }
             _ => None,
         }
+    }
+
+    /// Whether the cursor is after the last character of the focused text.
+    #[must_use]
+    pub fn cursor_at_end(&self) -> bool {
+        let area = &self.fields[self.focus].area;
+        let lines = area.lines();
+        area.row + 1 == lines.len() && area.col >= lines[area.row].chars().count()
+    }
+
+    /// Put the suggested reply into the text (on a new line when there is text already).
+    pub fn accept_suggestion(&mut self) {
+        let Some(suggestion) = self.suggestion.take() else {
+            return;
+        };
+        let body = self.fields[self.focus].area.text();
+        let text = if body.trim().is_empty() {
+            suggestion
+        } else {
+            format!("{}\n{suggestion}", body.trim_end())
+        };
+        self.set_focused_text(&text);
+    }
+
+    /// Replace the reply with a rewrite, keeping the old text for `Ctrl-z`.
+    pub fn apply_rewrite(&mut self, text: &str) {
+        self.before_rewrite = Some(self.fields[self.focus].area.text());
+        self.suggestion = None;
+        self.set_focused_text(text);
     }
 
     pub fn handle(&mut self, key: Key) -> ComposeOutcome {
@@ -482,6 +549,97 @@ mod tests {
         assert!(c.picker.is_none());
         c.handle(Key::Ctrl('x'));
         assert!(c.attachments.is_empty());
+    }
+
+    fn reply_with(text: &str, suggestion: Option<&str>) -> Compose {
+        let mut c = Compose::reply("t1", "subject");
+        if !text.is_empty() {
+            c.set_focused_text(text);
+        }
+        c.suggestion = suggestion.map(str::to_owned);
+        c
+    }
+
+    #[test]
+    fn right_at_the_end_and_tab_take_the_suggestion() {
+        let mut c = reply_with("", Some("Dear Kata, thanks."));
+        assert_eq!(c.handle(Key::Right), ComposeOutcome::Continue);
+        assert_eq!(c.focused_text(), "Dear Kata, thanks.");
+        assert!(c.suggestion.is_none());
+
+        let mut c = reply_with("", Some("Dear Kata, thanks."));
+        c.handle(Key::Tab);
+        assert_eq!(c.focused_text(), "Dear Kata, thanks.");
+        assert_eq!(c.focus, 0);
+    }
+
+    #[test]
+    fn a_suggestion_goes_on_a_new_line_after_existing_text() {
+        let mut c = reply_with("Hi Kata", Some("Thanks."));
+        c.handle(Key::Tab);
+        assert_eq!(c.focused_text(), "Hi Kata\nThanks.");
+    }
+
+    #[test]
+    fn right_in_the_middle_of_the_text_only_moves_the_cursor() {
+        let mut c = reply_with("Hi Kata", Some("Thanks."));
+        c.handle(Key::Left);
+        c.handle(Key::Left);
+        assert_eq!(c.handle(Key::Right), ComposeOutcome::Continue);
+        assert_eq!(c.focused_text(), "Hi Kata");
+        assert!(c.suggestion.is_some());
+    }
+
+    #[test]
+    fn typing_a_character_drops_the_suggestion_and_goes_in() {
+        let mut c = reply_with("", Some("Thanks."));
+        c.handle(Key::Char('H'));
+        assert!(c.suggestion.is_none());
+        assert_eq!(c.focused_text(), "H");
+        // and Tab does not take anything then
+        let focus = c.focus;
+        c.handle(Key::Tab);
+        assert_eq!(c.focused_text(), "H");
+        assert_eq!(c.focus, focus, "a reply has one field, so focus stays");
+    }
+
+    #[test]
+    fn tab_moves_focus_again_when_there_is_no_suggestion() {
+        let mut c = Compose::todo(None, "", "");
+        c.handle(Key::Tab);
+        assert_eq!(c.focus, 1);
+    }
+
+    #[test]
+    fn a_suggestion_is_only_for_a_reply() {
+        let mut c = Compose::note("t1", "s");
+        c.suggestion = Some("x".into());
+        c.handle(Key::Tab);
+        assert_eq!(c.focused_text(), "", "notes do not take suggestions");
+    }
+
+    #[test]
+    fn a_rewrite_replaces_the_reply_and_ctrl_z_puts_the_old_text_back() {
+        let mut c = reply_with("hey, send me teh form", Some("old suggestion"));
+        c.apply_rewrite("Hello, please send me the form.");
+        assert_eq!(c.focused_text(), "Hello, please send me the form.");
+        assert!(c.suggestion.is_none());
+        c.handle(Key::Ctrl('z'));
+        assert_eq!(c.focused_text(), "hey, send me teh form");
+        // one level only
+        c.handle(Key::Ctrl('z'));
+        assert_eq!(c.focused_text(), "hey, send me teh form");
+        // a new line still works after the text was replaced
+        c.handle(Key::Ctrl('j'));
+        assert_eq!(c.focused_text(), "hey, send me teh form\n");
+    }
+
+    #[test]
+    fn ctrl_r_asks_for_the_rewrite_popup_in_a_reply_only() {
+        let mut c = Compose::reply("t1", "s");
+        assert_eq!(c.handle(Key::Ctrl('r')), ComposeOutcome::Rewrite);
+        let mut n = Compose::note("t1", "s");
+        assert_eq!(n.handle(Key::Ctrl('r')), ComposeOutcome::Continue);
     }
 
     #[test]

@@ -85,7 +85,7 @@ New request kinds, all denied to agent and machine principals in the policy gate
 
 ### D11. TUI behaviour
 - Reply form: a `suggestion: Option<String>` field on the compose state, rendered dim after the cursor. `Right` at the end of the body, or `Tab` at any cursor position, inserts it (appends a newline first if the body is non-empty). While a suggestion is shown, `Tab` is taken by this and does not move focus in `haste-tui/src/compose.rs` (`Key::Tab`, line ~218); with no suggestion shown it keeps moving focus. Any typed character dismisses it. Opening the form polls `AiSuggestionGet` once; the suggestion appears when ready.
-- Rewrite: `Ctrl-r` in the reply form (`Ctrl-g` is the external editor; `Ctrl-h/j/s/l/f/x/a/e` are taken; `Ctrl-r` is only bound in the list view, where it refreshes) opens a popup with the five modes; a custom mode takes a one-line instruction. The result replaces the body on confirm; `u` restores the previous body (one level of undo).
+- Rewrite: `Ctrl-r` in the reply form (`Ctrl-g` is the external editor; `Ctrl-h/j/s/l/f/x/a/e` are taken; `Ctrl-r` is only bound in the list view, where it refreshes) opens a popup with the five modes; a custom mode takes a one-line instruction. The result is previewed and `Enter` replaces the body; `Ctrl-z` in the reply restores the previous body (one level of undo; `u` would type a letter into the text, so it cannot be the key).
 - TODO: `t` on a thread calls `AiSuggestionGet`; if `has_task` is true the existing TODO popup opens prefilled; if false it opens empty with a dim note "no task suggested". Saving uses the existing `SaveTodo` path (human action, no proposal).
 
 ### D12. Logging and audit
@@ -126,6 +126,13 @@ New request kinds, all denied to agent and machine principals in the policy gate
 - **Auto TODO reruns only on new mail:** the job is keyed by the thread version; a reopen with no new inbound message uses the cached result and never calls apfel again. Auto draft follows the same rule.
 - **Refusals:** apfel exit codes are 3 guardrail blocked (outcome `refused`), 4 context overflow (`too_long`), 5 model unavailable (`unavailable`), 6 rate limited or busy (`busy`, retried later), 1 runtime error (`error`). A refusal is cached for that thread version so it is not retried.
 - **Settings:** `apfel.json` in the data directory (same style as `gmail_tabs.json`).
+
+## Measured (2026-11-22)
+- This Mac: 12 cores, 32 GB. Load average about 5 to 6 while working (0.43 to 0.51 per core), 67% memory free. The initial `APFEL_MAX_LOAD_PER_CORE` of 0.5 is kept; it will hold jobs back about half the time, and `apfel.json` can raise it.
+- apfel's window is 4096 tokens (`--count-tokens` reports a limit of 3584 for the prompt). Latest plus 4 earlier messages of 25 real mail threads: 134 to 3557 tokens, median 1402, p90 2104. `APFEL_PROMPT_TOKEN_BUDGET` stays 2500.
+- `apfel --count-tokens` takes the text on stdin only (not `--messages`) and `-o json` with it hangs, so the daemon counts the system and user text joined, with a 15 s kill.
+- `t` is bound on the lists only; the reader deliberately ignores it (a test says so), so it stays that way.
+- A draft is not made when the human already wrote after the latest message from the other side (nothing to answer).
 
 ## Open Questions
 

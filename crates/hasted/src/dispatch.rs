@@ -88,6 +88,9 @@ fn action_for(body: &RequestBody) -> Action {
         | RequestBody::TagRemove { .. }
         | RequestBody::TagList
         | RequestBody::ThreadRefresh { .. }
+        | RequestBody::AiSuggestionGet { .. }
+        | RequestBody::AiRewrite { .. }
+        | RequestBody::AiMemoriesList { .. }
         | RequestBody::ReminderNew { .. }
         | RequestBody::ReminderEdit { .. }
         | RequestBody::ReminderTagAdd { .. }
@@ -128,6 +131,9 @@ fn request_name(body: &RequestBody) -> &'static str {
         RequestBody::TagRemove { .. } => "tag_remove",
         RequestBody::TagList => "tag_list",
         RequestBody::ThreadRefresh { .. } => "thread_refresh",
+        RequestBody::AiSuggestionGet { .. } => "ai_suggestion_get",
+        RequestBody::AiRewrite { .. } => "ai_rewrite",
+        RequestBody::AiMemoriesList { .. } => "ai_memories_list",
         RequestBody::ThreadSearch { .. } => "thread_search",
         RequestBody::ReminderNew { .. } => "reminder_new",
         RequestBody::ReminderEdit { .. } => "reminder_edit",
@@ -417,6 +423,16 @@ fn execute(state: &State, principal: &Principal, body: RequestBody, queue_notes:
             Ok(None) => err(ErrorCode::NotFound, "thread not found"),
             Err(e) => map_store(&e),
         },
+        RequestBody::AiSuggestionGet { thread_id } => {
+            crate::apfel::suggestion_get(state, &thread_id)
+        }
+        RequestBody::AiRewrite {
+            thread_id,
+            draft,
+            mode,
+            instruction,
+        } => crate::apfel::rewrite(state, &thread_id, &draft, mode, instruction.as_deref()),
+        RequestBody::AiMemoriesList { thread_id } => crate::apfel::memories_list(state, &thread_id),
         RequestBody::ThreadRefresh { thread_id, older } => match state.store.get_thread(&thread_id)
         {
             Ok(Some((thread, _))) => {

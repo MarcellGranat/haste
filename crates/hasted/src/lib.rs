@@ -1,5 +1,6 @@
 //! The haste daemon: owns the store, policy gate, audit log and connector access.
 
+pub mod apfel;
 pub mod dispatch;
 pub mod filters;
 pub mod herdr;
@@ -106,6 +107,7 @@ pub async fn start(config: DaemonConfig) -> io::Result<DaemonHandle> {
         tokio::spawn(scheduler::expiry_loop(Arc::clone(&state))),
         tokio::spawn(scheduler::delivery_loop(Arc::clone(&state))),
         tokio::spawn(scheduler::scheduled_send_loop(Arc::clone(&state))),
+        tokio::spawn(apfel::tick_loop(Arc::clone(&state))),
     ];
     if let Some(cfg) = state.config.herdr.clone() {
         tasks.extend(herdr::start(&state, &cfg));

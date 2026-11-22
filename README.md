@@ -727,7 +727,7 @@ On a thread (Today, or inside a channel), only you can use these keys:
 text), `Ctrl-j` or `Alt-Enter` starts a new line, `Ctrl-a` / `Ctrl-e` go to the start and end of the
 line, `Ctrl-o` opens the emoji keyboard (34 emojis on the digits and letters; the layout is in
 `crates/haste-tui/src/emoji.rs`), `Ctrl-g` writes it in `$EDITOR`, `Ctrl-l` sends later, `Ctrl-f` attaches a
-file, `Ctrl-x` removes the last file, `Ctrl-s` keeps a draft, `Ctrl-h` lists all of these, and `Esc`
+file, `Ctrl-x` removes the last file, `Ctrl-s` keeps a draft, `Ctrl-r` rewrites it with the local model, `Ctrl-h` lists all of these, and `Esc`
 asks whether to keep a draft. After the `y` the send waits 3 s (chat) or 10 s (mail); `U` takes it back
 and opens the reply with the text again. A draft kept for a thread is there when you reopen it.
 
@@ -836,6 +836,69 @@ attaching files to a reply, saving or previewing attachments, and the Logs tab. 
 (reading, replying, archiving, search, calendar, reminders, the status line) goes through the socket.
 Closing the tunnel or the hub being asleep shows up as "cannot reach the daemon". A native network
 mode with a token per device is the next step if this is used a lot.
+
+## AI helpers (apfel, on this Mac only)
+
+`hasted` can use [`apfel`](https://github.com/Arthur-Ficial/apfel) (Apple's on-device model, no
+network) for three helpers. They are **off** until `apfel.json` in the data folder says so, and they
+need `apfel` installed (`brew install apfel`) with Apple Intelligence on. Only `hasted` runs `apfel`
+(one process per call, one call at a time, killed after 60 s); the TUI asks the daemon, so it also
+works from another machine over the tunnel.
+
+```json
+{ "enabled": true }
+```
+
+Optional keys: `path` (default `/opt/homebrew/bin/apfel`), `max_load_per_core` (0.5),
+`min_free_mb` (4096), `prompt_token_budget` (2500). `hasted` re-reads the file when it changes (no
+restart); a changed install of the binary needs `hasted` restarted as usual.
+
+| Helper | What it does |
+|---|---|
+| **Draft** | Opening a mail thread from an approved sender (`allowed_senders`; mail only) queues a suggested reply. In the reply box it is dimmed text: `Tab`, or `Right` at the end, puts it in; typing drops it. It is never sent by itself. Not made when you already answered the last message. |
+| **Rewrite** | `Ctrl-r` in the reply box: custom command, check grammar, more formal, more fluent, more friendly. You see the result and `Enter` takes it (`Ctrl-z` puts your text back; `Esc` leaves it). Runs whenever you ask, whatever the load. |
+| **TODO** | The same approved-sender threads get a structured guess (task or not, title, notes, due date, priority). `t` on a thread opens the usual TODO popup filled with it, every field editable; nothing is created until you save it. |
+
+The draft and the TODO are background jobs: they run only when the machine has room (one-minute
+load per core below `max_load_per_core`, at least `min_free_mb` free, memory pressure not critical,
+no rewrite waiting; an unreadable value counts as busy). A job that is held back waits 5 minutes and
+is dropped after a day. Results are cached by thread version and memory set: opening the thread
+again with no new mail never calls the model again, and a refusal is not asked twice. Calls get at
+most the latest message plus 4 earlier ones (rewrite: 2), trimmed oldest first to
+`prompt_token_budget` tokens (the model's window is 4096).
+
+**Memories** steer the model per channel or per sender. One YAML file per memory in `memories/` in
+the data folder (at most 50 files of 4 KB; up to 3 matching memories and 1 KB of text per call):
+
+```yaml
+id: kata-biro-tone
+title: Kata Biro is a client, keep it formal
+enabled: true
+channels: [gmail]            # the thread's source: gmail, icloud, whatsapp, ...
+senders: ['kata\s+biro']     # regular expressions, case-insensitive, as in allowed_senders
+text: |
+  Always address her as "Kata". Mention the invoice number if one appears.
+```
+
+A memory applies when its channel is listed **or** a sender pattern matches; with neither it never
+applies. A bad file or pattern is skipped and logged by file name and reason.
+
+**Logging guarantee.** Every call writes one `apfel` line to the operational log (tool, a 10-character
+hash of the thread id, duration, outcome, queue depth, load, free MB) and one `ai.call` audit record;
+held-back attempts are logged as `gated`. Message text, memory text, instructions, the model's
+answer and the real thread id never reach either. `prompt` text goes only through stdin or a private
+(0600) file that is deleted after the call, never an argument. Outcomes: `ok`, `timeout`, `refused`,
+`invalid_output`, `too_long`, `gated`, `unavailable`, `busy`, `error`.
+
+```
+haste logs --component apfel          # every call, with duration and outcome
+```
+
+**Calibration on this Mac** (12 cores, 32 GB; measured 2026-11-22): load average about 5 to 6, so
+0.43 to 0.51 per core while working (the default threshold 0.5 will hold jobs back about half the
+time; raise `max_load_per_core` if that is too strict); 67% memory free (about 21 GB); a prompt of
+the latest message and 4 earlier ones from 25 real threads came to 134 to 3557 tokens, median 1402,
+90th percentile 2104, so the 2500-token budget leaves room for the answer.
 
 ## Logging and diagnosing problems
 

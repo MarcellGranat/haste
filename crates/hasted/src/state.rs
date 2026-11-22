@@ -103,6 +103,8 @@ pub struct State {
     /// Threads whose earlier history was asked for (once each per run), and the ones waiting.
     history: Mutex<HistoryQueue>,
     history_wakers: Mutex<HashMap<Source, Arc<Notify>>>,
+    /// The local AI helpers (apfel): jobs, settings, the model runner.
+    pub apfel: crate::apfel::Apfel,
 }
 
 #[derive(Default)]
@@ -140,6 +142,7 @@ pub const HISTORY_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_
 impl State {
     pub(crate) fn new(store: Store, audit: AuditWriter, config: DaemonConfig) -> Self {
         let (events, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let apfel = crate::apfel::Apfel::new(&config.data_dir, &config.run_dir);
         Self {
             store,
             config,
@@ -155,6 +158,7 @@ impl State {
             synced: Mutex::new(HashMap::new()),
             history: Mutex::new(HistoryQueue::default()),
             history_wakers: Mutex::new(HashMap::new()),
+            apfel,
         }
     }
 

@@ -36,6 +36,16 @@ pub enum Key {
     CtrlEnter,
 }
 
+/// What the local model suggested for one thread.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AiSuggest {
+    pub thread_id: String,
+    pub draft_state: haste_proto::AiState,
+    pub draft: Option<String>,
+    pub todo_state: haste_proto::AiState,
+    pub todo: Option<haste_core::ai::TodoSuggestion>,
+}
+
 /// What happens to a reply once it is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AfterSave {
@@ -471,6 +481,18 @@ pub enum Effect {
         source: String,
     },
     Refresh,
+    /// `Ctrl-R` popup choice: ask the daemon to rewrite the reply with the local model; the
+    /// loop answers with [`App::finish_rewrite`].
+    AiRewrite {
+        thread_id: String,
+        draft: String,
+        mode: haste_core::ai::RewriteMode,
+        instruction: Option<String>,
+    },
+    /// `t` on a thread: fetch the stored TODO suggestion, then call [`App::show_todo_form`].
+    TodoSuggest {
+        thread_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -538,6 +560,8 @@ pub enum Mode {
     Read,
     /// A note or TODO form (see [`App::compose`]).
     Compose,
+    /// The rewrite popup over a reply (see [`App::rewrite`]).
+    Rewrite,
     /// Choosing a label (see [`App::labeler`]).
     Label,
     /// The attachments of one message: preview, download, download all (see [`App::attach`]).
@@ -610,6 +634,13 @@ pub struct App {
     pub reader: Option<Reader>,
     /// The open note or TODO form.
     pub compose: Option<Box<Compose>>,
+    /// The rewrite popup, while `Mode::Rewrite`.
+    pub rewrite: Option<Box<crate::rewrite::RewriteForm>>,
+    /// What the local model suggested for the thread last opened (draft reply, TODO).
+    pub ai: Option<AiSuggest>,
+    /// The daemon runs the AI helpers (the loop sets it; tests leave it off, so `t` opens the
+    /// reminder popup at once).
+    pub ai_prefill: bool,
     /// The reminder popup, while `Mode::RemindForm`.
     pub remind: Option<Box<crate::remind::RemindForm>>,
     /// The event popup, while `Mode::EventEdit`.
@@ -801,6 +832,9 @@ impl App {
             today_selected: 0,
             reader: None,
             compose: None,
+            rewrite: None,
+            ai: None,
+            ai_prefill: false,
             remind: None,
             event_form: None,
             new_event: None,
@@ -1521,6 +1555,7 @@ impl App {
             Mode::Filter => self.key_filter(key),
             Mode::Read => self.key_read(key),
             Mode::Compose => self.key_compose(key),
+            Mode::Rewrite => self.key_rewrite(key),
             Mode::Label => self.key_label(key),
             Mode::React { message_id } => self.key_react(key, &message_id),
             Mode::Attachments => self.key_attachments(key),
@@ -1811,7 +1846,7 @@ impl App {
             Key::Ctrl('r') => return Some(Effect::Refresh),
             Key::Char('s') if thread_view => self.start_snooze(),
             Key::Char('s') if self.on_todos() => self.start_todo_snooze(),
-            Key::Char('t') if thread_view => self.start_remind(),
+            Key::Char('t') if thread_view => return self.start_remind_ai(),
             Key::Char('r') if thread_view => return self.start_reply(),
             Key::Char('0') => self.jump(false),
             Key::Char('u') if self.view == View::Channels && !self.channel_inner => {
@@ -2677,6 +2712,16 @@ impl App {
             ComposeOutcome::External => Some(Effect::ExternalEdit {
                 text: c.focused_text(),
             }),
+            ComposeOutcome::Rewrite => {
+                if let ComposeKind::Reply { thread_id } = &c.kind {
+                    self.rewrite = Some(Box::new(crate::rewrite::RewriteForm::new(
+                        thread_id,
+                        &c.focused_text(),
+                    )));
+                    self.mode = Mode::Rewrite;
+                }
+                None
+            }
             ComposeOutcome::Save => self.finish_compose(AfterSave::Draft),
             ComposeOutcome::Send if matches!(c.kind, ComposeKind::Reply { .. }) => {
                 // a reply asks first: y sends, anything else goes back to the text
@@ -2861,6 +2906,7 @@ impl App {
             }
         }
         self.compose = Some(Box::new(compose));
+        self.apply_ghost();
         // the thread stays above the editor, on its newest message
         if let Some(r) = self
             .reader
@@ -3155,8 +3201,38 @@ impl App {
 
     /// `t`: the reminder popup for the thread under the cursor. The suggested title is its
     /// subject (or its sender when it has none); its project labels come along.
-    fn start_remind(&mut self) {
-        let Some(t) = self.selected_thread() else {
+    /// `t` on a list: with the AI helpers on, the stored TODO suggestion is fetched first.
+    fn start_remind_ai(&mut self) -> Option<Effect> {
+        let Some(id) = self.selected_thread().map(|t| t.thread.id.clone()) else {
+            self.status = "put the cursor on a thread first".into();
+            return None;
+        };
+        self.start_remind_for_ai(&id)
+    }
+
+    fn start_remind_for_ai(&mut self, thread_id: &str) -> Option<Effect> {
+        if self.ai_prefill {
+            return Some(Effect::TodoSuggest {
+                thread_id: thread_id.to_owned(),
+            });
+        }
+        self.open_remind_form(thread_id);
+        None
+    }
+
+    /// The reminder popup for a thread (from the list or the open reader).
+    fn open_remind_form(&mut self, thread_id: &str) {
+        let Some(t) = self
+            .threads
+            .iter()
+            .find(|t| t.thread.id == thread_id)
+            .or_else(|| {
+                self.reader
+                    .as_ref()
+                    .map(|r| &r.view)
+                    .filter(|v| v.thread.id == thread_id)
+            })
+        else {
             self.status = "put the cursor on a thread first".into();
             return;
         };
@@ -3179,6 +3255,110 @@ impl App {
             self.tz_offset,
         )));
         self.mode = Mode::RemindForm;
+    }
+
+    /// The answer to [`Effect::TodoSuggest`]: the reminder popup, filled with the model's task
+    /// when it found one (every field stays editable), else as it always was with a note.
+    pub fn show_todo_form(
+        &mut self,
+        thread_id: &str,
+        state: haste_proto::AiState,
+        todo: Option<&haste_core::ai::TodoSuggestion>,
+    ) {
+        self.open_remind_form(thread_id);
+        if self.mode != Mode::RemindForm {
+            return;
+        }
+        let Some(form) = self.remind.as_mut() else {
+            return;
+        };
+        match (state, todo) {
+            (haste_proto::AiState::Ready, Some(todo)) if todo.has_task => form.prefill(todo),
+            (haste_proto::AiState::Ready | haste_proto::AiState::None, _) => {
+                form.ai_note = Some("no task suggested");
+            }
+            (haste_proto::AiState::Pending, _) => form.ai_note = Some("no suggestion yet"),
+            (haste_proto::AiState::Unavailable, _) => {}
+        }
+    }
+
+    /// Keys of the rewrite popup.
+    fn key_rewrite(&mut self, key: Key) -> Option<Effect> {
+        use crate::rewrite::RewriteOutcome;
+        let form = self.rewrite.as_mut()?;
+        match form.handle(key) {
+            RewriteOutcome::Open => None,
+            RewriteOutcome::Close => {
+                self.rewrite = None;
+                self.mode = Mode::Compose;
+                None
+            }
+            RewriteOutcome::Start { mode, instruction } => Some(Effect::AiRewrite {
+                thread_id: form.thread_id.clone(),
+                draft: form.draft.clone(),
+                mode,
+                instruction,
+            }),
+            RewriteOutcome::Accept(text) => {
+                self.rewrite = None;
+                self.mode = Mode::Compose;
+                if let Some(c) = self.compose.as_mut() {
+                    c.apply_rewrite(&text);
+                    self.status = "rewritten · Ctrl-Z puts your own text back".into();
+                }
+                None
+            }
+        }
+    }
+
+    /// The answer to [`Effect::AiRewrite`]; dropped when the popup was closed meanwhile.
+    pub fn finish_rewrite(
+        &mut self,
+        answer: Result<(haste_core::ai::AiOutcome, Option<String>), String>,
+    ) {
+        if let Some(form) = self.rewrite.as_mut() {
+            form.finish(answer);
+        }
+    }
+
+    /// The suggestions for a thread arrived (when it was opened, or while its reply box is
+    /// open): a ready draft shows as ghost text in an empty reply.
+    pub fn set_ai(&mut self, suggestion: AiSuggest) {
+        self.ai = Some(suggestion);
+        self.apply_ghost();
+    }
+
+    fn apply_ghost(&mut self) {
+        let (Some(ai), Some(c)) = (&self.ai, self.compose.as_mut()) else {
+            return;
+        };
+        let ComposeKind::Reply { thread_id } = &c.kind else {
+            return;
+        };
+        if *thread_id == ai.thread_id
+            && c.suggestion.is_none()
+            && c.before_rewrite.is_none()
+            && c.focused_text().trim().is_empty()
+            && ai.draft_state == haste_proto::AiState::Ready
+        {
+            c.suggestion = ai.draft.clone();
+        }
+    }
+
+    /// Is the open reply box waiting for a draft the model is still working on?
+    #[must_use]
+    pub fn wants_ai_poll(&self) -> Option<String> {
+        let c = self.compose.as_ref()?;
+        let ComposeKind::Reply { thread_id } = &c.kind else {
+            return None;
+        };
+        let ai = self.ai.as_ref()?;
+        (self.mode == Mode::Compose
+            && ai.thread_id == *thread_id
+            && ai.draft_state == haste_proto::AiState::Pending
+            && c.suggestion.is_none()
+            && c.focused_text().trim().is_empty())
+        .then(|| thread_id.clone())
     }
 
     /// `c` on a TODO pane: the reminder popup with no thread and no suggested title.
@@ -6289,5 +6469,199 @@ mod tests {
         app.handle_key(Key::Tab);
         assert!(!app.channel_inner);
         assert!(app.status.contains("no threads"), "{}", app.status);
+    }
+    fn ai_for(
+        thread_id: &str,
+        draft_state: haste_proto::AiState,
+        draft: Option<&str>,
+    ) -> AiSuggest {
+        AiSuggest {
+            thread_id: thread_id.into(),
+            draft_state,
+            draft: draft.map(str::to_owned),
+            todo_state: haste_proto::AiState::Ready,
+            todo: Some(haste_core::ai::TodoSuggestion {
+                has_task: true,
+                title: "Send the signed form".into(),
+                notes: "Kata needs it by Friday".into(),
+                due: Some("2026-11-27".into()),
+                priority: haste_core::ai::TodoPriority::High,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_ready_draft_is_ghost_text_in_an_empty_reply_and_tab_takes_it() {
+        use haste_proto::AiState;
+        let mut app = inbox_app();
+        app.set_ai(ai_for("t1", AiState::Ready, Some("Dear Kata, thanks.")));
+        app.open_reply_form("t1");
+        let c = app.compose.as_ref().unwrap();
+        assert_eq!(c.suggestion.as_deref(), Some("Dear Kata, thanks."));
+        assert_eq!(c.focused_text(), "", "ghost text is not part of the reply");
+        assert!(app.handle_key(Key::Tab).is_none());
+        assert_eq!(
+            app.compose.as_ref().unwrap().focused_text(),
+            "Dear Kata, thanks."
+        );
+        // never sent by taking it
+        assert_eq!(app.mode, Mode::Compose);
+    }
+
+    #[test]
+    fn a_draft_for_another_thread_or_not_ready_shows_nothing() {
+        use haste_proto::AiState;
+        let mut app = inbox_app();
+        app.set_ai(ai_for("t2", AiState::Ready, Some("other")));
+        app.open_reply_form("t1");
+        assert!(app.compose.as_ref().unwrap().suggestion.is_none());
+        app.set_ai(ai_for("t1", AiState::Pending, None));
+        app.open_reply_form("t1");
+        assert!(app.compose.as_ref().unwrap().suggestion.is_none());
+        // the reply box is waiting for it: the loop asks again
+        assert_eq!(app.wants_ai_poll().as_deref(), Some("t1"));
+        // it arrives while the box is open
+        app.set_ai(ai_for("t1", AiState::Ready, Some("Hello")));
+        assert_eq!(
+            app.compose.as_ref().unwrap().suggestion.as_deref(),
+            Some("Hello")
+        );
+        assert!(app.wants_ai_poll().is_none());
+    }
+
+    #[test]
+    fn typing_in_the_reply_drops_the_ghost_text() {
+        use haste_proto::AiState;
+        let mut app = inbox_app();
+        app.set_ai(ai_for("t1", AiState::Ready, Some("Dear Kata, thanks.")));
+        app.open_reply_form("t1");
+        press(&mut app, "H");
+        let c = app.compose.as_ref().unwrap();
+        assert!(c.suggestion.is_none());
+        assert_eq!(c.focused_text(), "H");
+    }
+
+    #[test]
+    fn ctrl_r_opens_the_rewrite_popup_and_a_choice_asks_the_daemon() {
+        let mut app = inbox_app();
+        app.open_reply_form("t1");
+        press(&mut app, "hey send teh form");
+        assert!(app.handle_key(Key::Ctrl('r')).is_none());
+        assert_eq!(app.mode, Mode::Rewrite);
+        let Some(Effect::AiRewrite {
+            thread_id,
+            draft,
+            mode,
+            instruction,
+        }) = app.handle_key(Key::Char('2'))
+        else {
+            panic!("expected a rewrite request");
+        };
+        assert_eq!(
+            (thread_id.as_str(), draft.as_str(), mode, instruction),
+            (
+                "t1",
+                "hey send teh form",
+                haste_core::ai::RewriteMode::Grammar,
+                None
+            )
+        );
+        // the answer is previewed; Enter takes it into the reply, Ctrl-Z brings the old text back
+        app.finish_rewrite(Ok((
+            haste_core::ai::AiOutcome::Ok,
+            Some("Hey, please send the form.".into()),
+        )));
+        assert_eq!(app.mode, Mode::Rewrite);
+        assert!(app.handle_key(Key::Enter).is_none());
+        assert_eq!(app.mode, Mode::Compose);
+        assert_eq!(
+            app.compose.as_ref().unwrap().focused_text(),
+            "Hey, please send the form."
+        );
+        app.handle_key(Key::Ctrl('z'));
+        assert_eq!(
+            app.compose.as_ref().unwrap().focused_text(),
+            "hey send teh form"
+        );
+    }
+
+    #[test]
+    fn a_closed_rewrite_popup_drops_a_late_answer_and_leaves_the_reply_alone() {
+        let mut app = inbox_app();
+        app.open_reply_form("t1");
+        press(&mut app, "hello");
+        app.handle_key(Key::Ctrl('r'));
+        app.handle_key(Key::Char('3'));
+        app.handle_key(Key::Esc); // stops waiting
+        assert_eq!(app.mode, Mode::Compose);
+        app.finish_rewrite(Ok((haste_core::ai::AiOutcome::Ok, Some("late".into()))));
+        assert_eq!(app.mode, Mode::Compose);
+        assert_eq!(app.compose.as_ref().unwrap().focused_text(), "hello");
+    }
+
+    #[test]
+    fn t_asks_for_the_stored_suggestion_when_the_helpers_are_on() {
+        let mut app = inbox_app();
+        app.ai_prefill = true;
+        let Some(Effect::TodoSuggest { thread_id }) = app.handle_key(Key::Char('t')) else {
+            panic!("expected a request for the suggestion");
+        };
+        assert!(!thread_id.is_empty());
+        assert_eq!(
+            app.mode,
+            Mode::Normal,
+            "the popup opens when the answer comes"
+        );
+        // off: the popup opens at once, as it always did
+        let mut app = inbox_app();
+        assert!(app.handle_key(Key::Char('t')).is_none());
+        assert_eq!(app.mode, Mode::RemindForm);
+    }
+
+    #[test]
+    fn a_task_suggestion_prefills_the_popup_and_every_field_stays_editable() {
+        use haste_proto::AiState;
+        let mut app = inbox_app();
+        let ai = ai_for("t1", AiState::Ready, None);
+        app.show_todo_form("t1", AiState::Ready, ai.todo.as_ref());
+        assert_eq!(app.mode, Mode::RemindForm);
+        let form = app.remind.as_mut().unwrap();
+        assert_eq!(form.title, "Send the signed form");
+        assert_eq!(form.notes, "Kata needs it by Friday");
+        assert_eq!(form.priority, haste_proto::TaskPriority::High);
+        assert_eq!(form.ai_note, Some("suggested by the local model"));
+        let (day, ..) = form.date_parts().unwrap();
+        assert!(day.contains("27"), "{day}");
+        // editing the title still works
+        form.handle(Key::Char('!'));
+        assert_eq!(form.title, "Send the signed form!");
+    }
+
+    #[test]
+    fn no_task_and_not_yet_open_the_popup_empty_with_a_note() {
+        use haste_proto::AiState;
+        let mut app = inbox_app();
+        let none = haste_core::ai::TodoSuggestion {
+            has_task: false,
+            title: String::new(),
+            notes: String::new(),
+            due: None,
+            priority: haste_core::ai::TodoPriority::None,
+        };
+        app.show_todo_form("t1", AiState::Ready, Some(&none));
+        assert_eq!(
+            app.remind.as_ref().unwrap().ai_note,
+            Some("no task suggested")
+        );
+        assert_eq!(app.remind.as_ref().unwrap().title, "");
+        let mut app = inbox_app();
+        app.show_todo_form("t1", AiState::Pending, None);
+        assert_eq!(
+            app.remind.as_ref().unwrap().ai_note,
+            Some("no suggestion yet")
+        );
+        let mut app = inbox_app();
+        app.show_todo_form("t1", AiState::Unavailable, None);
+        assert_eq!(app.remind.as_ref().unwrap().ai_note, None);
     }
 }

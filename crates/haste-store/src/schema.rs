@@ -249,6 +249,21 @@ const MIGRATIONS: &[&str] = &[
         name TEXT NOT NULL
     );
     ",
+    // 19: results of the local AI helpers (apfel), cached by thread version and memory set so a
+    // reopened thread does not call the model again. The payload is the suggestion for the human.
+    "
+    CREATE TABLE ai_results (
+        kind TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        thread_version INTEGER NOT NULL,
+        memory_fingerprint TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE (kind, thread_id, thread_version, memory_fingerprint)
+    );
+    CREATE INDEX ai_results_created ON ai_results (created_at);
+    ",
 ];
 
 /// Highest schema version this binary understands.

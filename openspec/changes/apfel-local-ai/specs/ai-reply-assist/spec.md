@@ -42,14 +42,14 @@ When a draft suggestion is available for the thread, the reply form SHALL show i
 - **THEN** no message is sent
 
 ### Requirement: Rewrite popup
-`Ctrl-r` in the reply form SHALL open a rewrite popup with the options: custom command (one-line instruction typed by the user), check grammar, more formal, more fluent, more friendly. The daemon SHALL receive the mode, the current draft text, at most 2 earlier messages of the thread and matching memories. The result SHALL replace the body only after the user confirms, and `u` SHALL restore the previous body.
+`Ctrl-r` in the reply form SHALL open a rewrite popup with the options: custom command (one-line instruction typed by the user), check grammar, more formal, more fluent, more friendly. The daemon SHALL receive the mode, the current draft text, at most 2 earlier messages of the thread and matching memories. The result SHALL be previewed and SHALL replace the body only after the user confirms with `Enter`, and `Ctrl-z` in the reply SHALL restore the previous body.
 
 #### Scenario: Rewrite as more formal
 - **WHEN** the user selects "more formal" with a non-empty draft
 - **THEN** the daemon returns a rewritten text, the form shows it for confirmation, and confirming replaces the body
 
 #### Scenario: Undo
-- **WHEN** the user presses `u` after a confirmed rewrite
+- **WHEN** the user presses `Ctrl-z` after a confirmed rewrite
 - **THEN** the body returns to the text it had before the rewrite
 
 #### Scenario: Empty draft

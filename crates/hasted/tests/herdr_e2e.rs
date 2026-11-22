@@ -921,6 +921,9 @@ fn kind(body: &RequestBody) -> Kind {
         | RequestBody::TagRemove { .. }
         | RequestBody::TagList
         | RequestBody::ThreadRefresh { .. }
+        | RequestBody::AiSuggestionGet { .. }
+        | RequestBody::AiRewrite { .. }
+        | RequestBody::AiMemoriesList { .. }
         | RequestBody::ReminderNew { .. }
         | RequestBody::ReminderEdit { .. }
         | RequestBody::ReminderTagAdd { .. }

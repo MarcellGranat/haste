@@ -16,6 +16,7 @@ pub mod extract;
 pub mod inbox;
 pub mod logs;
 pub mod remind;
+pub mod rewrite;
 pub mod smartdate;
 pub mod statusline;
 pub mod theme;

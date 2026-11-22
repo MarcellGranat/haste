@@ -24,7 +24,11 @@ pub async fn expiry_loop(state: Arc<State>) {
 /// One expiry pass; exposed so tests can drive it deterministically.
 pub async fn run_expiry(state: &Arc<State>) -> usize {
     let st = Arc::clone(state);
-    let expired = tokio::task::spawn_blocking(move || st.store.expire_due(now_secs())).await;
+    let expired = tokio::task::spawn_blocking(move || {
+        crate::apfel::expire(&st, now_secs());
+        st.store.expire_due(now_secs())
+    })
+    .await;
     let Ok(Ok(expired)) = expired else { return 0 };
     for p in &expired {
         state.audit(

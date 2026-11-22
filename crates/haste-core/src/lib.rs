@@ -1,6 +1,7 @@
 //! Core types and pure logic for haste: data model, policy gate, proposals,
 //! audit log, token handling and the connector trait.
 
+pub mod ai;
 pub mod attachment;
 pub mod audit;
 pub mod auth;

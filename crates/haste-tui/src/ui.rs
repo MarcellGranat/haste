@@ -83,7 +83,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     }
     if matches!(
         base,
-        Mode::Compose | Mode::ConfirmDiscardCompose | Mode::ConfirmReply
+        Mode::Compose | Mode::Rewrite | Mode::ConfirmDiscardCompose | Mode::ConfirmReply
     ) || (matches!(base, Mode::SendAt { .. }) && app.compose.is_some())
     {
         let replying = app
@@ -103,6 +103,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         } else {
             draw_compose(frame, app, frame.area(), false);
         }
+    }
+    if *base == Mode::Rewrite {
+        draw_rewrite(frame, app, frame.area());
     }
     if *base == Mode::Label {
         draw_labels(frame, app, frame.area());
@@ -142,6 +145,8 @@ fn reply_hint_line() -> Line<'static> {
         text(" edit in $EDITOR · "),
         key("Enter"),
         text(" send · "),
+        key("Ctrl-r"),
+        text(" rewrite · "),
         key("Ctrl-h"),
         text(" more keys "),
     ])
@@ -149,8 +154,11 @@ fn reply_hint_line() -> Line<'static> {
 
 /// The list of every key of the reply box, over it, closed by any key.
 fn draw_reply_help(frame: &mut Frame<'_>, over: Rect) {
-    const KEYS: [(&str, &str); 12] = [
+    const KEYS: [(&str, &str); 15] = [
         ("Enter", "send (asks y or n first; only y sends)"),
+        ("Tab / Right", "take the suggested reply (dimmed text)"),
+        ("Ctrl-r", "rewrite the reply with the local model"),
+        ("Ctrl-z", "put back the text from before a rewrite"),
         ("Ctrl-j / Alt-Enter", "new line"),
         ("Ctrl-a / Ctrl-e", "start / end of the line"),
         ("Ctrl-u", "delete from here to the start of the line"),
@@ -183,6 +191,83 @@ fn draw_reply_help(frame: &mut Frame<'_>, over: Rect) {
             ])
         })
         .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The rewrite popup over the reply box.
+fn draw_rewrite(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    use crate::rewrite::{Phase, OPTIONS};
+    let Some(form) = &app.rewrite else {
+        return;
+    };
+    let rect = centered(area, 64.min(area.width.saturating_sub(4)), 14);
+    frame.render_widget(Clear, rect);
+    let block = theme::panel(" Rewrite the reply · local model ").border_style(pane_border(true));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let key = Style::new()
+        .fg(theme::HINT_KEY)
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::new().fg(theme::OVERLAY0);
+    let text = Style::new().fg(theme::TEXT);
+    let picked = Style::new()
+        .fg(theme::BASE)
+        .bg(theme::MAUVE)
+        .add_modifier(Modifier::BOLD);
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    match &form.phase {
+        Phase::Choose => {
+            for (i, (name, _)) in OPTIONS.iter().enumerate() {
+                let on = i == form.selected;
+                lines.push(Line::from(vec![
+                    Span::styled(format!(" {} ", i + 1), key),
+                    Span::styled(format!(" {name:<40}"), if on { picked } else { text }),
+                ]));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                "  ↑↓ choose · Enter or 1-5 runs · Esc goes back",
+                dim,
+            )));
+        }
+        Phase::Instruction => {
+            lines.push(Line::from(Span::styled(" What should the model do?", dim)));
+            lines.push(Line::from(vec![
+                Span::styled(" › ", key),
+                Span::styled(inbox::sanitize(&form.instruction), text),
+                Span::styled("▏", Style::new().fg(theme::MAUVE)),
+            ]));
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                "  Enter runs · Esc goes back to the choices",
+                dim,
+            )));
+        }
+        Phase::Working => {
+            lines.push(Line::from(Span::styled(" rewriting …", text)));
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled("  Esc stops waiting", dim)));
+        }
+        Phase::Preview(result) => {
+            for l in result.lines().take(8) {
+                lines.push(Line::from(Span::styled(
+                    format!(" {}", inbox::sanitize(l)),
+                    text,
+                )));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                "  Enter takes it (Ctrl-Z in the reply undoes) · Esc keeps your text",
+                dim,
+            )));
+        }
+    }
+    if let Some(message) = &form.message {
+        lines.push(Line::from(Span::styled(
+            format!(" {}", inbox::sanitize(message)),
+            Style::new().fg(theme::YELLOW),
+        )));
+    }
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -238,7 +323,7 @@ fn draw_compose(frame: &mut Frame<'_>, app: &App, area: Rect, docked: bool) {
         });
         let text_area = b.inner(box_area);
         frame.render_widget(b, box_area);
-        let lines: Vec<Line<'_>> = f
+        let mut lines: Vec<Line<'_>> = f
             .area
             .lines()
             .iter()
@@ -249,6 +334,17 @@ fn draw_compose(frame: &mut Frame<'_>, app: &App, area: Rect, docked: bool) {
                 ))
             })
             .collect();
+        // the suggested reply, dimmed: in the empty box, or on the lines after the text
+        if let (true, Some(s)) = (reply && focused, c.suggestion.as_deref()) {
+            let ghost = Style::new().fg(theme::OVERLAY0);
+            if f.area.is_empty() {
+                lines.clear();
+            }
+            lines.extend(
+                s.lines()
+                    .map(|l| Line::from(Span::styled(inbox::sanitize(l), ghost))),
+            );
+        }
         // keep the cursor row visible
         let rows = usize::from(text_area.height).max(1);
         let top = f.area.row.saturating_sub(rows - 1);
@@ -1186,8 +1282,11 @@ fn draw_remind(frame: &mut Frame<'_>, app: &App, area: Rect) {
     };
     let rect = centered(area, 76.min(area.width.saturating_sub(4)), 15);
     frame.render_widget(Clear, rect);
-    let block = theme::panel(" New reminder · Tab next · Enter saves · Esc cancels ")
-        .border_style(pane_border(true));
+    let heading = match form.ai_note {
+        Some(note) => format!(" New reminder · {note} · Tab next · Enter saves · Esc cancels "),
+        None => " New reminder · Tab next · Enter saves · Esc cancels ".to_owned(),
+    };
+    let block = theme::panel(&heading).border_style(pane_border(true));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     let label = |name: &str, field: Field| {

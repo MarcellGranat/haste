@@ -10,7 +10,7 @@ use haste_core::policy::PrincipalKind;
 use haste_core::proposal::{Payload, Proposal, ProposalState};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 /// Largest frame either side accepts.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
@@ -50,6 +50,27 @@ impl RefKind {
             Self::Event => "event",
         }
     }
+}
+
+/// Where an AI suggestion stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiState {
+    /// Stored and current.
+    Ready,
+    /// A job is queued or waiting for the machine to be free.
+    Pending,
+    /// None: the sender is not approved, the model had nothing, or it refused.
+    None,
+    /// The AI helpers are off or `apfel` cannot run.
+    Unavailable,
+}
+
+/// A memory as the TUI may see it: no text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiMemoryView {
+    pub id: String,
+    pub title: String,
 }
 
 /// A back-reference request. There is deliberately no text field, and unknown fields are a
@@ -221,6 +242,24 @@ pub enum RequestBody {
         /// limit (older clients leave it out).
         #[serde(default)]
         older: bool,
+    },
+    /// Human-only: the stored AI suggestions (draft reply, TODO) for a thread. Enqueues the jobs
+    /// that are missing when the sender is an approved one.
+    AiSuggestionGet {
+        thread_id: String,
+    },
+    /// Human-only: rewrite the draft in the given mode, now (no queue wait for the gate, no cache).
+    AiRewrite {
+        thread_id: String,
+        draft: String,
+        mode: haste_core::ai::RewriteMode,
+        /// The human's own instruction for the `custom` mode.
+        #[serde(default)]
+        instruction: Option<String>,
+    },
+    /// Human-only: ids and titles of the memories that apply to a thread (never their text).
+    AiMemoriesList {
+        thread_id: String,
     },
     /// Human-only: create a reminder now (no approval: the human typed it).
     ReminderNew {
@@ -699,6 +738,25 @@ pub struct AuditLine {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
+    /// The AI suggestions for a thread; each part has its own state.
+    AiSuggestion {
+        draft_state: AiState,
+        #[serde(default)]
+        draft: Option<String>,
+        todo_state: AiState,
+        #[serde(default)]
+        todo: Option<haste_core::ai::TodoSuggestion>,
+    },
+    /// The result of a rewrite: `text` is set when the outcome is `ok`.
+    AiRewritten {
+        outcome: haste_core::ai::AiOutcome,
+        #[serde(default)]
+        text: Option<String>,
+    },
+    /// The memories that apply to a thread.
+    AiMemories {
+        memories: Vec<AiMemoryView>,
+    },
     /// An attachment was written: where, under what name, and how big.
     AttachmentSaved {
         path: String,
@@ -994,6 +1052,36 @@ mod tests {
         let json = r#"{"version":1,"token":"t","body":{"type":"propose","payload":{"kind":"archive"},"thread_id":null,"idempotency_key":"k"}}"#;
         let req: Request = serde_json::from_str(json).unwrap();
         assert!(matches!(req.body, RequestBody::Propose { hints: None, .. }));
+    }
+
+    #[test]
+    fn ai_requests_and_responses_round_trip() {
+        use haste_core::ai::{AiOutcome, RewriteMode};
+        for body in [
+            RequestBody::AiSuggestionGet {
+                thread_id: "t".into(),
+            },
+            RequestBody::AiRewrite {
+                thread_id: "t".into(),
+                draft: "hi".into(),
+                mode: RewriteMode::Formal,
+                instruction: None,
+            },
+            RequestBody::AiMemoriesList {
+                thread_id: "t".into(),
+            },
+        ] {
+            let req = Request::new("tok", body);
+            let back: Request = read_frame(&mut encode_frame(&req).unwrap().as_slice()).unwrap();
+            assert_eq!(req, back);
+        }
+        let resp = Response::AiRewritten {
+            outcome: AiOutcome::Ok,
+            text: Some("Dear".into()),
+        };
+        let back: Response = read_frame(&mut encode_frame(&resp).unwrap().as_slice()).unwrap();
+        assert_eq!(resp, back);
+        assert_eq!(PROTOCOL_VERSION, 12);
     }
 
     #[test]

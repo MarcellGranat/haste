@@ -1,5 +1,6 @@
 //! SQLite persistence for haste: one writer thread, a small pool of read-only connections.
 
+mod ai;
 mod auth;
 mod events;
 mod herdr;
@@ -16,6 +17,7 @@ use std::thread;
 
 use rusqlite::{Connection, OpenFlags};
 
+pub use ai::{AiKey, AiResultRow};
 pub use auth::{AuthError, AuthInfo, HUMAN_PRINCIPAL_ID};
 pub use events::EventCounts;
 pub use inbox::{ThreadFilter, TriageUpdate};

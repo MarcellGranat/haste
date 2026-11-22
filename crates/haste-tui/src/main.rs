@@ -477,6 +477,78 @@ fn react_worker(client: Client) -> (Sender<ReactJob>, Receiver<ReactDone>) {
     (job_tx, done_rx)
 }
 
+/// How often an open reply box asks again for a draft that is still being written.
+const AI_POLL_EVERY: Duration = Duration::from_secs(4);
+
+/// A rewrite handed to the background worker (the model can take most of a minute).
+struct RewriteJob {
+    thread_id: String,
+    draft: String,
+    mode: haste_core::ai::RewriteMode,
+    instruction: Option<String>,
+}
+
+/// The worker's answer.
+struct RewriteDone {
+    result: Result<(haste_core::ai::AiOutcome, Option<String>), String>,
+}
+
+/// Rewrites run one at a time in the background, so the screen and the keys stay alive while the
+/// local model works. A rewrite is never repeated on its own.
+fn rewrite_worker(client: Client) -> (Sender<RewriteJob>, Receiver<RewriteDone>) {
+    let (job_tx, job_rx) = channel::<RewriteJob>();
+    let (done_tx, done_rx) = channel::<RewriteDone>();
+    std::thread::spawn(move || {
+        while let Ok(job) = job_rx.recv() {
+            let answer = client.call(RequestBody::AiRewrite {
+                thread_id: job.thread_id,
+                draft: job.draft,
+                mode: job.mode,
+                instruction: job.instruction,
+            });
+            let result = match answer {
+                Ok(Response::AiRewritten { outcome, text }) => Ok((outcome, text)),
+                other => Err(describe(other)
+                    .err()
+                    .unwrap_or_else(|| "the model gave no answer".into())),
+            };
+            if done_tx.send(RewriteDone { result }).is_err() {
+                break;
+            }
+        }
+    });
+    (job_tx, done_rx)
+}
+
+/// Ask the daemon for the thread's AI suggestions (it also queues what is missing) and tell the
+/// app. Quiet when the helpers are off or the daemon cannot answer.
+fn fetch_ai(
+    app: &mut App,
+    client: &Client,
+    thread_id: &str,
+) -> Option<(haste_proto::AiState, Option<haste_core::ai::TodoSuggestion>)> {
+    match client.call(RequestBody::AiSuggestionGet {
+        thread_id: thread_id.to_owned(),
+    }) {
+        Ok(Response::AiSuggestion {
+            draft_state,
+            draft,
+            todo_state,
+            todo,
+        }) => {
+            app.set_ai(haste_tui::app::AiSuggest {
+                thread_id: thread_id.to_owned(),
+                draft_state,
+                draft,
+                todo_state,
+                todo: todo.clone(),
+            });
+            Some((todo_state, todo))
+        }
+        _ => None,
+    }
+}
+
 /// Take the thread out of the list now and queue the archive.
 fn start_archive(app: &mut App, jobs: &Sender<ArchiveJob>, thread_id: String) {
     let done = if app.thread_is_mail(&thread_id) {
@@ -553,6 +625,14 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 app.open_reply_form(&id);
             }
         }
+        Effect::AiRewrite { .. } => {} // handled in the loop (a worker waits for the model)
+        Effect::TodoSuggest { thread_id } => {
+            // the stored TODO suggestion; without the helpers, or on a failed call, the popup
+            // opens as it always did
+            let (state, todo) = fetch_ai(app, client, &thread_id)
+                .unwrap_or((haste_proto::AiState::Unavailable, None));
+            app.show_todo_form(&thread_id, state, todo.as_ref());
+        }
         Effect::OpenThread { thread_id } => {
             match client.call(RequestBody::ThreadShow { thread_id }) {
                 Ok(Response::Thread {
@@ -562,6 +642,9 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 }) => {
                     let thread_id = view.thread.id.clone();
                     app.show_thread(view, messages, own);
+                    // queues the draft and the TODO for an approved sender (and shows a draft
+                    // that is ready in the reply box)
+                    fetch_ai(app, client, &thread_id);
                     if let Some(id) = app.take_mark_read() {
                         // reading it here marks it read, at the provider too (Gmail)
                         if let Err(e) = describe(client.call(RequestBody::ReadSet {
@@ -1521,6 +1604,9 @@ fn main() -> io::Result<()> {
     let mut last_logs = Instant::now() - LOGS_EVERY;
     let (archive_jobs, archive_done) = archive_worker(client.clone());
     let (react_jobs, react_done) = react_worker(client.clone());
+    let (rewrite_jobs, rewrite_done) = rewrite_worker(client.clone());
+    app.ai_prefill = true;
+    let mut last_ai_poll = Instant::now();
 
     let mut terminal = ratatui::init();
     enhance_keys();
@@ -1556,6 +1642,24 @@ fn main() -> io::Result<()> {
                             } = effect
                             {
                                 start_archive(&mut app, &archive_jobs, thread_id);
+                            } else if let Effect::AiRewrite {
+                                thread_id,
+                                draft,
+                                mode,
+                                instruction,
+                            } = effect
+                            {
+                                if rewrite_jobs
+                                    .send(RewriteJob {
+                                        thread_id,
+                                        draft,
+                                        mode,
+                                        instruction,
+                                    })
+                                    .is_err()
+                                {
+                                    app.finish_rewrite(Err("the rewrite worker stopped".into()));
+                                }
                             } else if let Effect::React { message_id, key } = effect {
                                 if react_jobs
                                     .send(ReactJob {
@@ -1601,6 +1705,17 @@ fn main() -> io::Result<()> {
             let mut dirty = false;
             while let Ok(answer) = react_done.try_recv() {
                 app.finish_reaction(&answer.message_id, answer.result);
+            }
+            while let Ok(answer) = rewrite_done.try_recv() {
+                app.finish_rewrite(answer.result);
+            }
+            // a reply box open on a draft the model is still writing: look again every few
+            // seconds (the daemon only answers from its store)
+            if last_ai_poll.elapsed() >= AI_POLL_EVERY {
+                last_ai_poll = Instant::now();
+                if let Some(thread_id) = app.wants_ai_poll() {
+                    fetch_ai(&mut app, &client, &thread_id);
+                }
             }
             while let Ok(finished) = archive_done.try_recv() {
                 let failed = finished.result.is_err();

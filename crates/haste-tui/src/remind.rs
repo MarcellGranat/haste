@@ -159,6 +159,9 @@ pub struct RemindForm {
     /// The digits typed into the picked part of the date.
     date_typed: String,
     pub notes: String,
+    /// A line for the popup's border: where the filled-in values came from (the local model),
+    /// or that it had nothing.
+    pub ai_note: Option<&'static str>,
     /// Known project labels, and whether each is on.
     pub labels: Vec<(String, bool)>,
     /// Index into [`Self::visible_labels`].
@@ -223,6 +226,7 @@ impl RemindForm {
             priority_before: haste_proto::TaskPriority::Middle,
             date_typed: String::new(),
             notes: String::new(),
+            ai_note: None,
             labels: labels.iter().map(|l| (l.clone(), on.contains(l))).collect(),
             label_cursor: 0,
             label_query: String::new(),
@@ -241,6 +245,36 @@ impl RemindForm {
         };
         form.reread();
         form
+    }
+
+    /// Fill the form with the task the local model found. Everything stays editable; nothing is
+    /// saved until the human saves.
+    pub fn prefill(&mut self, todo: &haste_core::ai::TodoSuggestion) {
+        use haste_core::ai::TodoPriority;
+        self.title = todo.title.clone();
+        self.notes = todo.notes.clone();
+        self.priority = match todo.priority {
+            TodoPriority::Low => haste_proto::TaskPriority::Low,
+            TodoPriority::High => haste_proto::TaskPriority::High,
+            TodoPriority::None | TodoPriority::Medium => haste_proto::TaskPriority::Middle,
+        };
+        if let Some(due) = todo
+            .due
+            .as_deref()
+            .and_then(|d| self.date_at_reminder_hour(d))
+        {
+            self.due = Some(due);
+            self.date_touched = true;
+        }
+        self.reread();
+        self.ai_note = Some("suggested by the local model");
+    }
+
+    /// `YYYY-MM-DD` as that day at the default reminder hour, local time.
+    fn date_at_reminder_hour(&self, date: &str) -> Option<i64> {
+        let mut parts = date.split('-').map(|p| p.parse::<i64>().ok());
+        let (y, m, d) = (parts.next()??, parts.next()??, parts.next()??);
+        Some(haste_core::time::from_civil(y, m, d, inbox::DEFAULT_REMINDER_HOUR, 0) - self.off)
     }
 
     /// A form for an existing TODO, filled with what it has now. The notes field is empty:

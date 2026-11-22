@@ -27,7 +27,7 @@ When a draft suggestion is available for the thread, the reply form SHALL show i
 - **THEN** the form shows no ghost text and no message
 
 ### Requirement: Accepting or dismissing a suggestion
-`Right` at the end of the body SHALL insert the suggestion into the body (after a newline when the body is not empty). Typing any character SHALL dismiss the suggestion. `Tab` SHALL keep moving focus between fields. A suggestion SHALL never be sent without the existing send confirmation.
+`Right` at the end of the body, or `Tab` at any cursor position, SHALL insert the suggestion into the body (after a newline when the body is not empty). While a suggestion is shown `Tab` SHALL NOT move focus; with no suggestion it SHALL keep moving focus. Typing any character SHALL dismiss the suggestion. A suggestion SHALL never be sent without the existing send confirmation.
 
 #### Scenario: Accept with Right
 - **WHEN** the cursor is at the end of an empty body and the user presses Right
@@ -42,7 +42,7 @@ When a draft suggestion is available for the thread, the reply form SHALL show i
 - **THEN** no message is sent
 
 ### Requirement: Rewrite popup
-A key in the reply form SHALL open a rewrite popup with the options: custom command (one-line instruction typed by the user), check grammar, more formal, more fluent, more friendly. The daemon SHALL receive the mode, the current draft text, at most 2 earlier messages of the thread and matching memories. The result SHALL replace the body only after the user confirms, and `u` SHALL restore the previous body.
+`Ctrl-r` in the reply form SHALL open a rewrite popup with the options: custom command (one-line instruction typed by the user), check grammar, more formal, more fluent, more friendly. The daemon SHALL receive the mode, the current draft text, at most 2 earlier messages of the thread and matching memories. The result SHALL replace the body only after the user confirms, and `u` SHALL restore the previous body.
 
 #### Scenario: Rewrite as more formal
 - **WHEN** the user selects "more formal" with a non-empty draft

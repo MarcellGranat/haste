@@ -10,7 +10,7 @@ and pull out TODOs without any data leaving the Mac. Running it inside `hasted` 
 
 - **Auto draft (background).** When the user opens a thread from an approved sender, the daemon
   asks `apfel` for a suggested reply and caches it. The reply form shows it as dimmed ghost text;
-  `Right` or `Tab` inserts it into the body. It is never sent automatically.
+  `Right` (at the end) or `Tab` inserts it into the body. It is never sent automatically.
 - **Rewrite my reply (user-triggered).** A key in the reply form opens a popup: custom instruction,
   check grammar, more formal, more fluent, more friendly. The result previews in the draft and is
   undoable. Always runs when asked.
@@ -18,8 +18,8 @@ and pull out TODOs without any data leaving the Mac. Running it inside `hasted` 
   answer (`--schema`): whether there is a task, title, notes, due date and priority. Pressing `t` on
   a thread opens the existing TODO popup prefilled with it, fully editable. Nothing is created
   without the user saving the popup.
-- **Memories.** Local markdown files with front matter under the haste data folder
-  (`memories/*.md`). Each memory has trigger rules (channel or sender pattern). Only memories whose
+- **Memories.** Local YAML files under the haste data folder
+  (`memories/*.yml`). Each memory has trigger rules (channel or sender pattern). Only memories whose
   rules match a thread are passed to the tools.
 - **Resource gate for background work.** Tools 1 and 3 run only when the machine has enough free
   capacity (load average and free memory against configurable constants); otherwise the job is

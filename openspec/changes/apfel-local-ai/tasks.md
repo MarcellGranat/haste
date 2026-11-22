@@ -1,6 +1,6 @@
 ## 1. Pure logic (haste-core, no I/O)
 
-- [ ] 1.1 Add `haste-core` module for memory front matter parsing (fixed keys, unknown keys ignored, size limits) with unit tests for valid, malformed, oversize and invalid-pattern files
+- [ ] 1.1 Add `haste-core` module for memory YAML parsing with `serde_yaml_ng` (add the dependency; unknown keys ignored, size limits) with unit tests for valid, malformed, oversize and invalid-pattern files
 - [ ] 1.2 Add memory trigger matching by channel and by sender, reusing the `IgnoreList` regex engine, with tests for OR semantics, disabled memories and the 3-memory / 1 KB caps
 - [ ] 1.3 Add memory fingerprint (SHA-256 over matched ids and bodies) with a test that an edit changes it
 - [ ] 1.4 Add the resource gate as a pure function over sampled load, core count, free MB and pressure, with the constants block; tests for busy, free, and failed-sample (fail closed)
@@ -44,8 +44,8 @@
 
 - [ ] 6.1 Add `suggestion` to the reply form state in `compose.rs` and render it dimmed after the cursor in `ui.rs`
 - [ ] 6.2 Poll `AiSuggestionGet` when the reply form opens; show the suggestion when `ready`
-- [ ] 6.3 Accept on `Right` at end of body (newline first if non-empty); dismiss on any typed character; confirm `Tab` still moves focus
-- [ ] 6.4 Add the rewrite popup (five modes, custom instruction line) bound to the chosen key, with spinner, preview, confirm and `u` undo
+- [ ] 6.3 Accept on `Right` at end of body or on `Tab` (newline first if non-empty); dismiss on any typed character; `Tab` moves focus again when no suggestion is shown
+- [ ] 6.4 Add the rewrite popup (five modes, custom instruction line) bound to `Ctrl-r`, with spinner, preview, confirm and `u` undo
 - [ ] 6.5 Handle rewrite outcomes (`refused`, `timeout`, `unavailable`, empty draft) with one-line messages
 - [ ] 6.6 Add `t` on a thread in `app.rs` that requests the TODO suggestion and opens the existing TODO popup prefilled, or empty with "no task suggested" / "no suggestion yet"
 - [ ] 6.7 Add TUI tests for accept, dismiss, undo and the prefill mapping, following the existing `compose.rs` tests

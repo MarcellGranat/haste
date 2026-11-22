@@ -1,14 +1,14 @@
 ## ADDED Requirements
 
-### Requirement: Memories are local markdown files
-A memory SHALL be a file `memories/<name>.md` in the haste data directory, with a front matter block between `---` lines followed by a body. The daemon SHALL read at most 50 memory files, each at most 4 KB, and SHALL skip and log any file that does not parse, naming only the file name and the reason.
+### Requirement: Memories are local YAML files
+A memory SHALL be a YAML file `memories/<name>.yml` in the haste data directory with the keys `id`, `title`, `enabled`, `channels`, `senders` and `text`. The daemon SHALL read at most 50 memory files, each at most 4 KB, and SHALL skip and log any file that does not parse, naming only the file name and the reason.
 
 #### Scenario: Valid memory
-- **WHEN** a file has `id`, `title`, `enabled: true` and a `channels` or `senders` field
+- **WHEN** a file has `id`, `text`, `enabled: true` and a `channels` or `senders` field
 - **THEN** it is loaded as an active memory
 
 #### Scenario: Malformed file
-- **WHEN** a file has no closing front matter line
+- **WHEN** a file is not valid YAML or has no `text`
 - **THEN** it is skipped and a warning with the file name and reason is logged
 
 #### Scenario: Too many files

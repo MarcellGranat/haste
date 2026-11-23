@@ -208,9 +208,22 @@ case "update_reminder":
           let title = request["title"] as? String, !title.isEmpty else { fail("bad_request") }
     guard let reminder = store.calendarItem(withIdentifier: id) as? EKReminder else { fail("not_found") }
     reminder.title = title
+    // the Reminders app stores an alert at the due time next to the due date: a new due date
+    // moves those alerts by the same amount, or the app keeps showing and firing the old time
+    let oldDue = reminder.dueDateComponents.flatMap { Calendar.current.date(from: $0) }
     if let due = request["due"] as? Int {
+        let newDue = Date(timeIntervalSince1970: TimeInterval(due))
         reminder.dueDateComponents = Calendar.current.dateComponents(
-            [.year, .month, .day, .hour, .minute], from: Date(timeIntervalSince1970: TimeInterval(due)))
+            [.year, .month, .day, .hour, .minute], from: newDue)
+        if let oldDue = oldDue {
+            let shift = newDue.timeIntervalSince(oldDue)
+            for alarm in reminder.alarms ?? [] {
+                if let when = alarm.absoluteDate, shift != 0 {
+                    reminder.removeAlarm(alarm)
+                    reminder.addAlarm(EKAlarm(absoluteDate: when.addingTimeInterval(shift)))
+                }
+            }
+        }
     } else {
         reminder.dueDateComponents = nil
     }

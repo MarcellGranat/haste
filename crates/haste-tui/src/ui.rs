@@ -2941,7 +2941,7 @@ fn draw_approvals(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if items.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "nothing waits here: Enter sends a reply (after y), Ctrl-s keeps it as a draft, Ctrl-l sends it later",
+                "nothing waits here: Enter sends a reply (mail asks y first), Ctrl-s keeps it as a draft, Ctrl-l sends it later",
                 theme::muted(),
             )))
             .block(theme::panel(&title)),

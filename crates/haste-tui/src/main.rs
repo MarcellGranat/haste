@@ -1227,11 +1227,13 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 "send_requested",
                 &[haste_core::log::id("proposal", &id)],
             );
+            let sent_at = std::time::Instant::now();
             let reply = client.call(RequestBody::Send {
                 proposal_id: id.clone(),
                 acknowledge_stale,
                 recipients_digest,
             });
+            let send_ms = sent_at.elapsed().as_millis().min(1 << 40) as i64;
             let changed = matches!(&reply, Ok(Response::Error { error }) if error.message == "recipients_changed");
             let outcome = match &reply {
                 Ok(Response::Error { .. }) => "refused",
@@ -1244,6 +1246,7 @@ fn run_effect(app: &mut App, client: &Client, effect: Effect) -> bool {
                 &[
                     haste_core::log::id("proposal", &id),
                     haste_core::log::l("outcome", outcome),
+                    haste_core::log::n("send_ms", send_ms),
                 ],
             );
             app.status = match describe(reply) {
@@ -1391,6 +1394,7 @@ fn save_reply(
         }
     };
     let key = format!("tui-reply-{thread_id}-{}", haste_core::time::now_secs());
+    let started = std::time::Instant::now();
     let id = match run_draft(client, thread_id, body, names, key) {
         Ok(id) => id,
         Err(e) => {
@@ -1414,9 +1418,20 @@ fn save_reply(
                 app.status = "another send is waiting: the reply is in the Outbox (5)".into();
                 return;
             }
-            match client.call(RequestBody::SendPreview {
+            let drafted = started.elapsed();
+            let previewed = client.call(RequestBody::SendPreview {
                 proposal_id: id.clone(),
-            }) {
+            });
+            haste_core::log::info(
+                "tui",
+                "reply_prepared",
+                &[
+                    haste_core::log::id("proposal", &id),
+                    haste_core::log::n("draft_ms", drafted.as_millis().min(1 << 40) as i64),
+                    haste_core::log::n("total_ms", started.elapsed().as_millis().min(1 << 40) as i64),
+                ],
+            );
+            match previewed {
                 Ok(Response::SendPreview { preview }) => app.show_send_preview(&id, preview),
                 other => {
                     app.status = format!(
@@ -1590,6 +1605,11 @@ fn main() -> io::Result<()> {
     })?;
     let events = client.subscribe();
     let mut app = App::new();
+    let (settings, warning) = haste_tui::settings::Settings::load(&haste_tui::settings::Settings::path());
+    app.settings = settings;
+    if let Some(w) = warning {
+        app.status = format!("config ignored: {w}");
+    }
     app.calendar_colors = haste_tui::calendarcolors::CalendarColors::load(&base_dir());
     app.background_mode = std::env::var_os("HASTE_HERDR_TAB").is_some()
         || std::env::var_os("HASTE_BACKGROUND_COMMAND").is_some();

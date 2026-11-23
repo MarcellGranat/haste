@@ -51,7 +51,7 @@ pub struct AiSuggest {
 pub enum AfterSave {
     /// Keep it as a draft in the Outbox.
     Draft,
-    /// Send it after [`SEND_DELAY`], unless `U` undoes it.
+    /// Send it after the settings' send delay, unless `U` undoes it.
     Send,
     /// Send it at this unix second.
     Later(i64),
@@ -261,21 +261,6 @@ pub enum GroupBy {
 
 /// Group name for proposals that carry no project.
 pub const NO_PROJECT: &str = "no project";
-
-/// How long a mail send waits before it runs; `U` undoes it meanwhile.
-pub const SEND_DELAY: Duration = Duration::from_secs(10);
-
-/// How long a chat send (WhatsApp, Messenger, iMessage) waits: chats are quick, so the window is short.
-pub const CHAT_SEND_DELAY: Duration = Duration::from_secs(3);
-
-/// The undo window for a send from `source`: short for the chat networks, long for mail.
-#[must_use]
-pub fn send_delay(source: &str) -> Duration {
-    match source {
-        "imessage" | "whatsapp" | "messenger" | "googlechat" => CHAT_SEND_DELAY,
-        _ => SEND_DELAY,
-    }
-}
 
 /// Something the key handler wants the daemon to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -616,6 +601,8 @@ pub struct App {
     pub view: View,
     pub mode: Mode,
     pub threads: Vec<ThreadView>,
+    /// User settings from the TOML file.
+    pub settings: crate::settings::Settings,
     pub proposals: Vec<Proposal>,
     /// A send that goes out when its deadline passes; `U` undoes it.
     pub pending_send: Option<PendingSend>,
@@ -818,6 +805,7 @@ impl App {
             view: View::Today,
             mode: Mode::Normal,
             threads: Vec::new(),
+            settings: crate::settings::Settings::default(),
             proposals: Vec::new(),
             pending_send: None,
             scheduled: std::collections::HashMap::new(),
@@ -1986,7 +1974,7 @@ impl App {
 
     /// The daemon's answer to [`Effect::PreviewSend`]: show the confirmation.
     ///
-    /// A current (not stale) send starts the [`SEND_DELAY`] countdown; a stale one still asks `y`.
+    /// A current (not stale) send starts the the settings' send delay countdown; a stale one still asks `y`.
     pub fn show_send_preview(&mut self, id: &str, preview: SendPreviewView) {
         if preview.stale {
             self.show_confirmed_send_preview(id, preview);
@@ -1996,7 +1984,7 @@ impl App {
             id: id.to_owned(),
             recipients: preview.recipients,
             subject: with_files(preview.subject, &preview.attachments),
-            deadline: self.now + send_delay(&preview.source),
+            deadline: self.now + self.settings.send_delay(&preview.source),
             source: preview.source,
             remaining: preview.sends_remaining,
             recipients_digest: preview.recipients_digest,
@@ -2726,12 +2714,24 @@ impl App {
             }
             ComposeOutcome::Save => self.finish_compose(AfterSave::Draft),
             ComposeOutcome::Send if matches!(c.kind, ComposeKind::Reply { .. }) => {
-                // a reply asks first: y sends, anything else goes back to the text
-                if c.has_content() {
-                    self.mode = Mode::ConfirmReply;
-                } else {
+                // a reply asks first unless the settings say otherwise (chats: no); y sends,
+                // anything else goes back to the text
+                if !c.has_content() {
                     self.status = "the reply is empty".into();
+                    return None;
                 }
+                let ComposeKind::Reply { thread_id } = &c.kind else {
+                    return None;
+                };
+                let source = self
+                    .threads
+                    .iter()
+                    .find(|t| &t.thread.id == thread_id)
+                    .map(|t| t.thread.source.as_name());
+                if source.is_some_and(|s| !self.settings.confirm_reply(&s)) {
+                    return self.finish_compose(AfterSave::Send);
+                }
+                self.mode = Mode::ConfirmReply;
                 None
             }
             ComposeOutcome::Send => self.finish_compose(AfterSave::Send),
@@ -3780,6 +3780,7 @@ fn attach_roots() -> Vec<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    const SEND_DELAY: Duration = Duration::from_secs(10);
     use super::*;
 
     fn proposal(id: &str, principal: &str, state: ProposalState, stale: bool) -> Proposal {
@@ -4882,6 +4883,24 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn enter_on_a_chat_reply_sends_without_asking_and_mail_still_asks() {
+        let mut app = inbox_app();
+        let mut chat = mail_thread("c1", "Kata", &["k"], 30);
+        chat.thread.source = haste_core::model::Source::Messenger;
+        app.threads.push(chat);
+        app.open_reply_form("c1");
+        press(&mut app, "hi");
+        assert!(matches!(
+            app.handle_key(Key::Enter),
+            Some(Effect::SaveReply { then: AfterSave::Send, .. })
+        ));
+        app.open_reply_form("t1");
+        press(&mut app, "hi");
+        assert!(app.handle_key(Key::Enter).is_none());
+        assert_eq!(app.mode, Mode::ConfirmReply);
     }
 
     #[test]
@@ -6176,16 +6195,6 @@ mod tests {
         app.set_proposals(vec![proposal("p1", "agent-a", ProposalState::Sent, false)]);
         assert!(app.proposals.is_empty());
         assert!(app.marked.is_empty());
-    }
-
-    #[test]
-    fn chat_sends_wait_three_seconds_and_mail_ten() {
-        for chat in ["imessage", "whatsapp", "messenger", "googlechat"] {
-            assert_eq!(send_delay(chat), Duration::from_secs(3), "{chat}");
-        }
-        for mail in ["gmail", "icloud", "email"] {
-            assert_eq!(send_delay(mail), Duration::from_secs(10), "{mail}");
-        }
     }
 
     #[test]

@@ -763,6 +763,23 @@ A thread matches when every key present matches; within one key any value may ma
 `sender` (part of a participant address), `subject`, `source`, `min_priority`. Gmail labels and an
 unread flag are not stored yet, so they are not filter keys.
 
+### Settings file
+
+`haste-tui` reads `~/.config/haste/config.toml` (or `$HASTE_CONFIG`). Missing means defaults; a
+broken file keeps the defaults and shows why in the status line. It is read where the TUI runs, so
+on a remote machine put the file there.
+
+```toml
+[send]
+chat_delay_secs = 5     # undo window after Enter in WhatsApp, Messenger, Google Chat, iMessage
+mail_delay_secs = 10
+confirm_chat = false    # chats send on Enter; U undoes it during the window
+confirm_mail = true     # mail asks "Send this reply? y/n" first
+
+[send.delay_secs]       # optional per-source override
+googlechat = 3
+```
+
 ## Using the TUI with herdr
 
 Three small pieces connect `haste-tui` to [herdr](https://herdr.dev). All optional, all in

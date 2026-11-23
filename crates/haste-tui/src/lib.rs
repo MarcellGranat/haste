@@ -17,6 +17,7 @@ pub mod inbox;
 pub mod logs;
 pub mod remind;
 pub mod rewrite;
+pub mod settings;
 pub mod smartdate;
 pub mod statusline;
 pub mod theme;

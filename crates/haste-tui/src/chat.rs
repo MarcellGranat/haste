@@ -407,6 +407,37 @@ fn styled(line: &str, base: Style) -> Vec<Span<'static>> {
     spans
 }
 
+/// A stable colour per sender, so the people in a group chat are told apart at a glance.
+fn sender_colour(who: &str) -> ratatui::style::Color {
+    const PALETTE: [ratatui::style::Color; 7] = [
+        theme::LAVENDER,
+        theme::SKY,
+        theme::PEACH,
+        theme::PINK,
+        theme::GREEN,
+        theme::YELLOW,
+        theme::MAUVE,
+    ];
+    let sum = who
+        .to_lowercase()
+        .bytes()
+        .fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(usize::from(b)));
+    PALETTE[sum % PALETTE.len()]
+}
+
+/// A chat message that continues the previous one: same sender, same day, a few minutes apart.
+/// Its frame carries only the time; the name was already shown above.
+fn follows(prev: &Message, cur: &Message, tz_offset: i64) -> bool {
+    !inbox::is_mail(&cur.source.as_name())
+        && prev.is_own == cur.is_own
+        && prev.sender_identifier == cur.sender_identifier
+        && (cur.sent_at - prev.sent_at).abs() <= FOLLOW_GAP
+        && inbox::day_start(prev.sent_at, tz_offset) == inbox::day_start(cur.sent_at, tz_offset)
+}
+
+/// Longest gap (seconds) between two chat messages of one sender that still read as one run.
+const FOLLOW_GAP: i64 = 300;
+
 fn is_own(m: &Message, own: Option<&str>) -> bool {
     m.is_own
         || matches!((own, m.sender_identifier.as_deref()),
@@ -479,10 +510,10 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
         let this_day = inbox::day_start(m.sent_at, l.tz_offset);
         if day != Some(this_day) {
             day = Some(this_day);
-            let label = format!("── {} ──", inbox::day_label(m.sent_at, l.tz_offset));
-            let lead = l.width.saturating_sub(inbox::width(&label)) / 2;
+            let label = format!(" {} ", inbox::day_label(m.sent_at, l.tz_offset));
+            let rule = l.width.saturating_sub(inbox::width(&label));
             lines.push(Line::from(Span::styled(
-                format!("{}{label}", " ".repeat(lead)),
+                format!("{}{label}{}", "─".repeat(rule / 2), "─".repeat(rule - rule / 2)),
                 theme::muted(),
             )));
         }
@@ -531,7 +562,8 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
         };
         // your own messages carry only the date, others the sender too
         let stamp = inbox::smart_stamp(m.sent_at, l.now, l.tz_offset);
-        let header = if own {
+        let run = i > 0 && follows(&messages[i - 1], m, l.tz_offset);
+        let header = if own || run {
             format!(" {count}{stamp} ")
         } else {
             format!(" {who} · {count}{stamp} ")
@@ -560,7 +592,13 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
         };
         let edge = Style::new().fg(colour);
         let head_style = Style::new()
-            .fg(if own { theme::TEAL } else { theme::LAVENDER })
+            .fg(if own {
+                theme::TEAL
+            } else if inbox::is_mail(&m.source.as_name()) {
+                theme::LAVENDER
+            } else {
+                sender_colour(&who)
+            })
             .add_modifier(Modifier::BOLD);
         let start = lines.len();
         // top edge: ╭─ who · time ───╮
@@ -642,6 +680,11 @@ pub fn scroll_to(current: usize, laid: &Laid, height: usize, total: usize) -> us
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_sender_keeps_one_colour_and_the_day_rule_spans_the_width() {
+        assert_eq!(super::sender_colour("Kata"), super::sender_colour("kata"));
+    }
+
     use super::*;
 
     fn m(id: &str, who: &str, text: &str, at: i64, own: bool) -> Message {

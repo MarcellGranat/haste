@@ -2851,6 +2851,15 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
             expanded: &reader.expanded,
         },
     );
+    // a reply on its way (counting down, or sent and not confirmed yet) closes the thread
+    let ghost = app.ghost_reply();
+    if let Some((body, header)) = &ghost {
+        lines.extend(crate::chat::pending_frame(
+            usize::from(inner.width),
+            body,
+            header,
+        ));
+    }
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
             "no messages stored for this thread yet",
@@ -2866,6 +2875,12 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let scroll = match laid.get(reader.selected.saturating_sub(first)) {
         Some(l) => crate::chat::scroll_to(reader.scroll.get(), l, height, lines.len()),
         None => 0,
+    };
+    // reading the newest message: the reply on its way is in view too
+    let scroll = if ghost.is_some() && reader.selected + 1 >= reader.messages.len() {
+        lines.len().saturating_sub(height)
+    } else {
+        scroll
     };
     reader.scroll.set(scroll);
     *reader.spans.borrow_mut() = laid.iter().map(|l| (l.start, l.end)).collect();
@@ -3382,6 +3397,49 @@ mod tests {
             app.handle_key(Key::Char(c));
         }
         assert!(render(&app).contains("every 1 week"));
+    }
+
+    #[test]
+    fn a_reply_on_its_way_closes_the_open_thread_with_its_countdown() {
+        let mut app = App::new();
+        let view = ThreadView {
+            thread: haste_core::model::Thread {
+                id: "t1".into(),
+                source: haste_core::model::Source::Messenger,
+                external_id: "e".into(),
+                subject: "Kata".into(),
+                participants: vec![],
+                last_activity_at: 1,
+                version: 1,
+            },
+            triage: haste_core::model::Triage::new("t1", haste_core::model::ObjectKind::Thread),
+            tags: vec![],
+            last: None,
+            unread: false,
+            replied: false,
+            sender_known: true,
+            sender: None,
+        };
+        app.show_thread(view, vec![], None);
+        app.pending_send = Some(crate::app::PendingSend {
+            id: "p1".into(),
+            recipients: vec!["Kata".into()],
+            subject: String::new(),
+            source: "messenger".into(),
+            remaining: 4,
+            recipients_digest: "d".into(),
+            deadline: app.now + std::time::Duration::from_secs(5),
+            restore: Some(crate::app::Restore {
+                thread_id: "t1".into(),
+                body: "Köszönöm szépen".into(),
+                attachments: vec![],
+            }),
+        });
+        let text = render(&app);
+        assert!(
+            text.contains("sending in 5s") && text.contains("Köszönöm szépen"),
+            "{text}"
+        );
     }
 
     #[test]

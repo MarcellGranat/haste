@@ -259,6 +259,9 @@ pub enum GroupBy {
     Project,
 }
 
+/// How long a sent reply is shown as "waiting for the chat" before it is given up on.
+const GHOST_LIFETIME: Duration = Duration::from_secs(20);
+
 /// Group name for proposals that carry no project.
 pub const NO_PROJECT: &str = "no project";
 
@@ -603,6 +606,8 @@ pub struct App {
     pub threads: Vec<ThreadView>,
     /// User settings from the TOML file.
     pub settings: crate::settings::Settings,
+    /// A reply that has just gone out and is not in the thread yet; shown until it arrives.
+    pub sent_ghost: Option<(Restore, Instant)>,
     pub proposals: Vec<Proposal>,
     /// A send that goes out when its deadline passes; `U` undoes it.
     pub pending_send: Option<PendingSend>,
@@ -806,6 +811,7 @@ impl App {
             mode: Mode::Normal,
             threads: Vec::new(),
             settings: crate::settings::Settings::default(),
+            sent_ghost: None,
             proposals: Vec::new(),
             pending_send: None,
             scheduled: std::collections::HashMap::new(),
@@ -2088,8 +2094,30 @@ impl App {
             acknowledge_stale: false,
             recipients_digest: p.recipients_digest.clone(),
         };
+        if let Some(r) = p.restore.clone() {
+            self.sent_ghost = Some((r, now));
+        }
         self.pending_send = None;
         Some(effect)
+    }
+
+    /// What the open thread shows at its end for a reply that is on its way: the text and the
+    /// line that says where it is (counting down, or waiting for the chat to confirm).
+    #[must_use]
+    pub fn ghost_reply(&self) -> Option<(String, String)> {
+        let open = &self.reader.as_ref()?.view.thread.id;
+        if let Some(p) = &self.pending_send {
+            let r = p.restore.as_ref().filter(|r| &r.thread_id == open)?;
+            let secs = p
+                .deadline
+                .saturating_duration_since(self.now)
+                .as_millis()
+                .div_ceil(1000);
+            return Some((r.body.clone(), format!("sending in {secs}s · U undoes")));
+        }
+        let (r, at) = self.sent_ghost.as_ref()?;
+        (&r.thread_id == open && self.now.saturating_duration_since(*at) < GHOST_LIFETIME)
+            .then(|| (r.body.clone(), "sent · waiting for the chat".to_owned()))
     }
 
     /// The id and subject of the thread under the cursor, or a status line saying why not.
@@ -2163,6 +2191,12 @@ impl App {
         if unchanged {
             return;
         }
+        if messages.last().is_some_and(|m| m.is_own) {
+            self.sent_ghost = None; // the reply has arrived
+        }
+        let Some(reader) = &mut self.reader else {
+            return;
+        };
         let was_last = reader.selected + 1 >= reader.messages.len();
         let keep = reader.messages.get(reader.selected).map(|m| m.id.clone());
         reader.selected = match keep.and_then(|id| messages.iter().position(|m| m.id == id)) {
@@ -4895,7 +4929,10 @@ mod tests {
         press(&mut app, "hi");
         assert!(matches!(
             app.handle_key(Key::Enter),
-            Some(Effect::SaveReply { then: AfterSave::Send, .. })
+            Some(Effect::SaveReply {
+                then: AfterSave::Send,
+                ..
+            })
         ));
         app.open_reply_form("t1");
         press(&mut app, "hi");

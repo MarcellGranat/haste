@@ -418,10 +418,9 @@ fn sender_colour(who: &str) -> ratatui::style::Color {
         theme::YELLOW,
         theme::MAUVE,
     ];
-    let sum = who
-        .to_lowercase()
-        .bytes()
-        .fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(usize::from(b)));
+    let sum = who.to_lowercase().bytes().fold(0usize, |a, b| {
+        a.wrapping_mul(31).wrapping_add(usize::from(b))
+    });
     PALETTE[sum % PALETTE.len()]
 }
 
@@ -513,7 +512,11 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
             let label = format!(" {} ", inbox::day_label(m.sent_at, l.tz_offset));
             let rule = l.width.saturating_sub(inbox::width(&label));
             lines.push(Line::from(Span::styled(
-                format!("{}{label}{}", "─".repeat(rule / 2), "─".repeat(rule - rule / 2)),
+                format!(
+                    "{}{label}{}",
+                    "─".repeat(rule / 2),
+                    "─".repeat(rule - rule / 2)
+                ),
                 theme::muted(),
             )));
         }
@@ -659,6 +662,54 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
     (lines, laid)
 }
 
+/// A message that is on its way, drawn at the end of the thread in its own colour: yours, on the
+/// right, with `header` ("sending in 4s · U undoes") where a sent one has its time.
+#[must_use]
+pub fn pending_frame(width: usize, body: &str, header: &str) -> Vec<Line<'static>> {
+    let max_inner = (width * 3 / 4).clamp(16, 100).saturating_sub(4);
+    let rows = inbox::wrap(&inbox::sanitize(body), max_inner);
+    let head = format!(" {header} ");
+    let inner = rows
+        .iter()
+        .map(|r| inbox::width(r))
+        .chain([inbox::width(&head).saturating_sub(1)])
+        .max()
+        .unwrap_or(10)
+        .clamp(10, max_inner.max(10));
+    let frame_w = inner + 4;
+    let indent = " ".repeat(width.saturating_sub(frame_w));
+    let edge = Style::new().fg(theme::PEACH);
+    let used = inbox::width(&head) + 1;
+    let mut lines = vec![Line::from(vec![
+        Span::raw(indent.clone()),
+        Span::styled("╭─", edge),
+        Span::styled(head, edge.add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{}╮", "─".repeat(frame_w.saturating_sub(used + 2))),
+            edge,
+        ),
+    ])];
+    for r in &rows {
+        lines.push(Line::from(vec![
+            Span::raw(indent.clone()),
+            Span::styled("│ ", edge),
+            Span::styled(
+                r.clone(),
+                Style::new()
+                    .fg(theme::SUBTEXT0)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+            Span::raw(" ".repeat(inner.saturating_sub(inbox::width(r)))),
+            Span::styled(" │", edge),
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::raw(indent),
+        Span::styled(format!("╰{}╯", "─".repeat(frame_w - 2)), edge),
+    ]));
+    lines
+}
+
 /// The scroll offset that keeps the selected message in view, moving as little as possible.
 #[must_use]
 pub fn scroll_to(current: usize, laid: &Laid, height: usize, total: usize) -> usize {
@@ -707,7 +758,13 @@ mod tests {
         let messages = [
             m("1", "Kata Biró", "❤", now - 960, false),
             m("2", "Kata Biró", "Köszönöm", now - 360, true),
-            m("3", "Ana", "a much longer text that sets the width of this frame", now, false),
+            m(
+                "3",
+                "Ana",
+                "a much longer text that sets the width of this frame",
+                now,
+                false,
+            ),
         ];
         let (lines, _) = layout(
             &messages,

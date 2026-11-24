@@ -573,7 +573,7 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
             .map(|(s, _)| inbox::width(s))
             .chain(chips.iter().map(|s| inbox::width(s)))
             .chain(reactions.iter().map(|s| inbox::width(s)))
-            .chain([inbox::width(&header).saturating_sub(2)])
+            .chain([inbox::width(&header).saturating_sub(1)])
             .max()
             .unwrap_or(10)
             .clamp(10, max_inner.max(10));
@@ -698,6 +698,40 @@ mod tests {
             body_text: text.into(),
             sent_at: at,
             is_own: own,
+        }
+    }
+
+    #[test]
+    fn every_frame_is_a_rectangle_even_when_the_header_is_longer_than_the_text() {
+        let now = 1_700_000_000;
+        let messages = [
+            m("1", "Kata Biró", "❤", now - 960, false),
+            m("2", "Kata Biró", "Köszönöm", now - 360, true),
+            m("3", "Ana", "a much longer text that sets the width of this frame", now, false),
+        ];
+        let (lines, _) = layout(
+            &messages,
+            &Layout {
+                width: 80,
+                selected: 0,
+                hidden: 0,
+                own: None,
+                tz_offset: 0,
+                now,
+                expanded: &std::collections::HashSet::new(),
+            },
+        );
+        let mut open = None;
+        for l in &lines {
+            let t = text_of(l);
+            let t = t.trim_start();
+            let w = inbox::width(t);
+            if t.starts_with('╭') {
+                open = Some(w);
+            }
+            if t.starts_with(['╭', '│', '╰']) {
+                assert_eq!(Some(w), open, "{t:?}");
+            }
         }
     }
 

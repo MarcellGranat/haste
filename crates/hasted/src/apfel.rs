@@ -271,14 +271,32 @@ fn run_process(
     stdin_text: &str,
     timeout: Duration,
 ) -> Result<(Option<i32>, String), RunError> {
+    run_process_err(program, args, stdin_text, timeout).map(|(code, out, _)| (code, out))
+}
+
+/// [`run_process`] that also returns the start of what the process wrote to stderr (its error
+/// message; used only to recognise a known cause, never logged).
+fn run_process_err(
+    program: &Path,
+    args: &[String],
+    stdin_text: &str,
+    timeout: Duration,
+) -> Result<(Option<i32>, String, String), RunError> {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|_| RunError::Spawn)?;
     let input = stdin_text.to_owned().into_bytes();
+    let err_reader = child.stderr.take().map(|stderr| {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let _ = stderr.take(512).read_to_end(&mut out);
+            out
+        })
+    });
     let writer = child.stdin.take().map(|mut stdin| {
         std::thread::spawn(move || {
             let _ = stdin.write_all(&input);
@@ -312,8 +330,16 @@ fn run_process(
         let _ = w.join();
     }
     let out = reader.and_then(|r| r.join().ok()).unwrap_or_default();
+    let err = err_reader
+        .and_then(|r| r.join().ok())
+        .map(|e| String::from_utf8_lossy(&e).into_owned())
+        .unwrap_or_default();
     match status {
-        Some(status) => Ok((status.code(), String::from_utf8_lossy(&out).into_owned())),
+        Some(status) => Ok((
+            status.code(),
+            String::from_utf8_lossy(&out).into_owned(),
+            err,
+        )),
         None => Err(RunError::Timeout),
     }
 }
@@ -414,12 +440,18 @@ impl Runner for ProcessRunner {
             args.push("--schema".to_owned());
             args.push(schema.to_string_lossy().into_owned());
         }
-        match run_process(&self.path, &args, &prompt.user, APFEL_CALL_TIMEOUT) {
-            Ok((Some(0), text)) => CallResult {
+        match run_process_err(&self.path, &args, &prompt.user, APFEL_CALL_TIMEOUT) {
+            Ok((Some(0), text, _)) => CallResult {
                 outcome: AiOutcome::Ok,
                 text,
             },
-            Ok((Some(code), _)) => {
+            // the on-device model does not read every language (Hungarian is not one): asking
+            // again changes nothing, so it counts as a refusal and is not retried
+            Ok((Some(1), _, err)) if err.to_lowercase().contains("unsupported language") => {
+                log::info("apfel", "unsupported_language", &[]);
+                fail(AiOutcome::Refused)
+            }
+            Ok((Some(code), _, _)) => {
                 let outcome = AiOutcome::from_exit_code(code);
                 if outcome == AiOutcome::Error {
                     // an exit code no mapping knows: the number is the only clue (no text)
@@ -427,7 +459,7 @@ impl Runner for ProcessRunner {
                 }
                 fail(outcome)
             }
-            Ok((None, _)) => {
+            Ok((None, _, _)) => {
                 log::warn("apfel", "killed_by_signal", &[]);
                 fail(AiOutcome::Error)
             }

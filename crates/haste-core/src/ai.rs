@@ -488,8 +488,8 @@ pub const TODO_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
     "has_task": {"type": "boolean"},
-    "title": {"type": "string", "maxLength": 120},
-    "notes": {"type": "string", "maxLength": 500},
+    "title": {"type": "string"},
+    "notes": {"type": "string"},
     "due": {"type": ["string", "null"], "description": "YYYY-MM-DD or null"},
     "priority": {"type": "string", "enum": ["none", "low", "medium", "high"]}
   },

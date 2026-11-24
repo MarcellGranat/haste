@@ -419,8 +419,18 @@ impl Runner for ProcessRunner {
                 outcome: AiOutcome::Ok,
                 text,
             },
-            Ok((Some(code), _)) => fail(AiOutcome::from_exit_code(code)),
-            Ok((None, _)) => fail(AiOutcome::Error),
+            Ok((Some(code), _)) => {
+                let outcome = AiOutcome::from_exit_code(code);
+                if outcome == AiOutcome::Error {
+                    // an exit code no mapping knows: the number is the only clue (no text)
+                    log::warn("apfel", "exit_code", &[log::n("code", code)]);
+                }
+                fail(outcome)
+            }
+            Ok((None, _)) => {
+                log::warn("apfel", "killed_by_signal", &[]);
+                fail(AiOutcome::Error)
+            }
             Err(RunError::Timeout) => fail(AiOutcome::Timeout),
             Err(RunError::Spawn) => fail(AiOutcome::Unavailable),
         }

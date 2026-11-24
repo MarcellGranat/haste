@@ -1743,7 +1743,15 @@ fn main() -> io::Result<()> {
                 dirty |= failed;
             }
             while let Ok(ev) = events.try_recv() {
-                dirty |= app.on_event(&ev).is_some();
+                match app.on_event(&ev) {
+                    // the open thread has a new message (a sent one included): reload it now
+                    Some(effect @ Effect::ReloadThread { .. }) => {
+                        run_effect(&mut app, &client, effect);
+                        dirty = true; // the list rows show the newest message too
+                    }
+                    Some(_) => dirty = true,
+                    None => {}
+                }
             }
             if dirty {
                 refresh(&mut app, &client);

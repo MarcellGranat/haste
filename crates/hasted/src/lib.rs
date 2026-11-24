@@ -9,6 +9,7 @@ pub mod notifier;
 pub mod prompts;
 pub mod scheduler;
 pub mod state;
+pub mod translate;
 
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, Write};

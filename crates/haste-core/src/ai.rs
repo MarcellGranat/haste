@@ -56,6 +56,8 @@ pub enum AiOutcome {
     Ok,
     Timeout,
     Refused,
+    /// The on-device model does not read the language (Hungarian).
+    UnsupportedLanguage,
     InvalidOutput,
     TooLong,
     Gated,
@@ -71,6 +73,7 @@ impl AiOutcome {
             Self::Ok => "ok",
             Self::Timeout => "timeout",
             Self::Refused => "refused",
+            Self::UnsupportedLanguage => "unsupported_language",
             Self::InvalidOutput => "invalid_output",
             Self::TooLong => "too_long",
             Self::Gated => "gated",
@@ -97,7 +100,7 @@ impl AiOutcome {
     /// asked again; a busy model or a runtime error is not).
     #[must_use]
     pub fn is_cacheable(self) -> bool {
-        matches!(self, Self::Ok | Self::Refused)
+        matches!(self, Self::Ok | Self::Refused | Self::UnsupportedLanguage)
     }
 }
 
@@ -828,6 +831,8 @@ mod tests {
         assert_eq!(AiOutcome::from_exit_code(6), AiOutcome::Busy);
         assert_eq!(AiOutcome::from_exit_code(1), AiOutcome::Error);
         assert!(AiOutcome::Refused.is_cacheable() && !AiOutcome::Busy.is_cacheable());
+        // a language the model cannot read is not asked again for the same thread version
+        assert!(AiOutcome::UnsupportedLanguage.is_cacheable());
     }
 
     #[test]

@@ -168,6 +168,9 @@ pub fn outcome_message(outcome: AiOutcome) -> &'static str {
     match outcome {
         AiOutcome::Ok | AiOutcome::InvalidOutput => "the model gave no usable text",
         AiOutcome::Refused => "the model refused this text",
+        AiOutcome::UnsupportedLanguage => {
+            "the local model cannot read this language (set up translate.json)"
+        }
         AiOutcome::Timeout => "the model took too long",
         AiOutcome::Unavailable => "the local model is not available (is apfel on?)",
         AiOutcome::TooLong => "the text is too long for the model",

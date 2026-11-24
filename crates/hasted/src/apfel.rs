@@ -446,10 +446,9 @@ impl Runner for ProcessRunner {
                 text,
             },
             // the on-device model does not read every language (Hungarian is not one): asking
-            // again changes nothing, so it counts as a refusal and is not retried
+            // again changes nothing; the caller may translate and ask again
             Ok((Some(1), _, err)) if err.to_lowercase().contains("unsupported language") => {
-                log::info("apfel", "unsupported_language", &[]);
-                fail(AiOutcome::Refused)
+                fail(AiOutcome::UnsupportedLanguage)
             }
             Ok((Some(code), _, _)) => {
                 let outcome = AiOutcome::from_exit_code(code);
@@ -665,6 +664,11 @@ impl Apfel {
 
     fn schema_path(&self) -> PathBuf {
         self.run_dir.join(APFEL_RUN_SUBDIR).join(TODO_SCHEMA_FILE)
+    }
+
+    /// The Hungarian translator, when `translate.json` asks for one.
+    fn translator(&self) -> Option<crate::translate::Translator> {
+        crate::translate::Translator::load(&self.data_dir)
     }
 
     fn queue_depth(&self) -> usize {
@@ -995,6 +999,126 @@ fn answered(thread: &Ctx, tool: Tool) -> bool {
     tool == Tool::Draft && thread.already_answered()
 }
 
+// ---------------------------------------------------------------------------------------------
+// Translation fallback
+
+/// What the model is told when it reads a machine translation.
+fn translation_note(tool: Tool) -> &'static str {
+    match tool {
+        Tool::Todo => {
+            "\n\nIMPORTANT: the text below was machine-translated from Hungarian to English. \
+             Write the title and notes in English only."
+        }
+        Tool::Draft | Tool::Rewrite => {
+            "\n\nIMPORTANT: the chat below was machine-translated from Hungarian to English, \
+             and your reply will be translated back. Write the reply in English only."
+        }
+    }
+}
+
+/// Build, fit and run one prompt. When the model does not read the language and a translator is
+/// set up (`translate.json`) with enough free memory, run it on an English translation and
+/// translate the answer back.
+fn complete_prompt(
+    apfel: &Apfel,
+    parts: PromptParts,
+    build: &dyn Fn(&PromptParts) -> Prompt,
+    schema: Option<&Path>,
+    tool: Tool,
+) -> CallResult {
+    let runner = apfel.runner();
+    let runner = runner.as_ref();
+    let budget = apfel.settings().prompt_token_budget;
+    let run = |parts: PromptParts, note: &str| -> CallResult {
+        let with_note = |p: &PromptParts| {
+            let mut prompt = build(p);
+            prompt.system.push_str(note);
+            prompt
+        };
+        match fit(runner, parts, budget, &with_note) {
+            Ok(prompt) => runner.complete(&prompt, schema, APFEL_MAX_ANSWER_TOKENS),
+            Err(outcome) => CallResult {
+                outcome,
+                text: String::new(),
+            },
+        }
+    };
+    let first = run(parts.clone(), "");
+    if first.outcome != AiOutcome::UnsupportedLanguage {
+        return first;
+    }
+    let Some(translator) = apfel.translator() else {
+        return first;
+    };
+    let fail = |outcome| CallResult {
+        outcome,
+        text: String::new(),
+    };
+    if !translator.memory_allows(apfel.sampler().sample().free_mb) {
+        log::info("apfel", "translate_gated", &[]);
+        return fail(AiOutcome::Gated);
+    }
+    let timer = log::Timer::start();
+    let Some(session) = translator.session() else {
+        log::warn("apfel", "translate_unavailable", &[]);
+        return fail(AiOutcome::Unavailable);
+    };
+    use crate::translate::Direction::{ToEnglish, ToHungarian};
+    let translated = (|| {
+        Some(PromptParts {
+            earlier: if parts.earlier.is_empty() {
+                Vec::new()
+            } else {
+                vec![session.translate(&parts.earlier.join("\n"), ToEnglish)?]
+            },
+            latest: session.translate(&parts.latest, ToEnglish)?,
+            memories: parts
+                .memories
+                .iter()
+                .map(|m| session.translate(m, ToEnglish))
+                .collect::<Option<Vec<_>>>()?,
+        })
+    })();
+    let Some(translated) = translated else {
+        log::warn("apfel", "translate_failed", &[log::l("step", "to_english")]);
+        return fail(AiOutcome::Error);
+    };
+    let mut result = run(translated, translation_note(tool));
+    if result.outcome == AiOutcome::Ok {
+        let back = match tool {
+            Tool::Todo => ai::parse_todo(&result.text).ok().and_then(|mut todo| {
+                if todo.has_task {
+                    todo.title = session.translate(&todo.title, ToHungarian)?;
+                    todo.notes = session.translate(&todo.notes, ToHungarian)?;
+                }
+                serde_json::to_string(&todo).ok()
+            }),
+            Tool::Draft | Tool::Rewrite => session.translate(&result.text, ToHungarian),
+        };
+        match back {
+            Some(text) => result.text = text,
+            None => {
+                log::warn(
+                    "apfel",
+                    "translate_failed",
+                    &[log::l("step", "to_hungarian")],
+                );
+                result = fail(AiOutcome::Error);
+            }
+        }
+    }
+    log::info(
+        "apfel",
+        "translated",
+        &[
+            log::l("tool", tool.label()),
+            log::n("duration_ms", timer.ms()),
+            log::l("outcome", result.outcome.as_str()),
+        ],
+    );
+    result
+}
+
 /// Run one background job now (the gate was already passed). Returns without storing anything
 /// when the thread went away or the result is already cached.
 fn run_job(state: &State, job: &Job, sample: Sample) {
@@ -1030,8 +1154,6 @@ fn run_job(state: &State, job: &Job, sample: Sample) {
         return;
     };
     let timer = log::Timer::start();
-    let runner = apfel.runner();
-    let settings = apfel.settings();
     let now = now_secs();
     let prompts = &apfel.prompts;
     let chat = ctx.chat;
@@ -1039,21 +1161,8 @@ fn run_job(state: &State, job: &Job, sample: Sample) {
         Tool::Todo => Box::new(move |p| todo_prompt(p, now, chat, prompts)),
         _ => Box::new(move |p| draft_prompt(p, chat, prompts)),
     };
-    let result = match fit(
-        runner.as_ref(),
-        parts,
-        settings.prompt_token_budget,
-        build.as_ref(),
-    ) {
-        Ok(prompt) => {
-            let schema = (job.tool == Tool::Todo).then(|| apfel.schema_path());
-            runner.complete(&prompt, schema.as_deref(), APFEL_MAX_ANSWER_TOKENS)
-        }
-        Err(outcome) => CallResult {
-            outcome,
-            text: String::new(),
-        },
-    };
+    let schema = (job.tool == Tool::Todo).then(|| apfel.schema_path());
+    let result = complete_prompt(apfel, parts, build.as_ref(), schema.as_deref(), job.tool);
     let (outcome, payload) = finish(job.tool, result);
     if outcome.is_cacheable() {
         let _ = state
@@ -1359,17 +1468,9 @@ pub fn rewrite(
         return result(AiOutcome::Error, None);
     };
     let timer = log::Timer::start();
-    let runner = apfel.runner();
-    let settings = apfel.settings();
     let sample = apfel.sampler().sample();
     let build = |p: &PromptParts| rewrite_prompt(p, &instruction, &apfel.prompts);
-    let call = match fit(runner.as_ref(), parts, settings.prompt_token_budget, &build) {
-        Ok(prompt) => runner.complete(&prompt, None, APFEL_MAX_ANSWER_TOKENS),
-        Err(outcome) => CallResult {
-            outcome,
-            text: String::new(),
-        },
-    };
+    let call = complete_prompt(apfel, parts, &build, None, Tool::Rewrite);
     let (outcome, text) = finish(Tool::Rewrite, call);
     record_call(
         state,

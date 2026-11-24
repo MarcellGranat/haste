@@ -2101,6 +2101,25 @@ impl App {
         Some(effect)
     }
 
+    /// Replies of the open thread whose delivery is unknown (NEEDS CHECK): the text of each.
+    #[must_use]
+    pub fn unconfirmed_replies(&self) -> Vec<String> {
+        let Some(reader) = &self.reader else {
+            return Vec::new();
+        };
+        self.proposals
+            .iter()
+            .filter(|p| {
+                p.state == ProposalState::Executing
+                    && p.source_thread_id.as_deref() == Some(reader.view.thread.id.as_str())
+            })
+            .filter_map(|p| match &p.payload {
+                haste_core::proposal::Payload::Draft { body, .. } => Some(body.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// What the open thread shows at its end for a reply that is on its way: the text and the
     /// line that says where it is (counting down, or waiting for the chat to confirm).
     #[must_use]
@@ -6772,5 +6791,36 @@ mod tests {
         let mut app = inbox_app();
         app.show_todo_form("t1", AiState::Unavailable, None);
         assert_eq!(app.remind.as_ref().unwrap().ai_note, None);
+    }
+}
+
+/// Builders the other test modules share.
+#[cfg(test)]
+pub mod tests_support {
+    use haste_core::proposal::{Payload, Proposal, ProposalState};
+
+    /// A draft reply to `thread_id` whose delivery is unknown.
+    #[must_use]
+    pub fn executing_draft(thread_id: &str, body: &str) -> Proposal {
+        Proposal {
+            id: "p9".into(),
+            idempotency_key: "p9".into(),
+            principal_id: "human".into(),
+            payload: Payload::Draft {
+                attachments: Vec::new(),
+                to: None,
+                body: body.into(),
+            },
+            source_thread_id: Some(thread_id.into()),
+            source_thread_version: Some(1),
+            state: ProposalState::Executing,
+            stale: false,
+            created_at: 0,
+            updated_at: 0,
+            expires_at: 100,
+            result: None,
+            project: None,
+            origin_machine: None,
+        }
     }
 }

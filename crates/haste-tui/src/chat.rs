@@ -665,7 +665,12 @@ pub fn layout(messages: &[Message], l: &Layout<'_>) -> (Vec<Line<'static>>, Vec<
 /// A message that is on its way, drawn at the end of the thread in its own colour: yours, on the
 /// right, with `header` ("sending in 4s · U undoes") where a sent one has its time.
 #[must_use]
-pub fn pending_frame(width: usize, body: &str, header: &str) -> Vec<Line<'static>> {
+pub fn pending_frame(
+    width: usize,
+    body: &str,
+    header: &str,
+    colour: ratatui::style::Color,
+) -> Vec<Line<'static>> {
     let max_inner = (width * 3 / 4).clamp(16, 100).saturating_sub(4);
     let rows = inbox::wrap(&inbox::sanitize(body), max_inner);
     let head = format!(" {header} ");
@@ -678,7 +683,7 @@ pub fn pending_frame(width: usize, body: &str, header: &str) -> Vec<Line<'static
         .clamp(10, max_inner.max(10));
     let frame_w = inner + 4;
     let indent = " ".repeat(width.saturating_sub(frame_w));
-    let edge = Style::new().fg(theme::PEACH);
+    let edge = Style::new().fg(colour);
     let used = inbox::width(&head) + 1;
     let mut lines = vec![Line::from(vec![
         Span::raw(indent.clone()),

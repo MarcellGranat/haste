@@ -2853,11 +2853,22 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
     // a reply on its way (counting down, or sent and not confirmed yet) closes the thread
     let ghost = app.ghost_reply();
+    // a reply that may not have gone out stays here, in red, until it is settled in the Outbox
+    let unconfirmed = app.unconfirmed_replies();
+    for body in &unconfirmed {
+        lines.extend(crate::chat::pending_frame(
+            usize::from(inner.width),
+            body,
+            "NOT CONFIRMED: check the chat · Outbox (5): m it arrived, b it did not",
+            theme::DANGER,
+        ));
+    }
     if let Some((body, header)) = &ghost {
         lines.extend(crate::chat::pending_frame(
             usize::from(inner.width),
             body,
             header,
+            theme::PEACH,
         ));
     }
     if lines.is_empty() {
@@ -2877,7 +2888,9 @@ fn draw_reader(frame: &mut Frame<'_>, app: &App, area: Rect) {
         None => 0,
     };
     // reading the newest message: the reply on its way is in view too
-    let scroll = if ghost.is_some() && reader.selected + 1 >= reader.messages.len() {
+    let scroll = if (ghost.is_some() || !unconfirmed.is_empty())
+        && reader.selected + 1 >= reader.messages.len()
+    {
         lines.len().saturating_sub(height)
     } else {
         scroll
@@ -3440,6 +3453,40 @@ mod tests {
             text.contains("sending in 5s") && text.contains("Köszönöm szépen"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_reply_with_unknown_delivery_stays_in_the_thread_in_red_until_settled() {
+        let mut app = App::new();
+        let view = ThreadView {
+            thread: haste_core::model::Thread {
+                id: "t1".into(),
+                source: haste_core::model::Source::Imessage,
+                external_id: "e".into(),
+                subject: "Kata".into(),
+                participants: vec![],
+                last_activity_at: 1,
+                version: 1,
+            },
+            triage: haste_core::model::Triage::new("t1", haste_core::model::ObjectKind::Thread),
+            tags: vec![],
+            last: None,
+            unread: false,
+            replied: false,
+            sender_known: true,
+            sender: None,
+        };
+        app.show_thread(view, vec![], None);
+        let mut p = crate::app::tests_support::executing_draft("t1", "Köszönöm szépen");
+        app.set_proposals(vec![p.clone()]);
+        let text = render(&app);
+        assert!(
+            text.contains("NOT CONFIRMED") && text.contains("Köszönöm szépen"),
+            "{text}"
+        );
+        p.state = haste_core::proposal::ProposalState::Sent;
+        app.set_proposals(vec![p]);
+        assert!(!render(&app).contains("NOT CONFIRMED"));
     }
 
     #[test]

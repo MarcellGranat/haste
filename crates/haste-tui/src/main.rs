@@ -1428,7 +1428,10 @@ fn save_reply(
                 &[
                     haste_core::log::id("proposal", &id),
                     haste_core::log::n("draft_ms", drafted.as_millis().min(1 << 40) as i64),
-                    haste_core::log::n("total_ms", started.elapsed().as_millis().min(1 << 40) as i64),
+                    haste_core::log::n(
+                        "total_ms",
+                        started.elapsed().as_millis().min(1 << 40) as i64,
+                    ),
                 ],
             );
             match previewed {
@@ -1605,7 +1608,8 @@ fn main() -> io::Result<()> {
     })?;
     let events = client.subscribe();
     let mut app = App::new();
-    let (settings, warning) = haste_tui::settings::Settings::load(&haste_tui::settings::Settings::path());
+    let (settings, warning) =
+        haste_tui::settings::Settings::load(&haste_tui::settings::Settings::path());
     app.settings = settings;
     if let Some(w) = warning {
         app.status = format!("config ignored: {w}");

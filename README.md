@@ -854,7 +854,7 @@ attaching files to a reply, saving or previewing attachments, and the Logs tab. 
 Closing the tunnel or the hub being asleep shows up as "cannot reach the daemon". A native network
 mode with a token per device is the next step if this is used a lot.
 
-## AI helpers (apfel, on this Mac only)
+## AI helpers (apfel and a small Ollama model, on this Mac only)
 
 `hasted` can use [`apfel`](https://github.com/Arthur-Ficial/apfel) (Apple's on-device model, no
 network) for three helpers. They are **off** until `apfel.json` in the data folder says so, and they
@@ -875,6 +875,36 @@ restart); a changed install of the binary needs `hasted` restarted as usual.
 | **Draft** | Opening a mail or chat thread (WhatsApp, Messenger, iMessage, Google Chat) from an approved sender (`allowed_senders`, see below) queues a suggested reply. In the reply box it is dimmed text: `Tab`, or `Right` at the end, puts it in; typing drops it. It is never sent by itself. Not made when you already answered the last message; in a chat it is short and informal. |
 | **Rewrite** | `Ctrl-r` in the reply box: custom command, check grammar, more formal, more fluent, more friendly. You see the result and `Enter` takes it (`Ctrl-z` puts your text back; `Esc` leaves it). Runs whenever you ask, whatever the load. |
 | **TODO** | The same approved-sender threads get a structured guess (task or not, title, notes, due date, priority). `t` on a thread in the list, or in the open thread (mail and chat), opens the usual TODO popup filled with it, every field editable; nothing is created until you save it. |
+
+### Hungarian and other languages: a small local Ollama model
+
+Apple's on-device model does not read Hungarian. When `apfel` says so, `hasted` hands the same job
+to a small **local** [Ollama](https://ollama.com) model that does: it writes the draft, the rewrite
+or the TODO itself, in Hungarian, in one request. Nothing leaves the machine. English threads never
+touch it.
+
+```sh
+brew install ollama && ollama pull gemma3:4b      # about 3.3 GB on disk, once
+```
+
+Switch it on with `translate.json` in the data folder (without the file, or with `"enabled":
+false`, nothing changes):
+
+```json
+{ "enabled": true, "model": "gemma3:4b", "min_free_mb": 8192 }
+```
+
+It is built not to stay in memory:
+- `hasted` starts `ollama serve` only for the job (one model, one request at a time, a 4096-token
+  context) and stops it when the job ends. A server that was already running stays, but the model
+  is unloaded.
+- Every request unloads the model at once (`keep_alive` 0), so nothing sits in RAM between jobs.
+- A job is held back, and retried later, when fewer than `min_free_mb` MB (default 8192) are free.
+- A TODO answer must match the TODO schema and pass the same checks as an `apfel` one.
+
+A Hungarian draft takes about 5-10 s, plus up to 30 s the first time while the model loads. A
+larger model such as `gemma3:12b` (about 8 GB, raise `min_free_mb`) writes better Hungarian.
+`haste logs --component apfel` shows `ollama_answered` (tool, duration, outcome) or `ollama_gated`.
 
 **Who is approved.** The same `allowed_senders` file (one regular expression per line,
 case-insensitive) decides for mail and for chats, but it is matched against the newest message that

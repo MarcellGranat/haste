@@ -1002,23 +1002,13 @@ fn answered(thread: &Ctx, tool: Tool) -> bool {
 // ---------------------------------------------------------------------------------------------
 // Translation fallback
 
-/// What the model is told when it reads a machine translation.
-fn translation_note(tool: Tool) -> &'static str {
-    match tool {
-        Tool::Todo => {
-            "\n\nIMPORTANT: the text below was machine-translated from Hungarian to English. \
-             Write the title and notes in English only."
-        }
-        Tool::Draft | Tool::Rewrite => {
-            "\n\nIMPORTANT: the chat below was machine-translated from Hungarian to English, \
-             and your reply will be translated back. Write the reply in English only."
-        }
-    }
-}
+/// What the local model is told when `apfel` cannot read the thread's language.
+const OLLAMA_NOTE: &str = "\n\nThe chat is in Hungarian, possibly without accents. Write your \
+    answer in Hungarian too (informal, correct spelling with all accents), except where the \
+    instructions ask for fixed English words or JSON keys.";
 
-/// Build, fit and run one prompt. When the model does not read the language and a translator is
-/// set up (`translate.json`) with enough free memory, run it on an English translation and
-/// translate the answer back.
+/// Build, fit and run one prompt. When `apfel` does not read the language and the local Ollama
+/// fallback is set up (`translate.json`) with enough free memory, the Ollama model answers.
 fn complete_prompt(
     apfel: &Apfel,
     parts: PromptParts,
@@ -1029,87 +1019,58 @@ fn complete_prompt(
     let runner = apfel.runner();
     let runner = runner.as_ref();
     let budget = apfel.settings().prompt_token_budget;
-    let run = |parts: PromptParts, note: &str| -> CallResult {
+    let run = |parts: PromptParts, note: &str| -> Result<Prompt, AiOutcome> {
         let with_note = |p: &PromptParts| {
             let mut prompt = build(p);
             prompt.system.push_str(note);
             prompt
         };
-        match fit(runner, parts, budget, &with_note) {
-            Ok(prompt) => runner.complete(&prompt, schema, APFEL_MAX_ANSWER_TOKENS),
-            Err(outcome) => CallResult {
-                outcome,
-                text: String::new(),
-            },
-        }
+        fit(runner, parts, budget, &with_note)
     };
-    let first = run(parts.clone(), "");
+    let first = match run(parts.clone(), "") {
+        Ok(prompt) => runner.complete(&prompt, schema, APFEL_MAX_ANSWER_TOKENS),
+        Err(outcome) => CallResult {
+            outcome,
+            text: String::new(),
+        },
+    };
     if first.outcome != AiOutcome::UnsupportedLanguage {
         return first;
     }
-    let Some(translator) = apfel.translator() else {
+    let Some(local) = apfel.translator() else {
         return first;
     };
     let fail = |outcome| CallResult {
         outcome,
         text: String::new(),
     };
-    if !translator.memory_allows(apfel.sampler().sample().free_mb) {
-        log::info("apfel", "translate_gated", &[]);
+    if !local.memory_allows(apfel.sampler().sample().free_mb) {
+        log::info("apfel", "ollama_gated", &[]);
         return fail(AiOutcome::Gated);
     }
+    let prompt = match run(parts, OLLAMA_NOTE) {
+        Ok(prompt) => prompt,
+        Err(outcome) => return fail(outcome),
+    };
     let timer = log::Timer::start();
-    let Some(session) = translator.session() else {
-        log::warn("apfel", "translate_unavailable", &[]);
+    let Some(session) = local.session() else {
+        log::warn("apfel", "ollama_unavailable", &[]);
         return fail(AiOutcome::Unavailable);
     };
-    use crate::translate::Direction::{ToEnglish, ToHungarian};
-    let translated = (|| {
-        Some(PromptParts {
-            earlier: if parts.earlier.is_empty() {
-                Vec::new()
-            } else {
-                vec![session.translate(&parts.earlier.join("\n"), ToEnglish)?]
-            },
-            latest: session.translate(&parts.latest, ToEnglish)?,
-            memories: parts
-                .memories
-                .iter()
-                .map(|m| session.translate(m, ToEnglish))
-                .collect::<Option<Vec<_>>>()?,
-        })
-    })();
-    let Some(translated) = translated else {
-        log::warn("apfel", "translate_failed", &[log::l("step", "to_english")]);
-        return fail(AiOutcome::Error);
+    let schema_text = schema.and_then(|p| std::fs::read_to_string(p).ok());
+    let answer = session.complete(&prompt.system, &prompt.user, schema_text.as_deref());
+    drop(session);
+    let result = match answer {
+        // a TODO must pass the same validation as an `apfel` one; a draft just must not be empty
+        Some(text) if tool != Tool::Todo || ai::parse_todo(&text).is_ok() => CallResult {
+            outcome: AiOutcome::Ok,
+            text,
+        },
+        _ => fail(AiOutcome::Error),
     };
-    let mut result = run(translated, translation_note(tool));
-    if result.outcome == AiOutcome::Ok {
-        let back = match tool {
-            Tool::Todo => ai::parse_todo(&result.text).ok().and_then(|mut todo| {
-                if todo.has_task {
-                    todo.title = session.translate(&todo.title, ToHungarian)?;
-                    todo.notes = session.translate(&todo.notes, ToHungarian)?;
-                }
-                serde_json::to_string(&todo).ok()
-            }),
-            Tool::Draft | Tool::Rewrite => session.translate(&result.text, ToHungarian),
-        };
-        match back {
-            Some(text) => result.text = text,
-            None => {
-                log::warn(
-                    "apfel",
-                    "translate_failed",
-                    &[log::l("step", "to_hungarian")],
-                );
-                result = fail(AiOutcome::Error);
-            }
-        }
-    }
     log::info(
         "apfel",
-        "translated",
+        "ollama_answered",
         &[
             log::l("tool", tool.label()),
             log::n("duration_ms", timer.ms()),

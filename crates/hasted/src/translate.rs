@@ -1,14 +1,13 @@
-//! A minimal Hungarian <-> English translator for the AI helpers, through a small local Ollama
-//! model. Apple's on-device model (`apfel`) does not read Hungarian; when it says so and
-//! `translate.json` exists, the thread text is translated to English, `apfel` answers, and the
-//! answer is translated back.
+//! The local Ollama fallback for the AI helpers. Apple's on-device model (`apfel`) does not read
+//! Hungarian; when it says so and `translate.json` exists, one small local model (`gemma3:4b`)
+//! writes the draft, rewrite or TODO itself, in one request.
 //!
 //! Memory: nothing stays loaded. A [`Session`] starts `ollama serve` only if none is running
 //! (one model, one request at a time, a 4096-token context), every request unloads the model at
-//! once (`--keepalive 0s`), and dropping the session stops the server it started.
+//! once (`keep_alive` 0), and dropping the session stops the server it started.
 //!
 //! `translate.json` in the data folder: `{"enabled": true, "model": "gemma3:4b",
-//! "min_free_mb": 8192}`. A missing file means no translation.
+//! "min_free_mb": 8192}`. A missing file means no fallback.
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -16,7 +15,8 @@ use std::time::{Duration, Instant};
 
 pub const TRANSLATE_SETTINGS_FILE: &str = "translate.json";
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(20);
-const TRANSLATE_TIMEOUT: Duration = Duration::from_secs(90);
+const COMPLETE_TIMEOUT: Duration = Duration::from_secs(100);
+const HOST: &str = "127.0.0.1:11434";
 const DEFAULT_MODEL: &str = "gemma3:4b";
 const DEFAULT_MIN_FREE_MB: u64 = 8192;
 const CANDIDATE_PATHS: [&str; 2] = ["/opt/homebrew/bin/ollama", "/usr/local/bin/ollama"];
@@ -39,32 +39,6 @@ impl Default for Settings {
             min_free_mb: DEFAULT_MIN_FREE_MB,
             program: None,
         }
-    }
-}
-
-/// Which way a text goes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    ToEnglish,
-    ToHungarian,
-}
-
-impl Direction {
-    fn prompt(self, text: &str) -> String {
-        let task = match self {
-            Self::ToEnglish => {
-                "Translate the following chat text from Hungarian to English. The Hungarian may \
-                 lack accents: understand it anyway."
-            }
-            Self::ToHungarian => {
-                "Translate the following text from English to Hungarian, as an informal chat \
-                 message. Use correct Hungarian spelling with all accents."
-            }
-        };
-        format!(
-            "{task} Keep names, numbers, emoji and line breaks. Answer with the translation \
-             only, no comments.\n\n{text}"
-        )
     }
 }
 
@@ -156,21 +130,34 @@ impl Session {
             .is_ok_and(|s| s.success())
     }
 
-    /// The translation of `text`, or `None` on any failure. The text goes in through stdin only.
+    /// One chat request, or `None` on any failure. `schema` (a JSON Schema) forces structured
+    /// output. The text goes in through stdin only, never in the arguments.
     #[must_use]
-    pub fn translate(&self, text: &str, direction: Direction) -> Option<String> {
+    pub fn complete(&self, system: &str, user: &str, schema: Option<&str>) -> Option<String> {
         use std::io::{Read, Write};
-        if text.trim().is_empty() {
-            return Some(String::new());
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "stream": false,
+            "keep_alive": 0,
+            "options": {"num_ctx": 4096, "num_predict": 600, "temperature": 0.4},
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        });
+        if let Some(schema) = schema {
+            body["format"] = serde_json::from_str(schema).ok()?;
         }
-        let mut child = Command::new(&self.program)
-            .args(["run", &self.model, "--keepalive", "0s", "--nowordwrap"])
+        let input = serde_json::to_vec(&body).ok()?;
+        let mut child = Command::new("curl")
+            .args(["-sS", "-f", "--max-time", "90", "-X", "POST"])
+            .args(["-H", "Content-Type: application/json", "-d", "@-"])
+            .arg(format!("http://{HOST}/api/chat"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .ok()?;
-        let input = direction.prompt(text).into_bytes();
         let mut stdin = child.stdin.take()?;
         let writer = std::thread::spawn(move || {
             let _ = stdin.write_all(&input);
@@ -178,10 +165,10 @@ impl Session {
         let mut stdout = child.stdout.take()?;
         let reader = std::thread::spawn(move || {
             let mut out = Vec::new();
-            let _ = stdout.by_ref().take(64 * 1024).read_to_end(&mut out);
+            let _ = stdout.by_ref().take(256 * 1024).read_to_end(&mut out);
             out
         });
-        let deadline = Instant::now() + TRANSLATE_TIMEOUT;
+        let deadline = Instant::now() + COMPLETE_TIMEOUT;
         let ok = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status.success(),
@@ -196,8 +183,12 @@ impl Session {
         };
         let _ = writer.join();
         let out = reader.join().ok()?;
-        let text = clean(&String::from_utf8_lossy(&out));
-        (ok && !text.is_empty()).then_some(text)
+        if !ok {
+            return None;
+        }
+        let reply: serde_json::Value = serde_json::from_slice(&out).ok()?;
+        let text = reply["message"]["content"].as_str()?.trim().to_owned();
+        (!text.is_empty()).then_some(text)
     }
 }
 
@@ -216,28 +207,6 @@ impl Drop for Session {
                 .status();
         }
     }
-}
-
-/// The model's answer without terminal escapes and surrounding blank space.
-fn clean(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut chars = raw.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            // skip an escape sequence: ESC [ ... final letter
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                for n in chars.by_ref() {
-                    if n.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-        } else if c != '\r' {
-            out.push(c);
-        }
-    }
-    out.trim().to_owned()
 }
 
 #[cfg(test)]
@@ -266,18 +235,5 @@ mod tests {
         assert!(t.memory_allows(Some(9000)));
         assert!(!t.memory_allows(Some(4000)));
         assert!(!t.memory_allows(None));
-    }
-
-    #[test]
-    fn terminal_escapes_and_blank_edges_are_removed_from_an_answer() {
-        assert_eq!(clean("\u{1b}[?25l\u{1b}[1GHello\r\n \n"), "Hello");
-    }
-
-    #[test]
-    fn the_prompts_name_the_direction_and_carry_the_text() {
-        assert!(Direction::ToEnglish
-            .prompt("szia")
-            .contains("Hungarian to English"));
-        assert!(Direction::ToHungarian.prompt("hi").ends_with("hi"));
     }
 }
